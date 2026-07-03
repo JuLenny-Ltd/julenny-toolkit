@@ -223,10 +223,12 @@ export function registerPipelineTools(server: McpServer, api: JulennyApiClient) 
           return fail('provide permissionId and/or projectId to scope the upload');
         }
         const resolved = resolveInWorkdir(p.file);
-        const bytes = await readFile(resolved);
+        const { size } = await stat(resolved);
         const INLINE_DATASET_THRESHOLD_BYTES = 15 * 1024 * 1024;
 
-        if (bytes.length < INLINE_DATASET_THRESHOLD_BYTES) {
+        if (size < INLINE_DATASET_THRESHOLD_BYTES) {
+          // Small file: buffering is fine, and multipart needs the bytes in hand.
+          const bytes = await readFile(resolved);
           const form = new FormData();
           form.append('file', new Blob([new Uint8Array(bytes)]), p.file);
           form.append('name', p.name);
@@ -237,10 +239,11 @@ export function registerPipelineTools(server: McpServer, api: JulennyApiClient) 
           if (p.retentionDays !== undefined) form.append('retentionDays', String(p.retentionDays));
           const data = await api.postMultipart('/api/fhe-data-upload', form) as Record<string, unknown>;
           if (!data.datasetId) return fail('upload succeeded but no datasetId returned');
-          return ok({ datasetId: data.datasetId, via: 'multipart', bytes: bytes.length });
+          return ok({ datasetId: data.datasetId, via: 'multipart', bytes: size });
         }
 
         // Large dataset: signed-URL flow (upload-url -> PUT to object storage -> confirm).
+        // The file is STREAMED to object storage, never read fully into memory.
         const urlBody: Record<string, unknown> = { name: p.name };
         if (p.permissionId) urlBody.permissionId = p.permissionId;
         if (p.projectId) urlBody.projectId = p.projectId;
@@ -248,7 +251,7 @@ export function registerPipelineTools(server: McpServer, api: JulennyApiClient) 
         const uploadUrl = urlResp.uploadUrl as string | undefined;
         const datasetId = urlResp.datasetId as string | undefined;
         if (!uploadUrl || !datasetId) return fail(`upload-url did not return uploadUrl/datasetId: ${JSON.stringify(urlResp)}`);
-        await api.putSignedUrl(uploadUrl, bytes);
+        await api.putSignedUrlFromFile(uploadUrl, resolved);
         const confirmBody: Record<string, unknown> = {
           datasetId,
           name: p.name,
@@ -259,7 +262,7 @@ export function registerPipelineTools(server: McpServer, api: JulennyApiClient) 
         if (p.permissionId) confirmBody.permissionId = p.permissionId;
         if (p.projectId) confirmBody.projectId = p.projectId;
         const confirmResp = await api.post('/api/fhe-data-upload/confirm', confirmBody) as Record<string, unknown>;
-        return ok({ datasetId: (confirmResp.datasetId as string) || datasetId, via: 'signed-url', bytes: bytes.length });
+        return ok({ datasetId: (confirmResp.datasetId as string) || datasetId, via: 'signed-url', bytes: size });
       } catch (e) {
         return fail(e instanceof Error ? e.message : 'upload failed');
       }

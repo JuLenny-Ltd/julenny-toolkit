@@ -1,5 +1,8 @@
 // Public default. JULENNY_API_URL is the BARE base URL (e.g. https://julenny.net),
 // with no /mcp and no /api suffix - this client appends /api/... itself.
+import { createReadStream } from 'node:fs';
+import { stat } from 'node:fs/promises';
+
 const DEFAULT_BASE_URL = 'https://julenny.net';
 
 export class JulennyApiClient {
@@ -130,6 +133,32 @@ export class JulennyApiClient {
       // (a raw Node Buffer's ArrayBufferLike backing is rejected by the typing).
       body: new Blob([new Uint8Array(body)]),
     });
+    if (!res.ok) {
+      throw new Error(`signed-URL PUT failed: HTTP ${res.status}`);
+    }
+  }
+
+  /**
+   * PUT a file to an ABSOLUTE pre-signed URL by STREAMING it from disk, so a
+   * large dataset (e.g. the ~190MB decision-tree model bundle) is never held
+   * fully in memory. Content-Length is set explicitly from the file size so the
+   * signed URL still gets a fixed-length PUT (object storage rejects chunked
+   * transfer here). Used for large-dataset uploads; small payloads that must be
+   * signed still use putSignedUrl(buffer).
+   */
+  async putSignedUrlFromFile(
+    absoluteUrl: string,
+    filePath: string,
+    contentType = 'application/octet-stream',
+  ): Promise<void> {
+    const { size } = await stat(filePath);
+    const res = await fetch(absoluteUrl, {
+      method: 'PUT',
+      headers: { 'Content-Type': contentType, 'Content-Length': String(size) },
+      body: createReadStream(filePath) as unknown as BodyInit,
+      // Node/undici requires duplex:'half' when the body is a stream.
+      duplex: 'half',
+    } as RequestInit & { duplex: 'half' });
     if (!res.ok) {
       throw new Error(`signed-URL PUT failed: HTTP ${res.status}`);
     }
