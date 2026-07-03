@@ -1,0 +1,1491 @@
+<Window
+    x:Class="JuLennyFHE.MainWindow"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+    xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+    mc:Ignorable="d"
+    Title="JuLenny FHE Toolkit">
+
+    <Grid RowDefinitions="Auto,*">
+
+        <!-- Top banner: scheme picker (BFV / CKKS). All panels read the
+             selected context spec when calling ToolkitClient. Defaults to
+             BFV; switch to CKKS when working with permissions whose function
+             declares cryptoContextSpec=ckks-default-v1. -->
+        <Border Grid.Row="0"
+                Background="{ThemeResource LayerFillColorDefaultBrush}"
+                BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                BorderThickness="0,0,0,1"
+                Padding="16,8,16,8">
+            <StackPanel Orientation="Horizontal" Spacing="12" VerticalAlignment="Center">
+                <TextBlock Text="Crypto context:"
+                           VerticalAlignment="Center"
+                           Style="{StaticResource BodyStrongTextBlockStyle}" />
+                <ComboBox x:Name="SchemeComboBox"
+                          MinWidth="260"
+                          SelectionChanged="OnSchemeChanged">
+                    <ComboBoxItem Content="BFV  (bfv-default-v1)"   Tag="bfv-default-v1" IsSelected="True" />
+                    <ComboBoxItem Content="CKKS (ckks-default-v1)"  Tag="ckks-default-v1" />
+                    <ComboBoxItem Content="CKKS tree (ckks-tree-v1)" Tag="ckks-tree-v1" />
+                </ComboBox>
+                <TextBlock VerticalAlignment="Center"
+                           Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                           Style="{StaticResource CaptionTextBlockStyle}"
+                           Text="(applies to every operation below; match the permission's function-def cryptoContextSpec)" />
+            </StackPanel>
+        </Border>
+
+        <NavigationView x:Name="NavView"
+                        Grid.Row="1"
+                        IsBackButtonVisible="Collapsed"
+                        IsPaneToggleButtonVisible="True"
+                        PaneDisplayMode="LeftCompact"
+                        OpenPaneLength="240"
+                        SelectionChanged="OnNavSelectionChanged"
+                        Loaded="OnNavLoaded">
+
+        <NavigationView.MenuItems>
+            <NavigationViewItem Content="Home" Tag="home">
+                <NavigationViewItem.Icon>
+                    <FontIcon Glyph="&#xE80F;" />
+                </NavigationViewItem.Icon>
+            </NavigationViewItem>
+            <NavigationViewItem Content="Generate keypair" Tag="keygen">
+                <NavigationViewItem.Icon>
+                    <FontIcon Glyph="&#xE192;" />
+                </NavigationViewItem.Icon>
+            </NavigationViewItem>
+            <NavigationViewItem Content="Signing key" Tag="signing">
+                <NavigationViewItem.Icon>
+                    <FontIcon Glyph="&#xE19F;" />
+                </NavigationViewItem.Icon>
+            </NavigationViewItem>
+            <NavigationViewItem Content="Keysetup share" Tag="keysetup">
+                <NavigationViewItem.Icon>
+                    <FontIcon Glyph="&#xE14B;" />
+                </NavigationViewItem.Icon>
+            </NavigationViewItem>
+            <NavigationViewItem Content="Encrypt data" Tag="encrypt">
+                <NavigationViewItem.Icon>
+                    <FontIcon Glyph="&#xE72E;" />
+                </NavigationViewItem.Icon>
+            </NavigationViewItem>
+            <NavigationViewItem Content="Partial decrypt" Tag="partial">
+                <NavigationViewItem.Icon>
+                    <FontIcon Glyph="&#xE10B;" />
+                </NavigationViewItem.Icon>
+            </NavigationViewItem>
+            <NavigationViewItem Content="Combine result" Tag="combine">
+                <NavigationViewItem.Icon>
+                    <FontIcon Glyph="&#xE890;" />
+                </NavigationViewItem.Icon>
+            </NavigationViewItem>
+            <NavigationViewItem Content="Sum contribute" Tag="sumcontribute">
+                <NavigationViewItem.Icon>
+                    <FontIcon Glyph="&#xE9D5;" />
+                </NavigationViewItem.Icon>
+            </NavigationViewItem>
+            <NavigationViewItem Content="Sum combine" Tag="sumcombine">
+                <NavigationViewItem.Icon>
+                    <FontIcon Glyph="&#xE8EF;" />
+                </NavigationViewItem.Icon>
+            </NavigationViewItem>
+            <NavigationViewItem Content="Rotation contribute" Tag="rotcontribute">
+                <NavigationViewItem.Icon>
+                    <FontIcon Glyph="&#xE7AD;" />
+                </NavigationViewItem.Icon>
+            </NavigationViewItem>
+            <NavigationViewItem Content="Rotation combine" Tag="rotcombine">
+                <NavigationViewItem.Icon>
+                    <FontIcon Glyph="&#xE72C;" />
+                </NavigationViewItem.Icon>
+            </NavigationViewItem>
+            <NavigationViewItem Content="Relin contribute" Tag="relincontribute">
+                <NavigationViewItem.Icon>
+                    <FontIcon Glyph="&#xE81E;" />
+                </NavigationViewItem.Icon>
+            </NavigationViewItem>
+            <NavigationViewItem Content="Relin combine" Tag="relincombine">
+                <NavigationViewItem.Icon>
+                    <FontIcon Glyph="&#xE948;" />
+                </NavigationViewItem.Icon>
+            </NavigationViewItem>
+            <NavigationViewItem Content="Wrap upload (sign)" Tag="wrapenvelope">
+                <NavigationViewItem.Icon>
+                    <FontIcon Glyph="&#xE72D;" />
+                </NavigationViewItem.Icon>
+            </NavigationViewItem>
+            <NavigationViewItem Content="Wrap final keys (sign)" Tag="wrapfinalkeys">
+                <NavigationViewItem.Icon>
+                    <FontIcon Glyph="&#xE73E;" />
+                </NavigationViewItem.Icon>
+            </NavigationViewItem>
+        </NavigationView.MenuItems>
+
+        <ScrollViewer VerticalScrollBarVisibility="Auto"
+                      HorizontalScrollBarVisibility="Disabled">
+            <Grid Padding="40,32,40,32" MaxWidth="900" HorizontalAlignment="Stretch">
+
+                <!-- HOME -->
+                <StackPanel x:Name="HomePanel" Spacing="20" Visibility="Visible">
+                    <StackPanel Orientation="Horizontal" Spacing="16" VerticalAlignment="Center">
+                        <Image Source="ms-appx:///Assets/Logo.png"
+                               Height="56"
+                               VerticalAlignment="Center"
+                               Stretch="Uniform"
+                               AutomationProperties.Name="JuLenny" />
+                        <StackPanel Spacing="4" VerticalAlignment="Center">
+                            <TextBlock Text="JuLenny FHE Toolkit"
+                                       Style="{StaticResource TitleLargeTextBlockStyle}" />
+                            <TextBlock Text="Local cryptographic operations for your privacy-preserving workflows."
+                                       Style="{StaticResource BodyTextBlockStyle}"
+                                       Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                        </StackPanel>
+                    </StackPanel>
+
+                    <Border Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
+                            BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                            BorderThickness="1"
+                            CornerRadius="8"
+                            Padding="20">
+                        <StackPanel Spacing="8">
+                            <TextBlock Text="How this app works"
+                                       Style="{StaticResource SubtitleTextBlockStyle}" />
+                            <TextBlock TextWrapping="Wrap"
+                                       Style="{StaticResource BodyTextBlockStyle}">
+                                This app is offline. It reads input files from your computer, performs the cryptographic
+                                operation locally, and writes output files back to your computer. The app never connects
+                                to the platform itself. Use the platform's web interface or API to move files in and out.
+                            </TextBlock>
+                            <TextBlock TextWrapping="Wrap"
+                                       Style="{StaticResource BodyTextBlockStyle}"
+                                       Margin="0,4,0,0">
+                                Pick an action from the navigation pane on the left.
+                            </TextBlock>
+                        </StackPanel>
+                    </Border>
+
+                    <Border Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
+                            BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                            BorderThickness="1"
+                            CornerRadius="8"
+                            Padding="20">
+                        <StackPanel Spacing="6">
+                            <TextBlock Text="Local status"
+                                       Style="{StaticResource SubtitleTextBlockStyle}" />
+                            <TextBox x:Name="HomeStatusText"
+                                     Text="(loading...)"
+                                     IsReadOnly="True"
+                                     AcceptsReturn="True"
+                                     TextWrapping="Wrap"
+                                     FontFamily="Cascadia Mono, Consolas, monospace"
+                                     BorderThickness="0"
+                                     Background="Transparent"
+                                     Padding="0"
+                                     IsSpellCheckEnabled="False" />
+                        </StackPanel>
+                    </Border>
+                </StackPanel>
+
+                <!-- GENERATE KEYPAIR -->
+                <StackPanel x:Name="KeygenPanel" Spacing="20" Visibility="Collapsed">
+                    <TextBlock Text="Generate FHE Keypair"
+                               Style="{StaticResource TitleLargeTextBlockStyle}" />
+                    <TextBlock TextWrapping="Wrap"
+                               Style="{StaticResource BodyTextBlockStyle}"
+                               Foreground="{ThemeResource TextFillColorSecondaryBrush}">
+                        Generate a new long-lived encryption keypair for your company. The public part of the
+                        keypair gets registered with the platform; the private part stays on this machine.
+                        Run this once per company.
+                    </TextBlock>
+
+                    <Border Background="{ThemeResource SystemFillColorCautionBackgroundBrush}"
+                            BorderBrush="{ThemeResource SystemFillColorCautionBrush}"
+                            BorderThickness="1"
+                            CornerRadius="6"
+                            Padding="16">
+                        <TextBlock TextWrapping="Wrap" Style="{StaticResource BodyTextBlockStyle}">
+                            <Bold>Warning:</Bold> If you already have a keypair, generating a new one replaces it.
+                            Any data encrypted under the previous keypair becomes unrecoverable.
+                        </TextBlock>
+                    </Border>
+
+                    <StackPanel Spacing="8">
+                        <TextBlock Text="Output folder for the public key file"
+                                   Style="{StaticResource BodyStrongTextBlockStyle}" />
+                        <Grid ColumnDefinitions="*,Auto" ColumnSpacing="8">
+                            <TextBox x:Name="KeygenOutputDir" Grid.Column="0"
+                                     PlaceholderText="Click Browse to pick a folder"
+                                     IsReadOnly="True" />
+                            <Button Grid.Column="1" Content="Browse..."
+                                    Click="OnKeygenBrowseClicked" />
+                        </Grid>
+                    </StackPanel>
+
+                    <StackPanel Orientation="Horizontal" Spacing="12">
+                        <Button x:Name="KeygenGoButton"
+                                Content="Generate keypair"
+                                Style="{StaticResource AccentButtonStyle}"
+                                Click="OnKeygenGoClicked" />
+                    </StackPanel>
+
+                    <Border x:Name="KeygenResultBorder"
+                            Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
+                            BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                            BorderThickness="1"
+                            CornerRadius="6"
+                            Padding="16"
+                            Visibility="Collapsed">
+                        <TextBox x:Name="KeygenResultText"
+                                 IsReadOnly="True"
+                                 AcceptsReturn="True"
+                                 TextWrapping="Wrap"
+                                 FontFamily="Cascadia Mono, Consolas, monospace"
+                                 BorderThickness="0"
+                                 Background="Transparent"
+                                 Padding="0"
+                                 IsSpellCheckEnabled="False" />
+                    </Border>
+                </StackPanel>
+
+                <!-- SIGNING KEY -->
+                <StackPanel x:Name="SigningPanel" Spacing="20" Visibility="Collapsed">
+                    <TextBlock Text="Signing key (one-time setup per company)"
+                               Style="{StaticResource TitleLargeTextBlockStyle}" />
+                    <TextBlock TextWrapping="Wrap"
+                               Style="{StaticResource BodyTextBlockStyle}"
+                               Foreground="{ThemeResource TextFillColorSecondaryBrush}">
+                        Generates a small identity key for your company. The PUBLIC half gets uploaded to the
+                        platform (Settings &gt; Signing key registration); the SECRET half stays on this machine
+                        and is used to prove that uploads you send to the platform actually came from you,
+                        not from an impostor. Do this once per company.
+                    </TextBlock>
+
+                    <StackPanel Spacing="8">
+                        <TextBlock Text="Output folder"
+                                   Style="{StaticResource BodyStrongTextBlockStyle}" />
+                        <Grid ColumnDefinitions="*,Auto" ColumnSpacing="8">
+                            <TextBox x:Name="SigningOutputDir" Grid.Column="0"
+                                     PlaceholderText="Click Browse to pick where signing_secret_key.bin and signing_public_key.bin will be written"
+                                     IsReadOnly="True" />
+                            <Button Grid.Column="1" Content="Browse..."
+                                    Click="OnSigningBrowseClicked" />
+                        </Grid>
+                    </StackPanel>
+
+                    <Button x:Name="SigningGoButton"
+                            Content="Generate signing keypair"
+                            Click="OnSigningGoClicked"
+                            Style="{StaticResource AccentButtonStyle}" />
+
+                    <Border x:Name="SigningResultBorder"
+                            Background="{ThemeResource LayerFillColorDefaultBrush}"
+                            BorderBrush="{ThemeResource ControlStrokeColorDefaultBrush}"
+                            BorderThickness="1"
+                            CornerRadius="6"
+                            Padding="16"
+                            Visibility="Collapsed">
+                        <TextBox x:Name="SigningResultText"
+                                 IsReadOnly="True"
+                                 AcceptsReturn="True"
+                                 TextWrapping="Wrap"
+                                 FontFamily="Cascadia Mono, Consolas, monospace"
+                                 BorderThickness="0"
+                                 Background="Transparent"
+                                 Padding="0"
+                                 IsSpellCheckEnabled="False" />
+                    </Border>
+                </StackPanel>
+
+                <!-- KEYSETUP SHARE -->
+                <StackPanel x:Name="KeysetupPanel" Spacing="20" Visibility="Collapsed">
+                    <TextBlock Text="Keysetup share (join as second party)"
+                               Style="{StaticResource TitleLargeTextBlockStyle}" />
+                    <TextBlock TextWrapping="Wrap"
+                               Style="{StaticResource BodyTextBlockStyle}"
+                               Foreground="{ThemeResource TextFillColorSecondaryBrush}">
+                        Use this screen when another company has started a joint keysetup with you and posted
+                        their public-key contribution. You chain your fresh secret onto their public part to
+                        derive the joint public key both of you will use for encryption. Your secret share
+                        stays on this machine; nobody else ever sees it.
+                    </TextBlock>
+
+                    <!-- Peer's public-key contribution -->
+                    <StackPanel Spacing="8">
+                        <TextBlock Text="Peer's public-key contribution"
+                                   Style="{StaticResource BodyStrongTextBlockStyle}" />
+                        <Grid ColumnDefinitions="*,Auto" ColumnSpacing="8">
+                            <TextBox x:Name="KeysetupPeerFile" Grid.Column="0"
+                                     PlaceholderText="Click Browse to pick the file the peer uploaded to the platform"
+                                     IsReadOnly="True" />
+                            <Button Grid.Column="1" Content="Browse..."
+                                    Click="OnKeysetupPeerBrowseClicked" />
+                        </Grid>
+                    </StackPanel>
+
+                    <!-- Output folder (writes both files into it) -->
+                    <StackPanel Spacing="8">
+                        <TextBlock Text="Output folder"
+                                   Style="{StaticResource BodyStrongTextBlockStyle}" />
+                        <Grid ColumnDefinitions="*,Auto" ColumnSpacing="8">
+                            <TextBox x:Name="KeysetupOutputDir" Grid.Column="0"
+                                     PlaceholderText="Click Browse to pick where to save my_share_secret.bin + joint_public_key.bin"
+                                     IsReadOnly="True" />
+                            <Button Grid.Column="1" Content="Browse..."
+                                    Click="OnKeysetupOutputBrowseClicked" />
+                        </Grid>
+                    </StackPanel>
+
+                    <Button x:Name="KeysetupGoButton" Content="Derive joint key"
+                            Click="OnKeysetupGoClicked"
+                            Style="{StaticResource AccentButtonStyle}" />
+
+                    <Border x:Name="KeysetupResultBorder"
+                            Background="{ThemeResource LayerFillColorDefaultBrush}"
+                            BorderBrush="{ThemeResource ControlStrokeColorDefaultBrush}"
+                            BorderThickness="1"
+                            CornerRadius="6"
+                            Padding="16"
+                            Visibility="Collapsed">
+                        <TextBox x:Name="KeysetupResultText"
+                                 IsReadOnly="True"
+                                 AcceptsReturn="True"
+                                 TextWrapping="Wrap"
+                                 FontFamily="Cascadia Mono, Consolas, monospace"
+                                 BorderThickness="0"
+                                 Background="Transparent"
+                                 Padding="0"
+                                 IsSpellCheckEnabled="False" />
+                    </Border>
+                </StackPanel>
+
+                <!-- ENCRYPT -->
+                <StackPanel x:Name="EncryptPanel" Spacing="20" Visibility="Collapsed">
+                    <TextBlock Text="Encrypt Data"
+                               Style="{StaticResource TitleLargeTextBlockStyle}" />
+                    <TextBlock TextWrapping="Wrap"
+                               Style="{StaticResource BodyTextBlockStyle}"
+                               Foreground="{ThemeResource TextFillColorSecondaryBrush}">
+                        Encrypt your data under a joint public key. Pick how you want to specify the
+                        encoding rules: either point at a function-definition file you downloaded from the
+                        platform (recommended), or set the encoding manually.
+                    </TextBlock>
+
+                    <!-- Mode selector -->
+                    <StackPanel Spacing="8">
+                        <TextBlock Text="How to specify the encoding"
+                                   Style="{StaticResource BodyStrongTextBlockStyle}" />
+                        <StackPanel Orientation="Horizontal" Spacing="20">
+                            <RadioButton x:Name="EncryptModeARadio"
+                                         Content="From function definition file (recommended)"
+                                         GroupName="EncryptMode"
+                                         Checked="OnEncryptModeChanged" />
+                            <RadioButton x:Name="EncryptModeBRadio"
+                                         Content="Set manually"
+                                         GroupName="EncryptMode"
+                                         Checked="OnEncryptModeChanged" />
+                        </StackPanel>
+                        <TextBlock TextWrapping="Wrap"
+                                   Style="{StaticResource CaptionTextBlockStyle}"
+                                   Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                   Text="The function-definition file is a signed document the platform produces for each function. It declares exactly how your input data should be encoded, so both you and your collaboration partner produce compatible ciphertexts." />
+                    </StackPanel>
+
+                    <!-- MODE A: function-def driven -->
+                    <StackPanel x:Name="EncryptModeAControls" Spacing="8" Visibility="Visible">
+                        <TextBlock Text="Function definition file"
+                                   Style="{StaticResource BodyStrongTextBlockStyle}" />
+                        <Grid ColumnDefinitions="*,Auto" ColumnSpacing="8">
+                            <TextBox x:Name="EncryptFunctionDefFile" Grid.Column="0"
+                                     PlaceholderText="Pick the function-definition JSON file you downloaded from the platform"
+                                     IsReadOnly="True" />
+                            <Button Grid.Column="1" Content="Browse..."
+                                    Click="OnEncryptFunctionDefBrowseClicked" />
+                        </Grid>
+                        <TextBlock Text="Which input this dataset is for"
+                                   Style="{StaticResource BodyStrongTextBlockStyle}" />
+                        <ComboBox x:Name="EncryptInputNameCombo"
+                                  HorizontalAlignment="Stretch"
+                                  PlaceholderText="Pick a function-definition file first" />
+                        <TextBlock x:Name="EncryptInputNameDescription"
+                                   TextWrapping="Wrap"
+                                   Style="{StaticResource CaptionTextBlockStyle}"
+                                   Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                   Text="Each function defines one or more named inputs (e.g., 'dataset_a' for the data owner, 'dataset_b' for the analyst). Pick the one matching your role." />
+                    </StackPanel>
+
+                    <!-- MODE B: manual schema -->
+                    <StackPanel x:Name="EncryptModeBControls" Spacing="8" Visibility="Collapsed">
+                        <TextBlock Text="Encoding schema"
+                                   Style="{StaticResource BodyStrongTextBlockStyle}" />
+                        <ComboBox x:Name="EncryptSchemaCombo"
+                                  HorizontalAlignment="Stretch"
+                                  SelectionChanged="OnEncryptSchemaChanged">
+                            <ComboBoxItem Content="Indicator vector (hashed records)"
+                                          Tag="indicator-hash" />
+                            <ComboBoxItem Content="Packed integers (one per line)"
+                                          Tag="packed-int" />
+                        </ComboBox>
+                        <TextBlock x:Name="EncryptSchemaDescription"
+                                   TextWrapping="Wrap"
+                                   Style="{StaticResource CaptionTextBlockStyle}"
+                                   Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                   Text="Each record (one line in your input file) becomes a 1 at the slot whose position is the hash of that record. Used for set membership, intersection, and search functions like joint-record-overlap. Input can be plain text (one record per line), CSV, TSV, or any line-separated format." />
+
+                        <StackPanel x:Name="EncryptIndicatorOptions" Spacing="8" Visibility="Visible">
+                            <CheckBox x:Name="EncryptSkipHeader"
+                                      Content="Skip first line (it's a header row)"
+                                      IsChecked="False" />
+                            <TextBlock Text="Field separator and columns (optional, only relevant for structured records like CSV/TSV)"
+                                       Style="{StaticResource BodyStrongTextBlockStyle}"
+                                       TextWrapping="Wrap" />
+                            <Grid ColumnDefinitions="Auto,*" ColumnSpacing="8">
+                                <ComboBox x:Name="EncryptSeparator" Grid.Column="0" SelectedIndex="0">
+                                    <ComboBoxItem Content="No separator (hash whole line)" Tag="none" />
+                                    <ComboBoxItem Content="Comma (CSV)" Tag="comma" />
+                                    <ComboBoxItem Content="Tab (TSV)" Tag="tab" />
+                                    <ComboBoxItem Content="Semicolon" Tag="semicolon" />
+                                    <ComboBoxItem Content="Pipe (|)" Tag="pipe" />
+                                </ComboBox>
+                                <TextBox x:Name="EncryptColumns" Grid.Column="1"
+                                         Text="all"
+                                         PlaceholderText="Columns to include: 'all' or e.g. '1,2'" />
+                            </Grid>
+                            <TextBlock Text="If your input file is plain lines with no separator, pick 'No separator'. If it's CSV/TSV/etc., pick the separator and optionally list 1-based column indices to include in the hash (or 'all' to use every column)."
+                                       Style="{StaticResource CaptionTextBlockStyle}"
+                                       Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                       TextWrapping="Wrap" />
+                        </StackPanel>
+                    </StackPanel>
+
+                    <!-- Input file (shared by both modes) -->
+                    <StackPanel Spacing="8">
+                        <TextBlock x:Name="EncryptInputLabel"
+                                   Text="Input file"
+                                   Style="{StaticResource BodyStrongTextBlockStyle}" />
+                        <Grid ColumnDefinitions="*,Auto" ColumnSpacing="8">
+                            <TextBox x:Name="EncryptInputFile" Grid.Column="0"
+                                     PlaceholderText="Click Browse to pick a file"
+                                     IsReadOnly="True" />
+                            <Button Grid.Column="1" Content="Browse..."
+                                    Click="OnEncryptInputBrowseClicked" />
+                        </Grid>
+                    </StackPanel>
+
+                    <!-- Joint public key + output (shared by all schemas) -->
+                    <StackPanel Spacing="8">
+                        <TextBlock Text="Joint public key file"
+                                   Style="{StaticResource BodyStrongTextBlockStyle}" />
+                        <Grid ColumnDefinitions="*,Auto" ColumnSpacing="8">
+                            <TextBox x:Name="EncryptKeyFile" Grid.Column="0"
+                                     PlaceholderText="Pick the joint public key file"
+                                     IsReadOnly="True" />
+                            <Button Grid.Column="1" Content="Browse..."
+                                    Click="OnEncryptKeyBrowseClicked" />
+                        </Grid>
+                    </StackPanel>
+
+                    <StackPanel Spacing="8">
+                        <TextBlock Text="Output ciphertext file"
+                                   Style="{StaticResource BodyStrongTextBlockStyle}" />
+                        <Grid ColumnDefinitions="*,Auto" ColumnSpacing="8">
+                            <TextBox x:Name="EncryptOutputFile" Grid.Column="0"
+                                     PlaceholderText="Where to save the encrypted output"
+                                     IsReadOnly="True" />
+                            <Button Grid.Column="1" Content="Save as..."
+                                    Click="OnEncryptOutputBrowseClicked" />
+                        </Grid>
+                    </StackPanel>
+
+                    <StackPanel Orientation="Horizontal" Spacing="12">
+                        <Button x:Name="EncryptGoButton"
+                                Content="Encrypt"
+                                Style="{StaticResource AccentButtonStyle}"
+                                Click="OnEncryptGoClicked" />
+                    </StackPanel>
+
+                    <Border x:Name="EncryptResultBorder"
+                            Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
+                            BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                            BorderThickness="1"
+                            CornerRadius="6"
+                            Padding="16"
+                            Visibility="Collapsed">
+                        <TextBox x:Name="EncryptResultText"
+                                 IsReadOnly="True"
+                                 AcceptsReturn="True"
+                                 TextWrapping="Wrap"
+                                 FontFamily="Cascadia Mono, Consolas, monospace"
+                                 BorderThickness="0"
+                                 Background="Transparent"
+                                 Padding="0"
+                                 IsSpellCheckEnabled="False" />
+                    </Border>
+                </StackPanel>
+
+                <!-- PARTIAL DECRYPT -->
+                <StackPanel x:Name="PartialPanel" Spacing="20" Visibility="Collapsed">
+                    <TextBlock Text="Compute Partial Decryption"
+                               Style="{StaticResource TitleLargeTextBlockStyle}" />
+                    <TextBlock TextWrapping="Wrap"
+                               Style="{StaticResource BodyTextBlockStyle}"
+                               Foreground="{ThemeResource TextFillColorSecondaryBrush}">
+                        Compute your share of the decryption for an encrypted result from the platform.
+                        Your partial alone reveals nothing; the other party combines it with their own to
+                        see the answer.
+                    </TextBlock>
+
+                    <StackPanel Spacing="8">
+                        <TextBlock Text="Result ciphertext file (from the platform)"
+                                   Style="{StaticResource BodyStrongTextBlockStyle}" />
+                        <Grid ColumnDefinitions="*,Auto" ColumnSpacing="8">
+                            <TextBox x:Name="PartialInputFile" Grid.Column="0"
+                                     PlaceholderText="Pick the result ciphertext"
+                                     IsReadOnly="True" />
+                            <Button Grid.Column="1" Content="Browse..."
+                                    Click="OnPartialInputBrowseClicked" />
+                        </Grid>
+                    </StackPanel>
+
+                    <StackPanel Spacing="8">
+                        <TextBlock Text="Your secret key share"
+                                   Style="{StaticResource BodyStrongTextBlockStyle}" />
+                        <Grid ColumnDefinitions="*,Auto" ColumnSpacing="8">
+                            <TextBox x:Name="PartialKeyFile" Grid.Column="0"
+                                     PlaceholderText="Pick your secret key file"
+                                     IsReadOnly="True" />
+                            <Button Grid.Column="1" Content="Browse..."
+                                    Click="OnPartialKeyBrowseClicked" />
+                        </Grid>
+                    </StackPanel>
+
+                    <StackPanel Spacing="8">
+                        <TextBlock Text="Output partial-decryption file"
+                                   Style="{StaticResource BodyStrongTextBlockStyle}" />
+                        <Grid ColumnDefinitions="*,Auto" ColumnSpacing="8">
+                            <TextBox x:Name="PartialOutputFile" Grid.Column="0"
+                                     PlaceholderText="Where to save your partial"
+                                     IsReadOnly="True" />
+                            <Button Grid.Column="1" Content="Save as..."
+                                    Click="OnPartialOutputBrowseClicked" />
+                        </Grid>
+                        <CheckBox x:Name="PartialLeadCheckbox"
+                                  Content="I am the lead party in this protocol (set by exactly one participant)" />
+                    </StackPanel>
+
+                    <StackPanel Orientation="Horizontal" Spacing="12">
+                        <Button x:Name="PartialGoButton"
+                                Content="Compute partial"
+                                Style="{StaticResource AccentButtonStyle}"
+                                Click="OnPartialGoClicked" />
+                    </StackPanel>
+
+                    <Border x:Name="PartialResultBorder"
+                            Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
+                            BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                            BorderThickness="1"
+                            CornerRadius="6"
+                            Padding="16"
+                            Visibility="Collapsed">
+                        <TextBox x:Name="PartialResultText"
+                                 IsReadOnly="True"
+                                 AcceptsReturn="True"
+                                 TextWrapping="Wrap"
+                                 FontFamily="Cascadia Mono, Consolas, monospace"
+                                 BorderThickness="0"
+                                 Background="Transparent"
+                                 Padding="0"
+                                 IsSpellCheckEnabled="False" />
+                    </Border>
+                </StackPanel>
+
+                <!-- COMBINE -->
+                <StackPanel x:Name="CombinePanel" Spacing="20" Visibility="Collapsed">
+                    <TextBlock Text="Combine Partial Decryptions"
+                               Style="{StaticResource TitleLargeTextBlockStyle}" />
+                    <TextBlock TextWrapping="Wrap"
+                               Style="{StaticResource BodyTextBlockStyle}"
+                               Foreground="{ThemeResource TextFillColorSecondaryBrush}">
+                        Combine the partial decryptions from every party into the plaintext result.
+                        Done locally on this machine; the plaintext is never sent anywhere.
+                    </TextBlock>
+
+                    <StackPanel Spacing="8">
+                        <TextBlock Text="Partial-decryption files (one per party)"
+                                   Style="{StaticResource BodyStrongTextBlockStyle}" />
+                        <Grid ColumnDefinitions="*,Auto" ColumnSpacing="8">
+                            <TextBox x:Name="CombinePartialsBox" Grid.Column="0"
+                                     PlaceholderText="Pick all partial files (Ctrl+click for multiple)"
+                                     IsReadOnly="True"
+                                     TextWrapping="Wrap"
+                                     AcceptsReturn="True"
+                                     MinHeight="72" />
+                            <Button Grid.Column="1" Content="Browse..."
+                                    Click="OnCombineBrowseClicked"
+                                    VerticalAlignment="Top" />
+                        </Grid>
+                    </StackPanel>
+
+                    <StackPanel Orientation="Horizontal" Spacing="12">
+                        <Button x:Name="CombineGoButton"
+                                Content="Combine and reveal"
+                                Style="{StaticResource AccentButtonStyle}"
+                                Click="OnCombineGoClicked" />
+                    </StackPanel>
+
+                    <Border x:Name="CombineResultBorder"
+                            Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
+                            BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                            BorderThickness="1"
+                            CornerRadius="6"
+                            Padding="16"
+                            Visibility="Collapsed">
+                        <StackPanel Spacing="8">
+                            <TextBlock Text="Result"
+                                       Style="{StaticResource SubtitleTextBlockStyle}" />
+                            <TextBox x:Name="CombineResultText"
+                                     IsReadOnly="True"
+                                     AcceptsReturn="True"
+                                     TextWrapping="Wrap"
+                                     FontFamily="Cascadia Mono, Consolas, monospace"
+                                     BorderThickness="0"
+                                     Background="Transparent"
+                                     Padding="0"
+                                     IsSpellCheckEnabled="False" />
+                        </StackPanel>
+                    </Border>
+                </StackPanel>
+
+                <!-- SUM COMBINE -->
+                <StackPanel x:Name="SumCombinePanel" Spacing="20" Visibility="Collapsed">
+                    <TextBlock Text="Sum key: final combine"
+                               Style="{StaticResource TitleLargeTextBlockStyle}" />
+                    <TextBlock TextWrapping="Wrap"
+                               Style="{StaticResource BodyTextBlockStyle}"
+                               Foreground="{ThemeResource TextFillColorSecondaryBrush}">
+                        Combines both parties' sum-key contributions into the final sum key for this
+                        collaboration. Both parties run this step independently with the same inputs and
+                        produce byte-identical output, which the platform verifies. Needed for any function
+                        that does slot summation (like joint-record-overlap's final tally step).
+                    </TextBlock>
+
+                    <StackPanel Spacing="8">
+                        <TextBlock Text="Party A's contribution (downloaded from platform)"
+                                   Style="{StaticResource BodyStrongTextBlockStyle}" />
+                        <Grid ColumnDefinitions="*,Auto" ColumnSpacing="8">
+                            <TextBox x:Name="SumCombineShareA" Grid.Column="0"
+                                     PlaceholderText="Click Browse to pick party A's sum-key contribution"
+                                     IsReadOnly="True" />
+                            <Button Grid.Column="1" Content="Browse..."
+                                    Click="OnSumCombineShareABrowseClicked" />
+                        </Grid>
+                    </StackPanel>
+
+                    <StackPanel Spacing="8">
+                        <TextBlock Text="Party B's contribution (downloaded from platform)"
+                                   Style="{StaticResource BodyStrongTextBlockStyle}" />
+                        <Grid ColumnDefinitions="*,Auto" ColumnSpacing="8">
+                            <TextBox x:Name="SumCombineShareB" Grid.Column="0"
+                                     PlaceholderText="Click Browse to pick party B's sum-key contribution"
+                                     IsReadOnly="True" />
+                            <Button Grid.Column="1" Content="Browse..."
+                                    Click="OnSumCombineShareBBrowseClicked" />
+                        </Grid>
+                    </StackPanel>
+
+                    <StackPanel Spacing="8">
+                        <TextBlock Text="Joint public key (downloaded from platform)"
+                                   Style="{StaticResource BodyStrongTextBlockStyle}" />
+                        <Grid ColumnDefinitions="*,Auto" ColumnSpacing="8">
+                            <TextBox x:Name="SumCombineJointPk" Grid.Column="0"
+                                     PlaceholderText="Click Browse to pick the joint public key"
+                                     IsReadOnly="True" />
+                            <Button Grid.Column="1" Content="Browse..."
+                                    Click="OnSumCombineJointPkBrowseClicked" />
+                        </Grid>
+                    </StackPanel>
+
+                    <StackPanel Spacing="8">
+                        <TextBlock Text="Output file (the final sum key)"
+                                   Style="{StaticResource BodyStrongTextBlockStyle}" />
+                        <Grid ColumnDefinitions="*,Auto" ColumnSpacing="8">
+                            <TextBox x:Name="SumCombineOutput" Grid.Column="0"
+                                     PlaceholderText="Where to save the final sum key"
+                                     IsReadOnly="True" />
+                            <Button Grid.Column="1" Content="Save as..."
+                                    Click="OnSumCombineOutputBrowseClicked" />
+                        </Grid>
+                    </StackPanel>
+
+                    <Button x:Name="SumCombineGoButton"
+                            Content="Combine"
+                            Click="OnSumCombineGoClicked"
+                            Style="{StaticResource AccentButtonStyle}" />
+
+                    <Border x:Name="SumCombineResultBorder"
+                            Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
+                            BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                            BorderThickness="1"
+                            CornerRadius="6"
+                            Padding="16"
+                            Visibility="Collapsed">
+                        <TextBox x:Name="SumCombineResultText"
+                                 IsReadOnly="True"
+                                 AcceptsReturn="True"
+                                 TextWrapping="Wrap"
+                                 FontFamily="Cascadia Mono, Consolas, monospace"
+                                 BorderThickness="0"
+                                 Background="Transparent"
+                                 Padding="0"
+                                 IsSpellCheckEnabled="False" />
+                    </Border>
+                </StackPanel>
+
+                <!-- SUM CONTRIBUTE -->
+                <StackPanel x:Name="SumContributePanel" Spacing="20" Visibility="Collapsed">
+                    <TextBlock Text="Sum key: your contribution"
+                               Style="{StaticResource TitleLargeTextBlockStyle}" />
+                    <TextBlock TextWrapping="Wrap"
+                               Style="{StaticResource BodyTextBlockStyle}"
+                               Foreground="{ThemeResource TextFillColorSecondaryBrush}">
+                        Produces your party's contribution to the joint sum key. The lead party (the one who
+                        initiated the collaboration's keysetup) generates first; the main party chains on the
+                        lead's contribution. Pick your role based on what the platform's collaboration page
+                        tells you.
+                    </TextBlock>
+
+                    <StackPanel Spacing="8">
+                        <TextBlock Text="My role"
+                                   Style="{StaticResource BodyStrongTextBlockStyle}" />
+                        <ComboBox x:Name="SumContributeRole"
+                                  HorizontalAlignment="Stretch"
+                                  SelectionChanged="OnSumContributeRoleChanged">
+                            <ComboBoxItem Content="Lead (I go first; no peer input needed)" Tag="lead" />
+                            <ComboBoxItem Content="Main (I chain on the lead's contribution)" Tag="main" />
+                        </ComboBox>
+                    </StackPanel>
+
+                    <StackPanel Spacing="8">
+                        <TextBlock Text="My FHE secret share (from Generate keypair / Keysetup share)"
+                                   Style="{StaticResource BodyStrongTextBlockStyle}" />
+                        <Grid ColumnDefinitions="*,Auto" ColumnSpacing="8">
+                            <TextBox x:Name="SumContributeSecretKey" Grid.Column="0"
+                                     PlaceholderText="Click Browse to pick your FHE secret-key file"
+                                     IsReadOnly="True" />
+                            <Button Grid.Column="1" Content="Browse..."
+                                    Click="OnSumContributeSecretKeyBrowseClicked" />
+                        </Grid>
+                    </StackPanel>
+
+                    <!-- Only needed when role=main -->
+                    <StackPanel x:Name="SumContributeMainFields" Spacing="8" Visibility="Collapsed">
+                        <TextBlock Text="Peer's contribution (downloaded from platform)"
+                                   Style="{StaticResource BodyStrongTextBlockStyle}" />
+                        <Grid ColumnDefinitions="*,Auto" ColumnSpacing="8">
+                            <TextBox x:Name="SumContributePeerShare" Grid.Column="0"
+                                     PlaceholderText="Click Browse to pick the lead's sum-key contribution"
+                                     IsReadOnly="True" />
+                            <Button Grid.Column="1" Content="Browse..."
+                                    Click="OnSumContributePeerShareBrowseClicked" />
+                        </Grid>
+
+                        <TextBlock Text="Joint public key (downloaded from platform)"
+                                   Style="{StaticResource BodyStrongTextBlockStyle}" />
+                        <Grid ColumnDefinitions="*,Auto" ColumnSpacing="8">
+                            <TextBox x:Name="SumContributeJointPk" Grid.Column="0"
+                                     PlaceholderText="Click Browse to pick the joint public key"
+                                     IsReadOnly="True" />
+                            <Button Grid.Column="1" Content="Browse..."
+                                    Click="OnSumContributeJointPkBrowseClicked" />
+                        </Grid>
+                    </StackPanel>
+
+                    <StackPanel Spacing="8">
+                        <TextBlock Text="Output file"
+                                   Style="{StaticResource BodyStrongTextBlockStyle}" />
+                        <Grid ColumnDefinitions="*,Auto" ColumnSpacing="8">
+                            <TextBox x:Name="SumContributeOutput" Grid.Column="0"
+                                     PlaceholderText="Where to save your contribution"
+                                     IsReadOnly="True" />
+                            <Button Grid.Column="1" Content="Save as..."
+                                    Click="OnSumContributeOutputBrowseClicked" />
+                        </Grid>
+                    </StackPanel>
+
+                    <Button x:Name="SumContributeGoButton"
+                            Content="Compute contribution"
+                            Click="OnSumContributeGoClicked"
+                            Style="{StaticResource AccentButtonStyle}" />
+
+                    <Border x:Name="SumContributeResultBorder"
+                            Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
+                            BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                            BorderThickness="1"
+                            CornerRadius="6"
+                            Padding="16"
+                            Visibility="Collapsed">
+                        <TextBox x:Name="SumContributeResultText"
+                                 IsReadOnly="True"
+                                 AcceptsReturn="True"
+                                 TextWrapping="Wrap"
+                                 FontFamily="Cascadia Mono, Consolas, monospace"
+                                 BorderThickness="0"
+                                 Background="Transparent"
+                                 Padding="0"
+                                 IsSpellCheckEnabled="False" />
+                    </Border>
+                </StackPanel>
+
+                <!-- ROTATION COMBINE -->
+                <StackPanel x:Name="RotCombinePanel" Spacing="20" Visibility="Collapsed">
+                    <TextBlock Text="Rotation key: final combine"
+                               Style="{StaticResource TitleLargeTextBlockStyle}" />
+                    <TextBlock TextWrapping="Wrap"
+                               Style="{StaticResource BodyTextBlockStyle}"
+                               Foreground="{ThemeResource TextFillColorSecondaryBrush}">
+                        Combines both parties' rotation-key contributions into the final rotation key for the
+                        declared rotation indices. Both parties run this independently with the same inputs and
+                        produce byte-identical output (platform-verified). Required by CKKS pipelines and any
+                        function whose function-def lists "rotation" in requiredEvalKeys.
+                    </TextBlock>
+
+                    <StackPanel Spacing="8">
+                        <TextBlock Text="Party A's contribution (downloaded from platform)"
+                                   Style="{StaticResource BodyStrongTextBlockStyle}" />
+                        <Grid ColumnDefinitions="*,Auto" ColumnSpacing="8">
+                            <TextBox x:Name="RotCombineShareA" Grid.Column="0"
+                                     PlaceholderText="Click Browse to pick party A's rotation-key contribution"
+                                     IsReadOnly="True" />
+                            <Button Grid.Column="1" Content="Browse..."
+                                    Click="OnRotCombineShareABrowseClicked" />
+                        </Grid>
+                    </StackPanel>
+
+                    <StackPanel Spacing="8">
+                        <TextBlock Text="Party B's contribution (downloaded from platform)"
+                                   Style="{StaticResource BodyStrongTextBlockStyle}" />
+                        <Grid ColumnDefinitions="*,Auto" ColumnSpacing="8">
+                            <TextBox x:Name="RotCombineShareB" Grid.Column="0"
+                                     PlaceholderText="Click Browse to pick party B's rotation-key contribution"
+                                     IsReadOnly="True" />
+                            <Button Grid.Column="1" Content="Browse..."
+                                    Click="OnRotCombineShareBBrowseClicked" />
+                        </Grid>
+                    </StackPanel>
+
+                    <StackPanel Spacing="8">
+                        <TextBlock Text="Joint public key (downloaded from platform)"
+                                   Style="{StaticResource BodyStrongTextBlockStyle}" />
+                        <Grid ColumnDefinitions="*,Auto" ColumnSpacing="8">
+                            <TextBox x:Name="RotCombineJointPk" Grid.Column="0"
+                                     PlaceholderText="Click Browse to pick the joint public key"
+                                     IsReadOnly="True" />
+                            <Button Grid.Column="1" Content="Browse..."
+                                    Click="OnRotCombineJointPkBrowseClicked" />
+                        </Grid>
+                    </StackPanel>
+
+                    <StackPanel Spacing="8">
+                        <TextBlock Text="Output file (the final rotation key)"
+                                   Style="{StaticResource BodyStrongTextBlockStyle}" />
+                        <Grid ColumnDefinitions="*,Auto" ColumnSpacing="8">
+                            <TextBox x:Name="RotCombineOutput" Grid.Column="0"
+                                     PlaceholderText="Where to save the final rotation key"
+                                     IsReadOnly="True" />
+                            <Button Grid.Column="1" Content="Save as..."
+                                    Click="OnRotCombineOutputBrowseClicked" />
+                        </Grid>
+                    </StackPanel>
+
+                    <Button x:Name="RotCombineGoButton"
+                            Content="Combine"
+                            Click="OnRotCombineGoClicked"
+                            Style="{StaticResource AccentButtonStyle}" />
+
+                    <Border x:Name="RotCombineResultBorder"
+                            Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
+                            BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                            BorderThickness="1"
+                            CornerRadius="6"
+                            Padding="16"
+                            Visibility="Collapsed">
+                        <TextBox x:Name="RotCombineResultText"
+                                 IsReadOnly="True"
+                                 AcceptsReturn="True"
+                                 TextWrapping="Wrap"
+                                 FontFamily="Cascadia Mono, Consolas, monospace"
+                                 BorderThickness="0"
+                                 Background="Transparent"
+                                 Padding="0"
+                                 IsSpellCheckEnabled="False" />
+                    </Border>
+                </StackPanel>
+
+                <!-- ROTATION CONTRIBUTE -->
+                <StackPanel x:Name="RotContributePanel" Spacing="20" Visibility="Collapsed">
+                    <TextBlock Text="Rotation key: your contribution"
+                               Style="{StaticResource TitleLargeTextBlockStyle}" />
+                    <TextBlock TextWrapping="Wrap"
+                               Style="{StaticResource BodyTextBlockStyle}"
+                               Foreground="{ThemeResource TextFillColorSecondaryBrush}">
+                        Produces your party's contribution to the joint rotation key. Required by CKKS pipelines
+                        and by any function whose function-def lists "rotation" in requiredEvalKeys. The lead
+                        party (the one who initiated the collaboration's keysetup) generates first; the main
+                        party chains on the lead's contribution. The indices field controls which slot rotations
+                        the joint key will support (read it from the function-def's requiredEvalKeys
+                        specification or the collaboration page).
+                    </TextBlock>
+
+                    <StackPanel Spacing="8">
+                        <TextBlock Text="My role"
+                                   Style="{StaticResource BodyStrongTextBlockStyle}" />
+                        <ComboBox x:Name="RotContributeRole"
+                                  HorizontalAlignment="Stretch"
+                                  SelectionChanged="OnRotContributeRoleChanged">
+                            <ComboBoxItem Content="Lead (I go first; no peer input needed)" Tag="lead" />
+                            <ComboBoxItem Content="Main (I chain on the lead's contribution)" Tag="main" />
+                        </ComboBox>
+                    </StackPanel>
+
+                    <StackPanel Spacing="8">
+                        <TextBlock Text="Rotation indices (comma-separated, e.g. '1,2,4,-1,-2')"
+                                   Style="{StaticResource BodyStrongTextBlockStyle}" />
+                        <TextBox x:Name="RotContributeIndices"
+                                 PlaceholderText="1,2,4,-1,-2" />
+                    </StackPanel>
+
+                    <StackPanel Spacing="8">
+                        <TextBlock Text="My FHE secret share (from Generate keypair / Keysetup share)"
+                                   Style="{StaticResource BodyStrongTextBlockStyle}" />
+                        <Grid ColumnDefinitions="*,Auto" ColumnSpacing="8">
+                            <TextBox x:Name="RotContributeSecretKey" Grid.Column="0"
+                                     PlaceholderText="Click Browse to pick your FHE secret-key file"
+                                     IsReadOnly="True" />
+                            <Button Grid.Column="1" Content="Browse..."
+                                    Click="OnRotContributeSecretKeyBrowseClicked" />
+                        </Grid>
+                    </StackPanel>
+
+                    <!-- Only needed when role=main -->
+                    <StackPanel x:Name="RotContributeMainFields" Spacing="8" Visibility="Collapsed">
+                        <TextBlock Text="Peer's contribution (downloaded from platform)"
+                                   Style="{StaticResource BodyStrongTextBlockStyle}" />
+                        <Grid ColumnDefinitions="*,Auto" ColumnSpacing="8">
+                            <TextBox x:Name="RotContributePeerShare" Grid.Column="0"
+                                     PlaceholderText="Click Browse to pick the lead's rotation-key contribution"
+                                     IsReadOnly="True" />
+                            <Button Grid.Column="1" Content="Browse..."
+                                    Click="OnRotContributePeerShareBrowseClicked" />
+                        </Grid>
+
+                        <TextBlock Text="Joint public key (downloaded from platform)"
+                                   Style="{StaticResource BodyStrongTextBlockStyle}" />
+                        <Grid ColumnDefinitions="*,Auto" ColumnSpacing="8">
+                            <TextBox x:Name="RotContributeJointPk" Grid.Column="0"
+                                     PlaceholderText="Click Browse to pick the joint public key"
+                                     IsReadOnly="True" />
+                            <Button Grid.Column="1" Content="Browse..."
+                                    Click="OnRotContributeJointPkBrowseClicked" />
+                        </Grid>
+                    </StackPanel>
+
+                    <StackPanel Spacing="8">
+                        <TextBlock Text="Output file"
+                                   Style="{StaticResource BodyStrongTextBlockStyle}" />
+                        <Grid ColumnDefinitions="*,Auto" ColumnSpacing="8">
+                            <TextBox x:Name="RotContributeOutput" Grid.Column="0"
+                                     PlaceholderText="Where to save your contribution"
+                                     IsReadOnly="True" />
+                            <Button Grid.Column="1" Content="Save as..."
+                                    Click="OnRotContributeOutputBrowseClicked" />
+                        </Grid>
+                    </StackPanel>
+
+                    <Button x:Name="RotContributeGoButton"
+                            Content="Compute contribution"
+                            Click="OnRotContributeGoClicked"
+                            Style="{StaticResource AccentButtonStyle}" />
+
+                    <Border x:Name="RotContributeResultBorder"
+                            Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
+                            BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                            BorderThickness="1"
+                            CornerRadius="6"
+                            Padding="16"
+                            Visibility="Collapsed">
+                        <TextBox x:Name="RotContributeResultText"
+                                 IsReadOnly="True"
+                                 AcceptsReturn="True"
+                                 TextWrapping="Wrap"
+                                 FontFamily="Cascadia Mono, Consolas, monospace"
+                                 BorderThickness="0"
+                                 Background="Transparent"
+                                 Padding="0"
+                                 IsSpellCheckEnabled="False" />
+                    </Border>
+                </StackPanel>
+
+                <!-- RELIN CONTRIBUTE -->
+                <StackPanel x:Name="RelinContributePanel" Spacing="20" Visibility="Collapsed">
+                    <TextBlock Text="Relin key: your contribution"
+                               Style="{StaticResource TitleLargeTextBlockStyle}" />
+                    <TextBlock TextWrapping="Wrap"
+                               Style="{StaticResource BodyTextBlockStyle}"
+                               Foreground="{ThemeResource TextFillColorSecondaryBrush}">
+                        Produces your party's contribution to the joint relinearization key, which is needed
+                        for any function that does multiplications. The protocol has TWO rounds. Round 1 also
+                        has a lead/main role split (lead goes first; main chains on lead). Round 2 doesn't
+                        have a role split; both parties contribute the same way. Pick the round and (for
+                        round 1) the role based on what the platform's collaboration page tells you.
+                    </TextBlock>
+
+                    <StackPanel Spacing="8">
+                        <TextBlock Text="Round"
+                                   Style="{StaticResource BodyStrongTextBlockStyle}" />
+                        <ComboBox x:Name="RelinContributeRound"
+                                  HorizontalAlignment="Stretch"
+                                  SelectionChanged="OnRelinContributeRoundChanged">
+                            <ComboBoxItem Content="Round 1" Tag="1" />
+                            <ComboBoxItem Content="Round 2" Tag="2" />
+                        </ComboBox>
+                    </StackPanel>
+
+                    <!-- Round 1 only: role -->
+                    <StackPanel x:Name="RelinContributeRound1Fields" Spacing="8" Visibility="Collapsed">
+                        <TextBlock Text="My role"
+                                   Style="{StaticResource BodyStrongTextBlockStyle}" />
+                        <ComboBox x:Name="RelinContributeRole"
+                                  HorizontalAlignment="Stretch"
+                                  SelectionChanged="OnRelinContributeRoleChanged">
+                            <ComboBoxItem Content="Lead (I go first; no peer input needed)" Tag="lead" />
+                            <ComboBoxItem Content="Main (I chain on the lead's contribution)" Tag="main" />
+                        </ComboBox>
+                    </StackPanel>
+
+                    <StackPanel Spacing="8">
+                        <TextBlock Text="My FHE secret share"
+                                   Style="{StaticResource BodyStrongTextBlockStyle}" />
+                        <Grid ColumnDefinitions="*,Auto" ColumnSpacing="8">
+                            <TextBox x:Name="RelinContributeSecretKey" Grid.Column="0"
+                                     PlaceholderText="Click Browse to pick your FHE secret-key file"
+                                     IsReadOnly="True" />
+                            <Button Grid.Column="1" Content="Browse..."
+                                    Click="OnRelinContributeSecretKeyBrowseClicked" />
+                        </Grid>
+                    </StackPanel>
+
+                    <!-- Round 1, role=main only -->
+                    <StackPanel x:Name="RelinContributeMainFields" Spacing="8" Visibility="Collapsed">
+                        <TextBlock Text="Peer's round-1 contribution (downloaded from platform)"
+                                   Style="{StaticResource BodyStrongTextBlockStyle}" />
+                        <Grid ColumnDefinitions="*,Auto" ColumnSpacing="8">
+                            <TextBox x:Name="RelinContributePeerShare" Grid.Column="0"
+                                     PlaceholderText="Click Browse to pick the lead's round-1 contribution"
+                                     IsReadOnly="True" />
+                            <Button Grid.Column="1" Content="Browse..."
+                                    Click="OnRelinContributePeerShareBrowseClicked" />
+                        </Grid>
+                    </StackPanel>
+
+                    <!-- Round 2 only -->
+                    <StackPanel x:Name="RelinContributeRound2Fields" Spacing="8" Visibility="Collapsed">
+                        <TextBlock Text="Combined round-1 output (from the round-1 combine step)"
+                                   Style="{StaticResource BodyStrongTextBlockStyle}" />
+                        <Grid ColumnDefinitions="*,Auto" ColumnSpacing="8">
+                            <TextBox x:Name="RelinContributeCombinedR1" Grid.Column="0"
+                                     PlaceholderText="Click Browse to pick the round-1 combined file"
+                                     IsReadOnly="True" />
+                            <Button Grid.Column="1" Content="Browse..."
+                                    Click="OnRelinContributeCombinedR1BrowseClicked" />
+                        </Grid>
+                        <TextBlock Text="Joint public key"
+                                   Style="{StaticResource BodyStrongTextBlockStyle}" />
+                        <Grid ColumnDefinitions="*,Auto" ColumnSpacing="8">
+                            <TextBox x:Name="RelinContributeJointPk" Grid.Column="0"
+                                     PlaceholderText="Click Browse to pick the joint public key"
+                                     IsReadOnly="True" />
+                            <Button Grid.Column="1" Content="Browse..."
+                                    Click="OnRelinContributeJointPkBrowseClicked" />
+                        </Grid>
+                    </StackPanel>
+
+                    <StackPanel Spacing="8">
+                        <TextBlock Text="Output file"
+                                   Style="{StaticResource BodyStrongTextBlockStyle}" />
+                        <Grid ColumnDefinitions="*,Auto" ColumnSpacing="8">
+                            <TextBox x:Name="RelinContributeOutput" Grid.Column="0"
+                                     PlaceholderText="Where to save your contribution"
+                                     IsReadOnly="True" />
+                            <Button Grid.Column="1" Content="Save as..."
+                                    Click="OnRelinContributeOutputBrowseClicked" />
+                        </Grid>
+                    </StackPanel>
+
+                    <Button x:Name="RelinContributeGoButton"
+                            Content="Compute contribution"
+                            Click="OnRelinContributeGoClicked"
+                            Style="{StaticResource AccentButtonStyle}" />
+
+                    <Border x:Name="RelinContributeResultBorder"
+                            Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
+                            BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                            BorderThickness="1"
+                            CornerRadius="6"
+                            Padding="16"
+                            Visibility="Collapsed">
+                        <TextBox x:Name="RelinContributeResultText"
+                                 IsReadOnly="True"
+                                 AcceptsReturn="True"
+                                 TextWrapping="Wrap"
+                                 FontFamily="Cascadia Mono, Consolas, monospace"
+                                 BorderThickness="0"
+                                 Background="Transparent"
+                                 Padding="0"
+                                 IsSpellCheckEnabled="False" />
+                    </Border>
+                </StackPanel>
+
+                <!-- RELIN COMBINE -->
+                <StackPanel x:Name="RelinCombinePanel" Spacing="20" Visibility="Collapsed">
+                    <TextBlock Text="Relin key: combine round"
+                               Style="{StaticResource TitleLargeTextBlockStyle}" />
+                    <TextBlock TextWrapping="Wrap"
+                               Style="{StaticResource BodyTextBlockStyle}"
+                               Foreground="{ThemeResource TextFillColorSecondaryBrush}">
+                        Combines two parties' relinearization-key contributions for a round. The protocol
+                        has TWO combine steps: one between the two parties' round-1 contributions (which
+                        produces an intermediate file used as input to round-2 contributions), and one
+                        between the two parties' round-2 contributions (which produces the final relin key).
+                        Pick the round based on what the platform's collaboration page tells you. Both
+                        parties run this independently and produce byte-identical output.
+                    </TextBlock>
+
+                    <StackPanel Spacing="8">
+                        <TextBlock Text="Round"
+                                   Style="{StaticResource BodyStrongTextBlockStyle}" />
+                        <ComboBox x:Name="RelinCombineRound"
+                                  HorizontalAlignment="Stretch"
+                                  SelectionChanged="OnRelinCombineRoundChanged">
+                            <ComboBoxItem Content="Round 1 (intermediate combine)" Tag="1" />
+                            <ComboBoxItem Content="Round 2 (final combine; produces the relin key)" Tag="2" />
+                        </ComboBox>
+                    </StackPanel>
+
+                    <StackPanel Spacing="8">
+                        <TextBlock Text="Party A's contribution (downloaded from platform)"
+                                   Style="{StaticResource BodyStrongTextBlockStyle}" />
+                        <Grid ColumnDefinitions="*,Auto" ColumnSpacing="8">
+                            <TextBox x:Name="RelinCombineShareA" Grid.Column="0"
+                                     PlaceholderText="Click Browse to pick party A's contribution for this round"
+                                     IsReadOnly="True" />
+                            <Button Grid.Column="1" Content="Browse..."
+                                    Click="OnRelinCombineShareABrowseClicked" />
+                        </Grid>
+                    </StackPanel>
+
+                    <StackPanel Spacing="8">
+                        <TextBlock Text="Party B's contribution (downloaded from platform)"
+                                   Style="{StaticResource BodyStrongTextBlockStyle}" />
+                        <Grid ColumnDefinitions="*,Auto" ColumnSpacing="8">
+                            <TextBox x:Name="RelinCombineShareB" Grid.Column="0"
+                                     PlaceholderText="Click Browse to pick party B's contribution for this round"
+                                     IsReadOnly="True" />
+                            <Button Grid.Column="1" Content="Browse..."
+                                    Click="OnRelinCombineShareBBrowseClicked" />
+                        </Grid>
+                    </StackPanel>
+
+                    <!-- Round 1 only -->
+                    <StackPanel x:Name="RelinCombineRound1Fields" Spacing="8" Visibility="Collapsed">
+                        <TextBlock Text="Joint public key"
+                                   Style="{StaticResource BodyStrongTextBlockStyle}" />
+                        <Grid ColumnDefinitions="*,Auto" ColumnSpacing="8">
+                            <TextBox x:Name="RelinCombineJointPk" Grid.Column="0"
+                                     PlaceholderText="Click Browse to pick the joint public key"
+                                     IsReadOnly="True" />
+                            <Button Grid.Column="1" Content="Browse..."
+                                    Click="OnRelinCombineJointPkBrowseClicked" />
+                        </Grid>
+                    </StackPanel>
+
+                    <!-- Round 2 only -->
+                    <StackPanel x:Name="RelinCombineRound2Fields" Spacing="8" Visibility="Collapsed">
+                        <TextBlock Text="Combined round-1 output (from your round-1 combine step)"
+                                   Style="{StaticResource BodyStrongTextBlockStyle}" />
+                        <Grid ColumnDefinitions="*,Auto" ColumnSpacing="8">
+                            <TextBox x:Name="RelinCombineCombinedR1" Grid.Column="0"
+                                     PlaceholderText="Click Browse to pick the round-1 combined file"
+                                     IsReadOnly="True" />
+                            <Button Grid.Column="1" Content="Browse..."
+                                    Click="OnRelinCombineCombinedR1BrowseClicked" />
+                        </Grid>
+                    </StackPanel>
+
+                    <StackPanel Spacing="8">
+                        <TextBlock Text="Output file"
+                                   Style="{StaticResource BodyStrongTextBlockStyle}" />
+                        <Grid ColumnDefinitions="*,Auto" ColumnSpacing="8">
+                            <TextBox x:Name="RelinCombineOutput" Grid.Column="0"
+                                     PlaceholderText="Where to save the combined output"
+                                     IsReadOnly="True" />
+                            <Button Grid.Column="1" Content="Save as..."
+                                    Click="OnRelinCombineOutputBrowseClicked" />
+                        </Grid>
+                    </StackPanel>
+
+                    <Button x:Name="RelinCombineGoButton"
+                            Content="Combine"
+                            Click="OnRelinCombineGoClicked"
+                            Style="{StaticResource AccentButtonStyle}" />
+
+                    <Border x:Name="RelinCombineResultBorder"
+                            Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
+                            BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                            BorderThickness="1"
+                            CornerRadius="6"
+                            Padding="16"
+                            Visibility="Collapsed">
+                        <TextBox x:Name="RelinCombineResultText"
+                                 IsReadOnly="True"
+                                 AcceptsReturn="True"
+                                 TextWrapping="Wrap"
+                                 FontFamily="Cascadia Mono, Consolas, monospace"
+                                 BorderThickness="0"
+                                 Background="Transparent"
+                                 Padding="0"
+                                 IsSpellCheckEnabled="False" />
+                    </Border>
+                </StackPanel>
+
+                <!-- WRAP UPLOAD -->
+                <StackPanel x:Name="WrapEnvelopePanel" Spacing="20" Visibility="Collapsed">
+                    <TextBlock Text="Wrap upload (sign for the platform)"
+                               Style="{StaticResource TitleLargeTextBlockStyle}" />
+                    <TextBlock TextWrapping="Wrap"
+                               Style="{StaticResource BodyTextBlockStyle}"
+                               Foreground="{ThemeResource TextFillColorSecondaryBrush}">
+                        After you produce a contribution share with one of the contribute screens
+                        (Generate keypair, Keysetup share, Sum contribute, Relin contribute), use
+                        this screen to wrap that .bin file into a signed .json envelope that the
+                        platform's keysetup page accepts as the upload body.
+
+                        The round number and message type come from the project's keysetup page on
+                        the platform - it tells you which round it's expecting next and which kind
+                        of share. Copy those values into the fields below.
+                    </TextBlock>
+
+                    <!-- Binary share to wrap -->
+                    <StackPanel Spacing="8">
+                        <TextBlock Text="Binary share file (.bin)"
+                                   Style="{StaticResource BodyStrongTextBlockStyle}" />
+                        <Grid ColumnDefinitions="*,Auto" ColumnSpacing="8">
+                            <TextBox x:Name="WrapEnvelopePayloadFile" Grid.Column="0"
+                                     PlaceholderText="Click Browse to pick the .bin produced by a contribute screen"
+                                     IsReadOnly="True" />
+                            <Button Grid.Column="1" Content="Browse..."
+                                    Click="OnWrapEnvelopePayloadBrowseClicked" />
+                        </Grid>
+                    </StackPanel>
+
+                    <!-- Ed25519 signing secret key -->
+                    <StackPanel Spacing="8">
+                        <TextBlock Text="Signing secret key (.bin from Signing key screen)"
+                                   Style="{StaticResource BodyStrongTextBlockStyle}" />
+                        <Grid ColumnDefinitions="*,Auto" ColumnSpacing="8">
+                            <TextBox x:Name="WrapEnvelopeSecretKeyFile" Grid.Column="0"
+                                     PlaceholderText="Click Browse to pick signing_secret_key.bin"
+                                     IsReadOnly="True" />
+                            <Button Grid.Column="1" Content="Browse..."
+                                    Click="OnWrapEnvelopeSecretKeyBrowseClicked" />
+                        </Grid>
+                    </StackPanel>
+
+                    <!-- Project metadata (from the platform's keysetup page).
+                         2026-06: no company ID here anymore - the signed
+                         envelope no longer carries fromCompanyId; the platform
+                         derives the signer from authentication. -->
+                    <StackPanel Spacing="8">
+                        <TextBlock Text="Permission ID"
+                                   Style="{StaticResource BodyStrongTextBlockStyle}" />
+                        <TextBox x:Name="WrapEnvelopePermissionId"
+                                 PlaceholderText="from the URL of the platform's keysetup page" />
+                    </StackPanel>
+
+                    <Grid ColumnDefinitions="Auto,16,*" RowSpacing="8">
+                        <StackPanel Grid.Column="0" Spacing="8">
+                            <TextBlock Text="Round"
+                                       Style="{StaticResource BodyStrongTextBlockStyle}" />
+                            <TextBox x:Name="WrapEnvelopeRound"
+                                     PlaceholderText="e.g. 1"
+                                     Width="80" />
+                        </StackPanel>
+                        <StackPanel Grid.Column="2" Spacing="8">
+                            <TextBlock Text="Message type"
+                                       Style="{StaticResource BodyStrongTextBlockStyle}" />
+                            <ComboBox x:Name="WrapEnvelopeMessageType"
+                                      PlaceholderText="Pick or type"
+                                      IsEditable="True"
+                                      HorizontalAlignment="Stretch">
+                                <ComboBoxItem Content="pk-share" />
+                                <ComboBoxItem Content="relin-round1" />
+                                <ComboBoxItem Content="relin-round1-continue" />
+                                <ComboBoxItem Content="relin-round2" />
+                                <ComboBoxItem Content="sum-round1" />
+                                <ComboBoxItem Content="sum-round1-continue" />
+                            </ComboBox>
+                        </StackPanel>
+                    </Grid>
+
+                    <!-- Output .json -->
+                    <StackPanel Spacing="8">
+                        <TextBlock Text="Output .json (this is what you upload)"
+                                   Style="{StaticResource BodyStrongTextBlockStyle}" />
+                        <Grid ColumnDefinitions="*,Auto" ColumnSpacing="8">
+                            <TextBox x:Name="WrapEnvelopeOutputFile" Grid.Column="0"
+                                     PlaceholderText="Click Browse to pick where to save the .json"
+                                     IsReadOnly="True" />
+                            <Button Grid.Column="1" Content="Browse..."
+                                    Click="OnWrapEnvelopeOutputBrowseClicked" />
+                        </Grid>
+                    </StackPanel>
+
+                    <Button x:Name="WrapEnvelopeGoButton"
+                            Content="Wrap and sign"
+                            Click="OnWrapEnvelopeGoClicked"
+                            Style="{StaticResource AccentButtonStyle}" />
+
+                    <Border x:Name="WrapEnvelopeResultBorder"
+                            Background="{ThemeResource LayerFillColorDefaultBrush}"
+                            BorderBrush="{ThemeResource ControlStrokeColorDefaultBrush}"
+                            BorderThickness="1"
+                            CornerRadius="6"
+                            Padding="16"
+                            Visibility="Collapsed">
+                        <TextBox x:Name="WrapEnvelopeResultText"
+                                 IsReadOnly="True"
+                                 AcceptsReturn="True"
+                                 TextWrapping="Wrap"
+                                 FontFamily="Cascadia Mono, Consolas, monospace"
+                                 BorderThickness="0"
+                                 Background="Transparent"
+                                 Padding="0"
+                                 IsSpellCheckEnabled="False" />
+                    </Border>
+                </StackPanel>
+
+                <!-- WRAP FINAL KEYS -->
+                <StackPanel x:Name="WrapFinalKeysPanel" Spacing="20" Visibility="Collapsed">
+                    <TextBlock Text="Wrap final keys (sign for the platform)"
+                               Style="{StaticResource TitleLargeTextBlockStyle}" />
+                    <TextBlock TextWrapping="Wrap"
+                               Style="{StaticResource BodyTextBlockStyle}"
+                               Foreground="{ThemeResource TextFillColorSecondaryBrush}">
+                        Final step of the joint keysetup. After both parties have produced
+                        their three final joint keys locally and uploaded them through the
+                        platform's web UI (or via the REST API), the platform emits a
+                        to-sign JSON file listing each key's GCS object path and SHA-256
+                        hash. Open that file here together with your signing key, and the
+                        app produces a signed envelope you upload back through the platform
+                        to complete the keysetup.
+
+                        Like every other screen in this app, this step is offline. The
+                        signing key never leaves this machine, and the app makes no network
+                        calls.
+                    </TextBlock>
+
+                    <!-- To-sign JSON file from the web UI -->
+                    <StackPanel Spacing="8">
+                        <TextBlock Text="To-sign JSON file (from the platform's finalization flow)"
+                                   Style="{StaticResource BodyStrongTextBlockStyle}" />
+                        <Grid ColumnDefinitions="*,Auto" ColumnSpacing="8">
+                            <TextBox x:Name="WrapFinalKeysToSignFile" Grid.Column="0"
+                                     PlaceholderText="Click Browse to pick the to-sign .json the web UI gave you"
+                                     IsReadOnly="True" />
+                            <Button Grid.Column="1" Content="Browse..."
+                                    Click="OnWrapFinalKeysToSignBrowseClicked" />
+                        </Grid>
+                    </StackPanel>
+
+                    <!-- Ed25519 signing secret key -->
+                    <StackPanel Spacing="8">
+                        <TextBlock Text="Signing secret key (.bin from Signing key screen)"
+                                   Style="{StaticResource BodyStrongTextBlockStyle}" />
+                        <Grid ColumnDefinitions="*,Auto" ColumnSpacing="8">
+                            <TextBox x:Name="WrapFinalKeysSecretKeyFile" Grid.Column="0"
+                                     PlaceholderText="Click Browse to pick signing_secret_key.bin"
+                                     IsReadOnly="True" />
+                            <Button Grid.Column="1" Content="Browse..."
+                                    Click="OnWrapFinalKeysSecretKeyBrowseClicked" />
+                        </Grid>
+                    </StackPanel>
+
+                    <!-- Output .json -->
+                    <StackPanel Spacing="8">
+                        <TextBlock Text="Output .json (signed final-keys envelope; bring this back to the web UI)"
+                                   Style="{StaticResource BodyStrongTextBlockStyle}" />
+                        <Grid ColumnDefinitions="*,Auto" ColumnSpacing="8">
+                            <TextBox x:Name="WrapFinalKeysOutputFile" Grid.Column="0"
+                                     PlaceholderText="Click Browse to pick where to save the signed envelope"
+                                     IsReadOnly="True" />
+                            <Button Grid.Column="1" Content="Browse..."
+                                    Click="OnWrapFinalKeysOutputBrowseClicked" />
+                        </Grid>
+                    </StackPanel>
+
+                    <Button x:Name="WrapFinalKeysGoButton"
+                            Content="Wrap and sign"
+                            Click="OnWrapFinalKeysGoClicked"
+                            Style="{StaticResource AccentButtonStyle}" />
+
+                    <Border x:Name="WrapFinalKeysResultBorder"
+                            Background="{ThemeResource LayerFillColorDefaultBrush}"
+                            BorderBrush="{ThemeResource ControlStrokeColorDefaultBrush}"
+                            BorderThickness="1"
+                            CornerRadius="6"
+                            Padding="16"
+                            Visibility="Collapsed">
+                        <TextBox x:Name="WrapFinalKeysResultText"
+                                 IsReadOnly="True"
+                                 AcceptsReturn="True"
+                                 TextWrapping="Wrap"
+                                 FontFamily="Cascadia Mono, Consolas, monospace"
+                                 BorderThickness="0"
+                                 Background="Transparent"
+                                 Padding="0"
+                                 IsSpellCheckEnabled="False" />
+                    </Border>
+                </StackPanel>
+
+                <!-- SETTINGS -->
+                <StackPanel x:Name="SettingsPanel" Spacing="20" Visibility="Collapsed">
+                    <TextBlock Text="Settings"
+                               Style="{StaticResource TitleLargeTextBlockStyle}" />
+
+                    <Border Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
+                            BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                            BorderThickness="1"
+                            CornerRadius="8"
+                            Padding="20">
+                        <StackPanel Spacing="8">
+                            <TextBlock Text="Local environment"
+                                       Style="{StaticResource SubtitleTextBlockStyle}" />
+                            <TextBlock x:Name="SettingsStatusText"
+                                       Text="(loading...)"
+                                       Style="{StaticResource BodyTextBlockStyle}"
+                                       FontFamily="Cascadia Mono, Consolas, monospace"
+                                       TextWrapping="Wrap" />
+                            <Button Content="Refresh"
+                                    Click="OnSettingsRefreshClicked"
+                                    HorizontalAlignment="Left"
+                                    Margin="0,8,0,0" />
+                        </StackPanel>
+                    </Border>
+                </StackPanel>
+
+            </Grid>
+        </ScrollViewer>
+
+        </NavigationView>
+    </Grid>
+</Window>

@@ -1,0 +1,92 @@
+[
+  {
+    "description": "Empty object",
+    "input": {},
+    "expectedCanonical": "{}",
+    "expectedBytesHex": "7b7d"
+  },
+  {
+    "description": "Simple flat object with keys already sorted",
+    "input": { "a": 1, "b": 2, "c": 3 },
+    "expectedCanonical": "{\"a\":1,\"b\":2,\"c\":3}",
+    "expectedBytesHex": "7b2261223a312c2262223a322c2263223a337d"
+  },
+  {
+    "description": "Object with reverse-sorted keys - must reorder",
+    "input": { "z": "last", "m": "middle", "a": "first" },
+    "expectedCanonical": "{\"a\":\"first\",\"m\":\"middle\",\"z\":\"last\"}",
+    "expectedBytesHex": "7b2261223a226669727374222c226d223a226d6964646c65222c227a223a226c617374227d"
+  },
+  {
+    "description": "Nested objects with mixed key orders",
+    "input": { "b": { "d": 4, "c": 3 }, "a": { "f": 6, "e": 5 } },
+    "expectedCanonical": "{\"a\":{\"e\":5,\"f\":6},\"b\":{\"c\":3,\"d\":4}}",
+    "expectedBytesHex": "7b2261223a7b2265223a352c2266223a367d2c2262223a7b2263223a332c2264223a347d7d"
+  },
+  {
+    "description": "Deeply nested structure (3 levels)",
+    "input": { "outer": { "middle": { "inner": { "value": true } } } },
+    "expectedCanonical": "{\"outer\":{\"middle\":{\"inner\":{\"value\":true}}}}",
+    "expectedBytesHex": "7b226f75746572223a7b226d6964646c65223a7b22696e6e6572223a7b2276616c7565223a747275657d7d7d7d"
+  },
+  {
+    "description": "Unicode strings - BMP characters",
+    "input": { "greeting": "héllo wörld", "emoji": "café" },
+    "expectedCanonical": "{\"emoji\":\"café\",\"greeting\":\"héllo wörld\"}",
+    "expectedBytesHex": "7b22656d6f6a69223a22636166c3a9222c226772656574696e67223a2268c3a96c6c6f2077c3b6726c64227d"
+  },
+  {
+    "description": "Unicode strings - non-BMP characters requiring surrogate pairs",
+    "input": { "math": "∑∏∫", "cjk": "漢字", "emoji": "🔐🗝️" },
+    "expectedCanonical": "{\"cjk\":\"漢字\",\"emoji\":\"🔐🗝️\",\"math\":\"∑∏∫\"}",
+    "expectedBytesHex": "7b22636a6b223a22e6bca2e5ad97222c22656d6f6a69223a22f09f9490f09f979defb88f222c226d617468223a22e28891e2888fe288ab227d"
+  },
+  {
+    "description": "String with JSON-special characters (quotes, backslashes, control chars)",
+    "input": { "escaped": "line1\nline2\ttab", "quote": "say \"hello\"", "backslash": "a\\b" },
+    "expectedCanonical": "{\"backslash\":\"a\\\\b\",\"escaped\":\"line1\\nline2\\ttab\",\"quote\":\"say \\\"hello\\\"\"}",
+    "expectedBytesHex": "7b226261636b736c617368223a22615c5c62222c2265736361706564223a226c696e65315c6e6c696e65325c74746162222c2271756f7465223a22736179205c2268656c6c6f5c22227d"
+  },
+  {
+    "description": "Numbers - integers including zero, negative, large",
+    "input": { "zero": 0, "negative": -42, "large": 9007199254740991, "small": -9007199254740991 },
+    "expectedCanonical": "{\"large\":9007199254740991,\"negative\":-42,\"small\":-9007199254740991,\"zero\":0}",
+    "expectedBytesHex": "7b226c61726765223a393030373139393235343734303939312c226e65676174697665223a2d34322c22736d616c6c223a2d393030373139393235343734303939312c227a65726f223a307d"
+  },
+  {
+    "description": "Numbers - floating point (no trailing zeros in JSON.stringify)",
+    "input": { "pi": 3.14159, "negFloat": -0.001, "one": 1 },
+    "expectedCanonical": "{\"negFloat\":-0.001,\"one\":1,\"pi\":3.14159}",
+    "expectedBytesHex": "7b226e6567466c6f6174223a2d302e3030312c226f6e65223a312c227069223a332e31343135397d"
+  },
+  {
+    "description": "Boolean values and null",
+    "input": { "truthy": true, "falsy": false, "nothing": null },
+    "expectedCanonical": "{\"falsy\":false,\"nothing\":null,\"truthy\":true}",
+    "expectedBytesHex": "7b2266616c7379223a66616c73652c226e6f7468696e67223a6e756c6c2c22747275746879223a747275657d"
+  },
+  {
+    "description": "Empty array vs empty object vs null",
+    "input": { "emptyArr": [], "emptyObj": {}, "nullVal": null },
+    "expectedCanonical": "{\"emptyArr\":[],\"emptyObj\":{},\"nullVal\":null}",
+    "expectedBytesHex": "7b22656d707479417272223a5b5d2c22656d7074794f626a223a7b7d2c226e756c6c56616c223a6e756c6c7d"
+  },
+  {
+    "description": "Array of mixed types preserves order (no sorting inside arrays)",
+    "input": { "items": [3, "two", true, null, { "z": 1, "a": 2 }] },
+    "expectedCanonical": "{\"items\":[3,\"two\",true,null,{\"a\":2,\"z\":1}]}",
+    "expectedBytesHex": "7b226974656d73223a5b332c2274776f222c747275652c6e756c6c2c7b2261223a322c227a223a317d5d7d"
+  },
+  {
+    "description": "Two simple objects",
+    "input": { "present": "yes", "also": "here" },
+    "expectedCanonical": "{\"also\":\"here\",\"present\":\"yes\"}",
+    "expectedBytesHex": "7b22616c736f223a2268657265222c2270726573656e74223a22796573227d"
+  },
+  {
+    "description": "Keys with special characters (dots, hyphens, underscores, colons)",
+    "input": { "a.b": 1, "c-d": 2, "e_f": 3, "g:h": 4 },
+    "expectedCanonical": "{\"a.b\":1,\"c-d\":2,\"e_f\":3,\"g:h\":4}",
+    "expectedBytesHex": "7b22612e62223a312c22632d64223a322c22655f66223a332c22673a68223a347d"
+  }
+]

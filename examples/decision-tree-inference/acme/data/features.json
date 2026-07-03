@@ -1,0 +1,4 @@
+{
+  "_comment": "Golden sample features x = [0.6, 0.7], one normalized value per feature. v2 (DTREE-FEAT v2): the features input is now a recipe-driven encrypted-bundle - the encodingRecipe maps over this 'features' array and emits one broadcast ciphertext per feature (fill {.}). Expected decrypted prediction for this sample: [0.167801, 0.832199] (argmax = class 1).",
+  "features": [0.6, 0.7]
+}

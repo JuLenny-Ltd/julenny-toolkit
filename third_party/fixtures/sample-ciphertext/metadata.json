@@ -1,0 +1,38 @@
+{
+  "contextSpec": {
+    "id": "bfv-default-v1",
+    "multiplicativeDepth": 4,
+    "plaintextModulus": 65537,
+    "scheme": "BFV",
+    "securityLevel": "HEStd_128_classic"
+  },
+  "fheToolkitVersion": "0.1.0",
+  "files": {
+    "ciphertext": "ciphertext.bin",
+    "publicKey": "public_key.bin",
+    "secretKey": "secret_key.bin"
+  },
+  "openfheVersion": "1.5.1",
+  "plaintext": {
+    "layout": "packed-int-vector",
+    "values": [
+      1,
+      2,
+      3,
+      42,
+      -7,
+      100,
+      1000,
+      -1000
+    ]
+  },
+  "serialization": "OpenFHE Serial::Serialize with SerType::BINARY",
+  "sizes": {
+    "ciphertextBytes": 1049687,
+    "publicKeyBytes": 1049643,
+    "secretKeyBytes": 525195
+  },
+  "verification": {
+    "instructions": "1. Build an OpenFHE CryptoContext with the parameters in contextSpec above. 2. Deserialize public_key.bin into a PublicKey<DCRTPoly>. 3. Deserialize secret_key.bin into a PrivateKey<DCRTPoly>. 4. Deserialize ciphertext.bin into a Ciphertext<DCRTPoly>. 5. Decrypt with the secret key. 6. Call GetPackedValue() on the resulting plaintext. 7. The first 8 slots must equal plaintext.values; remaining slots are zero up to the context's slot count."
+  }
+}

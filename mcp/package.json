@@ -1,0 +1,40 @@
+{
+  "name": "@julenny/mcp-server",
+  "version": "0.1.0",
+  "private": true,
+  "description": "JuLenny FHE MCP server - AI agent access to encrypted data collaboration. Orchestrates the JuLenny platform API and shells out to the local julenny-fhe CLI for all cryptography, so keys and plaintext never leave the user's machine.",
+  "license": "BUSL-1.1",
+  "type": "module",
+  "bin": {
+    "julenny-mcp": "./dist/index.js"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/JuLenny-Ltd/julenny-toolkit.git",
+    "directory": "mcp"
+  },
+  "homepage": "https://github.com/JuLenny-Ltd/julenny-toolkit/tree/main/mcp",
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "dev": "tsx src/index.ts"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.12.1",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "esbuild": "^0.28.1",
+    "postject": "^1.0.0-alpha.6",
+    "tsx": "^4.19.0",
+    "typescript": "^5.7.0"
+  }
+}

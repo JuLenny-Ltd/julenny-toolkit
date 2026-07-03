@@ -1,0 +1,11 @@
+<Solution>
+  <Configurations>
+    <Platform Name="ARM64" />
+    <Platform Name="x64" />
+    <Platform Name="x86" />
+  </Configurations>
+  <Folder Name="/Solution Items/" />
+  <Project Path="JuLennyFHE.vcxproj" Id="e867c8fb-5b80-4ed5-bea3-40075ef36a5a">
+    <Deploy />
+  </Project>
+</Solution>

@@ -1,0 +1,30 @@
+# Default: let git auto-detect binary vs text and use the checkout-platform's
+# native EOL for text. Specific overrides below force EOLs for files that
+# always run on a specific OS, so a Windows checkout still produces files
+# that work on Linux (and vice versa).
+* text=auto
+
+# Shell scripts always run on Linux; force LF regardless of checkout OS.
+*.sh    text eol=lf
+*.bash  text eol=lf
+
+# PowerShell, cmd, and batch scripts always run on Windows; force CRLF.
+*.ps1   text eol=crlf
+*.cmd   text eol=crlf
+*.bat   text eol=crlf
+
+# Binary asset categories - never EOL-normalize.
+*.png   binary
+*.jpg   binary
+*.jpeg  binary
+*.gif   binary
+*.ico   binary
+*.pdf   binary
+*.zip   binary
+*.tar   binary
+*.gz    binary
+*.msix  binary
+*.deb   binary
+*.cer   binary
+*.pfx   binary
+*.bin   binary

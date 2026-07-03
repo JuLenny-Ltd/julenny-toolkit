@@ -1,0 +1,34 @@
+# Encrypted Negotiation Matrix - Supplier (Beta): offer_vector NO-MATCH case
+# Common Table (both sides MUST use this identical grid), length 24:
+#   index = (q_idx*4 + p_idx)*3 + d_idx
+#   Quantity: 1000, 5000        (q_idx 0..1)
+#   Price:    12, 13, 14, 15     (p_idx 0..3)
+#   Delivery: 1, 2, 3 weeks      (d_idx 0..2)
+# Supplier offers Quantity=5000, Price=15, Delivery=3 weeks -> index 23.
+# The buyer does NOT accept index 23 -> zero overlap (count 0, no positions).
+# Format: one 0/1 per line; comment (#) and blank lines are skipped; each
+# remaining line's position (0-based) is its grid index.
+0
+0
+0
+0
+0
+0
+0
+0
+0
+0
+0
+0
+0
+0
+0
+0
+0
+0
+0
+0
+0
+0
+0
+1

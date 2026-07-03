@@ -1,0 +1,5 @@
+; Force an UNDECORATED export name so Inno Setup's `external '...stdcall'`
+; binding resolves it (x86 __stdcall would otherwise decorate as _Name@16).
+LIBRARY folderpicker
+EXPORTS
+    ShowFolderDialog

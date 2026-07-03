@@ -1,0 +1,77 @@
+peanut allergy,peanuts
+peanut allergy,tree nuts
+gluten intolerance,wheat
+gluten intolerance,barley
+gluten intolerance,rye
+gluten intolerance,oats
+celiac disease,wheat
+celiac disease,barley
+celiac disease,rye
+celiac disease,oats
+lactose intolerance,milk
+lactose intolerance,cheese
+lactose intolerance,butter
+lactose intolerance,yogurt
+lactose intolerance,cream
+milk allergy,milk
+milk allergy,cheese
+milk allergy,butter
+milk allergy,yogurt
+milk allergy,cream
+shellfish allergy,shrimp
+shellfish allergy,crab
+shellfish allergy,lobster
+shellfish allergy,shellfish
+fish allergy,fish
+fish allergy,shrimp
+fish allergy,crab
+fish allergy,lobster
+egg allergy,eggs
+soy allergy,soy
+tree nut allergy,tree nuts
+tree nut allergy,peanuts
+wheat allergy,wheat
+sesame allergy,sesame
+histamine intolerance,chocolate
+histamine intolerance,cheese
+histamine intolerance,fish
+histamine intolerance,shellfish
+fructose intolerance,honey
+fructose intolerance,sugar
+sulfite sensitivity,vinegar
+phenylketonuria (PKU),chicken
+phenylketonuria (PKU),beef
+phenylketonuria (PKU),pork
+phenylketonuria (PKU),lamb
+diabetes,sugar
+diabetes,honey
+hypertension,salt
+high cholesterol,cheese
+high cholesterol,butter
+high cholesterol,cream
+gout,beef
+gout,pork
+gout,lamb
+crohn's disease,onion
+crohn's disease,garlic
+crohn's disease,tomato
+ulcerative colitis,onion
+ulcerative colitis,garlic
+ulcerative colitis,tomato
+irritable bowel syndrome (IBS),onion
+irritable bowel syndrome (IBS),garlic
+irritable bowel syndrome (IBS),tomato
+galactosemia,milk
+galactosemia,cheese
+galactosemia,butter
+galactosemia,yogurt
+galactosemia,cream
+hemochromatosis,beef
+hemochromatosis,pork
+hemochromatosis,lamb
+food protein-induced enterocolitis syndrome (FPIES),milk
+food protein-induced enterocolitis syndrome (FPIES),eggs
+food protein-induced enterocolitis syndrome (FPIES),soy
+alpha-gal syndrome,beef
+alpha-gal syndrome,pork
+alpha-gal syndrome,lamb 

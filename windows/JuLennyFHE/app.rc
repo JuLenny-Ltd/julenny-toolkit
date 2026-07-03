@@ -1,0 +1,3 @@
+// Win32 resource: gives the unpackaged JuLennyFHE.exe its Explorer / taskbar /
+// shortcut icon. Resource ID 1 (lowest) is what Windows shows as the file icon.
+1 ICON "Assets\\app.ico"
