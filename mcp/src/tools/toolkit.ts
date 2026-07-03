@@ -423,20 +423,32 @@ export function registerToolkitTools(server: McpServer) {
   // ---- wrap_envelope (auto: signs a keysetup-message upload body) ----
   server.tool(
     'wrap_envelope',
-    'Sign a keysetup-message upload body (a key-exchange contribution). Returns the signed envelope path.',
+    'Sign a keysetup-message upload body (a key-exchange contribution). Two modes: INLINE embeds a small payload file in the envelope; REFERENCE signs an already-uploaded large payload by objectKey + sizeBytes, so the registered envelope stays tiny instead of carrying a copy of the bytes. Provide EITHER payload OR objectKey+sizeBytes. Returns the signed envelope path.',
     {
-      payload: z.string().describe('Workdir-relative payload file name'),
       secretKey: z.string().describe('Workdir-relative Ed25519 signing-secret file name'),
       output: z.string().describe('Workdir-relative output envelope file name'),
       permissionId: z.string().describe('Permission id this message belongs to'),
       round: z.string().describe('Keysetup round identifier'),
       messageType: z.string().describe('Keysetup message type'),
+      payload: z.string().optional().describe('INLINE mode: workdir-relative payload file to embed and sign. For small payloads. Mutually exclusive with objectKey.'),
+      objectKey: z.string().optional().describe('REFERENCE mode: object-storage key of an already-uploaded payload to sign BY REFERENCE (keeps the envelope small for large payloads). Requires sizeBytes.'),
+      sizeBytes: z.number().int().positive().optional().describe('REFERENCE mode: byte size of the referenced payload. Required with objectKey.'),
     },
     async (p) => {
       try {
+        const usingRef = p.objectKey !== undefined;
+        if (usingRef === (p.payload !== undefined)) {
+          return fail('provide EITHER payload (inline) OR objectKey+sizeBytes (reference), not both or neither');
+        }
+        if (usingRef && p.sizeBytes === undefined) {
+          return fail('reference mode (objectKey) requires sizeBytes');
+        }
+        const modeArgs = usingRef
+          ? ['--object-key', p.objectKey as string, '--size-bytes', String(p.sizeBytes)]
+          : ['--payload', resolveInWorkdir(p.payload as string)];
         const args = [
           'crypto', 'wrap-envelope',
-          '--payload', resolveInWorkdir(p.payload),
+          ...modeArgs,
           '--secret-key', resolveInWorkdir(p.secretKey),
           '--output', resolveInWorkdir(p.output),
           '--permission-id', p.permissionId,
@@ -447,7 +459,7 @@ export function registerToolkitTools(server: McpServer) {
         const r = await runCli(args);
         if (!r.ok) return fail(r.error || 'wrap-envelope failed', { exitCode: r.exitCode });
         const j = (r.json ?? {}) as Record<string, unknown>;
-        return ok({ envelopePath: j.outputPath ?? p.output });
+        return ok({ envelopePath: j.outputPath ?? p.output, mode: usingRef ? 'reference' : 'inline' });
       } catch (e) {
         return fail(e instanceof Error ? e.message : 'invalid parameters');
       }
