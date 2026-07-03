@@ -17,34 +17,15 @@ FUNCTION_DEF="$JL_WORKDIR/function-def.json"
 [[ -f "$FUNCTION_DEF" ]] \
     || die "Function-def not found at $FUNCTION_DEF. Re-run 00-init to fetch it."
 
-# -------- Engine selection (multi-engine functions, 2026-06) --------
-# Some functions support more than one compute engine (CPU / GPU). The choices
-# are .supportedEngines on the function-def. The platform exposes it only if the
-# definition endpoint includes it; if it is absent or a single engine we do not
-# prompt and let the platform default to its first supported engine. The chosen
-# engine, when set, is passed to /estimate and /execute.
+# -------- Engine selection (multi-engine functions) --------
+# We do NOT derive the engine list from the function-def's .supportedEngines:
+# that is what the function COULD use in theory, not what THIS account may
+# actually run. Instead we estimate engine-agnostically below; the platform's
+# /estimate .options[] comes back already filtered to the engines this plan is
+# eligible for (GPU only if the plan allows it), each with its own cost and
+# quoteToken. That drives the menu.
 CHOSEN_ENGINE=""
-mapfile -t SUPPORTED_ENGINES < <(jq -r '.supportedEngines[]? // empty' "$FUNCTION_DEF")
-if (( ${#SUPPORTED_ENGINES[@]} > 1 )); then
-    echo
-    echo "This function supports multiple compute engines:"
-    for idx in "${!SUPPORTED_ENGINES[@]}"; do
-        e="${SUPPORTED_ENGINES[$idx]}"
-        case "$e" in
-            openfhe-cpu)       label="CPU (OpenFHE)" ;;
-            fideslib-ckks-gpu) label="GPU (FIDESlib, L4)" ;;
-            *)                 label="$e" ;;
-        esac
-        printf "   [%d] %-18s %s\n" "$((idx+1))" "$e" "$label"
-    done
-    prompt_for ENG_PICK "Choose engine (1-${#SUPPORTED_ENGINES[@]})" "1"
-    if [[ "$ENG_PICK" =~ ^[0-9]+$ ]] && (( ENG_PICK >= 1 && ENG_PICK <= ${#SUPPORTED_ENGINES[@]} )); then
-        CHOSEN_ENGINE="${SUPPORTED_ENGINES[$((ENG_PICK-1))]}"
-    else
-        CHOSEN_ENGINE="${SUPPORTED_ENGINES[0]}"
-    fi
-    info "Selected engine: $CHOSEN_ENGINE"
-fi
+QUOTE_TOKEN=""
 
 info "Fetching declared dataset picks from the platform..."
 DECLARED="$(curl_jl GET "/api/fhe-permissions/$JULENNY_PERMISSION_ID/preferred-datasets")"
@@ -110,24 +91,50 @@ recheck_or_stop() {
 
 EXEC_ID=""
 while [[ -z "$EXEC_ID" ]]; do
+    CHOSEN_ENGINE=""
     QUOTE_TOKEN=""
     echo
     info "Estimating execution cost..."
+    # Engine-agnostic estimate: .options[] returns one entry per engine THIS
+    # account may actually run (the platform filters GPU out unless the plan
+    # allows it), each with its own cost and quoteToken.
     EST="$(curl_jl POST "/api/grants/$JULENNY_PERMISSION_ID/estimate" \
             -H "Content-Type: application/json" \
-            --data-binary "$(jq -n --argjson ids "$INPUT_IDS" --arg eng "$CHOSEN_ENGINE" '{inputDatasetIds: $ids} + (if $eng != "" then {engine: $eng} else {} end)')" \
+            --data-binary "$(jq -n --argjson ids "$INPUT_IDS" '{inputDatasetIds: $ids}')" \
             2>/dev/null || echo '{}')"
 
-    if echo "$EST" | jq -e '.options[0]' > /dev/null 2>&1; then
-        EST_ENGINE="$(echo "$EST" | jq -r '.options[0].engine // "?"')"
-        COST_P50="$(echo "$EST" | jq -r '.options[0].costP50Credits // "?"')"
-        COST_P90="$(echo "$EST" | jq -r '.options[0].costP90Credits // "?"')"
-        QUOTE_TOKEN="$(echo "$EST" | jq -r '.options[0].quoteToken  // empty')"
+    N_OPTS="$(echo "$EST" | jq -r '(.options | length) // 0' 2>/dev/null || echo 0)"
+    if [[ "$N_OPTS" =~ ^[0-9]+$ ]] && (( N_OPTS >= 1 )); then
+        # The eligible-engine options drive the menu. One option -> auto-select.
+        OPT_IDX=0
+        if (( N_OPTS > 1 )); then
+            echo
+            echo "This function can run on more than one engine available to you:"
+            for i in $(seq 0 $(( N_OPTS - 1 ))); do
+                e="$(  echo "$EST" | jq -r ".options[$i].engine         // \"?\"")"
+                c50="$(echo "$EST" | jq -r ".options[$i].costP50Credits // \"?\"")"
+                c90="$(echo "$EST" | jq -r ".options[$i].costP90Credits // \"?\"")"
+                case "$e" in
+                    openfhe-cpu)       label="CPU (OpenFHE)" ;;
+                    fideslib-ckks-gpu) label="GPU (FIDESlib, L4)" ;;
+                    *)                 label="$e" ;;
+                esac
+                printf "   [%d] %-18s %-18s ~%s CR (P90: %s CR)\n" "$(( i + 1 ))" "$e" "$label" "$c50" "$c90"
+            done
+            prompt_for ENG_PICK "Choose engine (1-$N_OPTS)" "1"
+            if [[ "$ENG_PICK" =~ ^[0-9]+$ ]] && (( ENG_PICK >= 1 && ENG_PICK <= N_OPTS )); then
+                OPT_IDX=$(( ENG_PICK - 1 ))
+            fi
+        fi
+        CHOSEN_ENGINE="$(echo "$EST" | jq -r ".options[$OPT_IDX].engine         // empty")"
+        QUOTE_TOKEN="$(  echo "$EST" | jq -r ".options[$OPT_IDX].quoteToken     // empty")"
+        COST_P50="$(     echo "$EST" | jq -r ".options[$OPT_IDX].costP50Credits // \"?\"")"
+        COST_P90="$(     echo "$EST" | jq -r ".options[$OPT_IDX].costP90Credits // \"?\"")"
         BAL="$(  echo "$EST" | jq -r '.balance.credits     // "?"')"
         AVAIL="$(echo "$EST" | jq -r '.balance.available   // "?"')"
         HELD="$( echo "$EST" | jq -r '.balance.heldCredits // "?"')"
         echo
-        echo "   Engine:         ${CHOSEN_ENGINE:-$EST_ENGINE}"
+        echo "   Engine:         ${CHOSEN_ENGINE:-?}"
         echo "   Estimated cost: $COST_P50 CR (P90: $COST_P90 CR)"
         echo "   Credit balance: $BAL CR (available: $AVAIL, held: $HELD)"
         echo
