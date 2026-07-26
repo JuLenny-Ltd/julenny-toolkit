@@ -4,7 +4,7 @@ Licensor: JuLenny Ltd
 Software: JuLenny FHE
 Change Date: 2029-05-23
 Change License: Apache License, Version 2.0
-Additional Use Grant: Use of the software for non-production purposes is allowed. For-profit managed service providers are not allowed to use the software to provide a competing service.
+Additional Use Grant: You may make production use of the Licensed Work to encrypt and decrypt data and to access, integrate with, and use the JuLenny platform and its APIs, including building the Licensed Work from source for that purpose. Non-production use is also permitted. For-profit managed service providers may not use the Licensed Work to provide a service that competes with the JuLenny platform.
 
 
 Terms
