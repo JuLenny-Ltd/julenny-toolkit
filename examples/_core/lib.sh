@@ -547,7 +547,7 @@ list_functions_by_scheme() {
 create_collaboration() {
     local partner_id="$1"
     local name="$2"
-    local description="${3:-Created from rule-based-cross-match demo scripts.}"
+    local description="${3:-Created from the JuLenny example scripts.}"
 
     local body
     body="$(jq -n \
