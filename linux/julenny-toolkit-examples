@@ -1,0 +1,163 @@
+#!/usr/bin/env bash
+# Copy the JuLenny FHE Toolkit example scripts out of the read-only package
+# location into a folder you can run and edit.
+#
+# The package installs the full example tree under /usr/share, which is not
+# writable and not where you want to work. This picks your side of the
+# collaboration and copies just that side's scripts wherever you ask.
+#
+# Interactive by default. For CI or scripted installs, pass --role and --dest.
+
+set -euo pipefail
+
+SRC_DEFAULT="/usr/share/julenny-toolkit/examples"
+SRC="${JULENNY_EXAMPLES_SRC:-$SRC_DEFAULT}"
+DEST_DEFAULT="$HOME/julenny-examples"
+
+ROLE=""
+DEST=""
+FORCE=false
+ASSUME_YES=false
+
+# ---------- output helpers ----------
+if [[ -t 1 ]]; then
+    B=$'\033[1m'; DIM=$'\033[2m'; GRN=$'\033[32m'; YLW=$'\033[33m'; RED=$'\033[31m'; RST=$'\033[0m'
+else
+    B=""; DIM=""; GRN=""; YLW=""; RED=""; RST=""
+fi
+info()    { echo "${DIM}$*${RST}"; }
+success() { echo "${GRN}$*${RST}"; }
+warn()    { echo "${YLW}$*${RST}" >&2; }
+die()     { echo "${RED}error:${RST} $*" >&2; exit 1; }
+
+usage() {
+    cat <<'USAGE'
+Usage: julenny-toolkit-examples [options]
+
+Copies the JuLenny FHE Toolkit example scripts to a writable folder.
+
+Options:
+  --role <owner|consumer|both>  Which side of the collaboration to install.
+                                  owner    = data owner   (acme/ folders)
+                                  consumer = data consumer (beta/ folders)
+                                  both     = everything (for single-machine tests)
+  --dest <path>                 Where to copy them. Default: ~/julenny-examples
+  --force                       Overwrite a non-empty destination.
+  --yes                         Skip the final confirmation.
+  -h, --help                    Show this help.
+
+With no options it asks interactively.
+
+Examples:
+  julenny-toolkit-examples
+  julenny-toolkit-examples --role consumer --dest /srv/julenny --yes
+USAGE
+}
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --role)   ROLE="${2:-}"; shift 2 ;;
+        --dest)   DEST="${2:-}"; shift 2 ;;
+        --force)  FORCE=true; shift ;;
+        --yes|-y) ASSUME_YES=true; shift ;;
+        -h|--help) usage; exit 0 ;;
+        *) die "unknown argument: $1 (try --help)" ;;
+    esac
+done
+
+[[ -d "$SRC" ]] || die "example sources not found at $SRC
+Is the julenny-toolkit package installed? Set JULENNY_EXAMPLES_SRC to override."
+
+# ---------- role ----------
+if [[ -z "$ROLE" ]]; then
+    echo
+    echo "${B}Which side of the collaboration is this machine?${RST}"
+    echo
+    echo "  1) Data owner      - holds the data being queried      (acme/ scripts)"
+    echo "  2) Data consumer   - triggers the run, sees the result (beta/ scripts)"
+    echo "  3) Both            - single-machine testing"
+    echo "  4) Cancel          - don't install the examples"
+    echo
+    read -r -p "Choose (1-4) [1]: " _choice
+    case "${_choice:-1}" in
+        1) ROLE="owner" ;;
+        2) ROLE="consumer" ;;
+        3) ROLE="both" ;;
+        4) info "Cancelled. Nothing was copied."; exit 0 ;;
+        *) die "invalid choice: ${_choice}" ;;
+    esac
+fi
+
+case "$ROLE" in
+    owner|consumer|both) ;;
+    *) die "--role must be owner, consumer or both (got '$ROLE')" ;;
+esac
+
+# ---------- destination ----------
+if [[ -z "$DEST" ]]; then
+    echo
+    read -r -p "Where should they go? [$DEST_DEFAULT]: " _dest
+    DEST="${_dest:-$DEST_DEFAULT}"
+fi
+
+# Expand a leading ~ typed by hand (the shell does not do it for read input).
+[[ "$DEST" == "~"* ]] && DEST="${HOME}${DEST#\~}"
+
+if [[ -e "$DEST" && -n "$(ls -A "$DEST" 2>/dev/null || true)" ]] && ! $FORCE; then
+    die "$DEST exists and is not empty.
+Pass --force to overwrite it, or choose a different folder."
+fi
+
+# ---------- confirm ----------
+if ! $ASSUME_YES; then
+    echo
+    echo "  role:        $ROLE"
+    echo "  destination: $DEST"
+    echo
+    read -r -p "Proceed? [Y/n]: " _ok
+    case "${_ok:-Y}" in
+        [Yy]*) ;;
+        *) info "Cancelled. Nothing was copied."; exit 0 ;;
+    esac
+fi
+
+# ---------- copy ----------
+# Copy the whole tree, then prune the side that was not asked for. Pruning
+# rather than enumerating what to include means a newly added shared file is
+# picked up automatically instead of being silently left behind.
+mkdir -p "$DEST"
+cp -R "$SRC"/. "$DEST"/
+chmod -R u+w "$DEST"
+
+case "$ROLE" in
+    owner)
+        rm -rf "$DEST"/*/beta "$DEST"/_core/main "$DEST"/_core/sides/data-consumer.env
+        ;;
+    consumer)
+        rm -rf "$DEST"/*/acme "$DEST"/_core/lead "$DEST"/_core/sides/data-owner.env
+        ;;
+esac
+
+find "$DEST" -name '*.sh' -exec chmod +x {} +
+
+# ---------- next steps ----------
+case "$ROLE" in
+    owner)    _side_dir="acme" ;;
+    consumer) _side_dir="beta" ;;
+    both)     _side_dir="acme" ;;
+esac
+
+echo
+success "Examples installed to $DEST"
+echo
+echo "${B}Next steps${RST}"
+echo "  1. Pick a scenario:   ls $DEST"
+echo "  2. Run your side:     cd $DEST/<scenario>/$_side_dir && ./run.sh"
+echo
+info "Start with $DEST/README.md for the prerequisites and the phase breakdown,"
+info "and each scenario's README.md for its sample data and expected result."
+if [[ "$ROLE" == "both" ]]; then
+    echo
+    info "You installed both sides. To drive them from one host, give each shell"
+    info "its own workdir (export JL_WORKDIR=...); see README.md."
+fi

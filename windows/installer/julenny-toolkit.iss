@@ -41,6 +41,7 @@ Name: "custom"; Description: "Choose what to install";               Flags: iscu
 Name: "app"; Description: "JuLenny Toolkit desktop app (graphical UI)";        Types: full
 Name: "cli"; Description: "Command-line tool (julenny-toolkit)";              Types: full
 Name: "mcp"; Description: "MCP server for Claude Desktop (julenny-mcp)";  Types: full
+Name: "examples"; Description: "Example scripts (integration reference)"; Types: full
 
 [Files]
 ; --- Installer-only helper: modern folder picker (x86, called during the wizard).
@@ -57,6 +58,12 @@ Source: "..\..\mcp\sea\julenny-mcp.exe";                  DestDir: "{app}"; Comp
 Source: "merge-claude-config.ps1";                        DestDir: "{app}"; Components: mcp; Flags: ignoreversion
 ; --- UI app (D2: plain win32 payload). PLACEHOLDER source dir - fix per #23. ---
 Source: "{#AppSourceDir}\*";                              DestDir: "{app}\app"; Components: app; Flags: ignoreversion recursesubdirs createallsubdirs
+; --- Example scripts. Read-only reference copy under {app}, mirroring the .deb's
+;     /usr/share/julenny-toolkit/examples. The helper below copies the operator's
+;     chosen side out to a writable folder; it stays installed so they can re-run
+;     it later to switch side or make another copy. ---
+Source: "..\..\examples\*";                               DestDir: "{app}\examples"; Components: examples; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "julenny-toolkit-examples.ps1";                   DestDir: "{app}"; Components: examples; Flags: ignoreversion
 
 [Icons]
 Name: "{autoprograms}\JuLenny Toolkit"; Filename: "{app}\app\JuLennyFHE.exe"; Components: app
@@ -77,11 +84,20 @@ Filename: "powershell.exe"; \
   Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\merge-claude-config.ps1"" -ApiKey ""{code:GetApiKey}"" -McpExePath ""{app}\julenny-mcp.exe"" -Workdir ""{code:GetWorkdir}"""; \
   StatusMsg: "Configuring the JuLenny connector in Claude Desktop..."; \
   Flags: runhidden waituntilterminated; Components: mcp
+; Copy the chosen side of the examples out to the operator's folder. Same helper
+; they can re-run later to switch side; -Force because the wizard already owns
+; the destination choice, -Yes because the wizard already confirmed it.
+Filename: "powershell.exe"; \
+  Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\julenny-toolkit-examples.ps1"" -Role ""{code:GetExamplesRole}"" -Dest ""{code:GetExamplesDest}"" -Source ""{app}\examples"" -Force -Yes"; \
+  StatusMsg: "Copying the example scripts..."; \
+  Flags: runhidden waituntilterminated; Components: examples; Check: ShouldCopyExamples
 
 [Code]
 var
-  ApiKeyPage:  TInputQueryWizardPage;
-  WorkdirPage: TInputDirWizardPage;
+  ApiKeyPage:       TInputQueryWizardPage;
+  WorkdirPage:      TInputDirWizardPage;
+  ExamplesRolePage: TInputOptionWizardPage;
+  ExamplesDirPage:  TInputDirWizardPage;
 
 // Modern folder picker exported by folderpicker.dll (bundled dontcopy, x86,
 // extracted to {tmp} on first call). files: + delayload so a load failure is
@@ -110,6 +126,26 @@ begin
   end;
 end;
 
+// Same modern picker for the examples destination. Declared before
+// InitializeWizard because Pascal Script resolves in one pass.
+procedure ExamplesBrowseClick(Sender: TObject);
+var
+  Buf: String;
+  n: Integer;
+begin
+  SetLength(Buf, 1024);
+  try
+    n := ShowFolderDialog('Select a folder for the example scripts', ExamplesDirPage.Values[0], Buf, 1024);
+  except
+    n := -1;
+  end;
+  if n > 0 then
+  begin
+    SetLength(Buf, n);
+    ExamplesDirPage.Values[0] := Buf;
+  end;
+end;
+
 procedure InitializeWizard;
 begin
   ApiKeyPage := CreateInputQueryPage(wpSelectComponents,
@@ -131,6 +167,66 @@ begin
   WorkdirPage.Values[0] := ExpandConstant('{localappdata}\julenny-toolkit\workdir');
   // Swap the legacy folder-tree Browse for the modern IFileDialog picker.
   WorkdirPage.Buttons[0].OnClick := @BrowseClick;
+
+  // Which side of the collaboration this machine is. Determines which half of
+  // the example tree gets copied out. The last option is an explicit "not now",
+  // so the operator can still decline after seeing the page.
+  ExamplesRolePage := CreateInputOptionPage(WorkdirPage.ID,
+    'Example scripts',
+    'Which side of the collaboration is this machine?',
+    'The examples come in two halves. Pick yours and only that half is copied' + #13#10 +
+    'to a folder you choose. (Only used if you install the example scripts.)',
+    True, False);
+  ExamplesRolePage.Add('Data owner - holds the data being queried (acme)');
+  ExamplesRolePage.Add('Data consumer - triggers the run, sees the result (beta)');
+  ExamplesRolePage.Add('Both - for single-machine testing');
+  ExamplesRolePage.Add('Don''t copy them now (you can run the helper later)');
+  ExamplesRolePage.SelectedValueIndex := 0;
+
+  ExamplesDirPage := CreateInputDirPage(ExamplesRolePage.ID,
+    'Example scripts folder',
+    'Where should the example scripts be copied?',
+    'A read-only reference copy always goes into the install folder. This is the' + #13#10 +
+    'editable working copy.',
+    False, '');
+  ExamplesDirPage.Add('');
+  ExamplesDirPage.Values[0] := ExpandConstant('{userdocs}\julenny-examples');
+  ExamplesDirPage.Buttons[0].OnClick := @ExamplesBrowseClick;
+end;
+
+// Which role the operator picked, as the helper's -Role argument. Empty when
+// they chose "don't copy them now".
+function GetExamplesRole(Param: String): String;
+begin
+  case ExamplesRolePage.SelectedValueIndex of
+    0: Result := 'owner';
+    1: Result := 'consumer';
+    2: Result := 'both';
+  else
+    Result := '';
+  end;
+end;
+
+function GetExamplesDest(Param: String): String;
+begin
+  Result := ExamplesDirPage.Values[0];
+end;
+
+// Run the copy only when the component is installed AND a side was chosen.
+function ShouldCopyExamples: Boolean;
+begin
+  Result := IsComponentSelected('examples') and (GetExamplesRole('') <> '');
+end;
+
+// Hide both example pages unless the component is selected, and hide the
+// destination page when the operator already said "don't copy them now".
+function ShouldSkipPage(PageID: Integer): Boolean;
+begin
+  Result := False;
+  if (PageID = ExamplesRolePage.ID) then
+    Result := not IsComponentSelected('examples')
+  else if (PageID = ExamplesDirPage.ID) then
+    Result := (not IsComponentSelected('examples')) or (GetExamplesRole('') = '');
 end;
 
 function GetApiKey(Param: String): String;

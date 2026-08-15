@@ -34,12 +34,24 @@ The source code in this repository is published so that any participating organi
 
 ### Linux (Debian / Ubuntu)
 
-The `.deb` is self-contained: OpenFHE is statically linked into the binary, and the only runtime dependencies are standard system libraries already present on any Debian or Ubuntu install. It installs both the `julenny-toolkit` CLI and the `julenny-mcp` MCP server.
+OpenFHE is statically linked into the binary, so the CLI itself has no unusual runtime dependencies. The package installs the `julenny-toolkit` CLI, the `julenny-mcp` MCP server, and the example scripts.
 
 ```bash
-sudo dpkg -i julenny-toolkit-linux-amd64.deb
+sudo apt install ./julenny-toolkit-linux-amd64.deb
 julenny-toolkit --version
 ```
+
+Use `apt install ./file.deb` rather than `dpkg -i`: the example scripts need `jq`, `curl` and `xxd`, which the package declares as dependencies, and apt installs them for you. (`dpkg -i` would leave the package unconfigured until you ran `sudo apt-get install -f`.)
+
+#### The example scripts
+
+The examples are the canonical reference for driving the toolkit from your own pipeline. They install read-only under `/usr/share/julenny-toolkit/examples`. For a copy you can run and edit:
+
+```bash
+julenny-toolkit-examples
+```
+
+It asks which side of the collaboration this machine is (data owner, data consumer, or both) and where to put the scripts, then copies only that side. Skip it entirely if you only need the CLI or the MCP server. For unattended installs, pass `--role` and `--dest`.
 
 ### Windows
 

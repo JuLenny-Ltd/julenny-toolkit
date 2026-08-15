@@ -1,0 +1,29 @@
+#!/bin/sh
+# Debian post-install. dpkg has no interactive flow, so this only points the
+# operator at the helper that does the asking (julenny-toolkit-examples).
+set -e
+
+case "$1" in
+    configure)
+        cat <<'EOF'
+
+JuLenny FHE Toolkit installed.
+
+  julenny-toolkit --version    offline crypto CLI (no networking)
+  julenny-mcp                  MCP server, for driving the flow from Claude
+
+The example scripts are the reference for integrating the toolkit into your own
+pipelines. They ship read-only under /usr/share/julenny-toolkit/examples. For a
+copy you can run and edit:
+
+  julenny-toolkit-examples
+
+It asks which side of the collaboration this machine is (data owner, data
+consumer, or both) and where to put the scripts. Skip it if you only need the
+CLI or the MCP server.
+
+EOF
+        ;;
+esac
+
+exit 0

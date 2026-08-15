@@ -8,6 +8,13 @@
 *.sh    text eol=lf
 *.bash  text eol=lf
 
+# Shell scripts with no extension: the helper installed onto PATH, and the dpkg
+# maintainer scripts. Not covered by *.sh above, and a CRLF shebang fails hard
+# on Linux ("bad interpreter: /usr/bin/env bash^M"). The postinst matters most:
+# a broken maintainer script makes the package fail to configure.
+linux/julenny-toolkit-examples  text eol=lf
+linux/debian/*                  text eol=lf
+
 # PowerShell, cmd, and batch scripts always run on Windows; force CRLF.
 *.ps1   text eol=crlf
 *.cmd   text eol=crlf

@@ -59,6 +59,30 @@ elseif(FHE_TOOLKIT_BUNDLE_MCP)
     message(STATUS "  Bundle MCP server:     SKIPPED (mcp/sea/julenny-mcp not built; run linux/build-mcp-exe.sh)")
 endif()
 
+# ----------------------------------------------------------------------------
+# Example scripts. These are the canonical reference for integrating the toolkit
+# into a pipeline with no Claude in the loop, so the package must ship them; a
+# customer on the scripts path who has to clone them off GitHub is not an
+# install experience.
+#
+# They go in read-only under /usr/share. dpkg has no interactive flow and cannot
+# cleanly install a subset (it records every file it installs, so a postinst
+# that deletes half of them leaves the manifest describing files that are not on
+# disk). Instead the package ships the full tree, and the julenny-toolkit-examples
+# helper asks which side of the collaboration this machine is and copies just
+# that side wherever the operator wants. The postinst only points at the helper.
+#
+# CPACK_STRIP_FILES is ON but affects binaries only; shell scripts are untouched.
+# ----------------------------------------------------------------------------
+install(DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/examples/"
+    DESTINATION share/julenny-toolkit/examples
+    COMPONENT runtime
+    USE_SOURCE_PERMISSIONS
+    PATTERN ".git" EXCLUDE)
+
+install(PROGRAMS "${CMAKE_CURRENT_SOURCE_DIR}/linux/julenny-toolkit-examples"
+    DESTINATION bin COMPONENT runtime)
+
 # ============================================================================
 # Packaging (CPack) - component-restricted so deps' install rules don't leak
 # ============================================================================
@@ -95,6 +119,22 @@ set(CPACK_DEBIAN_RUNTIME_PACKAGE_SECTION      "utils")
 set(CPACK_DEBIAN_RUNTIME_PACKAGE_PRIORITY     "optional")
 set(CPACK_DEBIAN_RUNTIME_PACKAGE_HOMEPAGE     "https://github.com/JuLenny-Ltd/julenny-toolkit")
 set(CPACK_DEBIAN_RUNTIME_PACKAGE_SHLIBDEPS    ON)
+
+# The example scripts shell out to these. SHLIBDEPS cannot discover them: they
+# are separate executables, not shared libraries the ELF links against.
+# sha256sum is in coreutils, which is Essential, so it is never declared.
+# node is only needed by functions declaring an encodingRecipe (currently just
+# decision-tree-inference) and the scripts fail with a clear message when it is
+# missing, so it is a Suggests rather than a hard dependency.
+set(CPACK_DEBIAN_RUNTIME_PACKAGE_DEPENDS  "jq (>= 1.6), curl, xxd")
+set(CPACK_DEBIAN_RUNTIME_PACKAGE_SUGGESTS "nodejs")
+
+# postinst points the operator at julenny-toolkit-examples. STRICT_PERMISSION
+# forces 0755 on the maintainer script, so a checkout that lost the exec bit
+# (Windows, or a zip round-trip) still produces an installable package.
+set(CPACK_DEBIAN_RUNTIME_PACKAGE_CONTROL_EXTRA
+    "${CMAKE_CURRENT_SOURCE_DIR}/linux/debian/postinst")
+set(CPACK_DEBIAN_PACKAGE_CONTROL_STRICT_PERMISSION ON)
 
 include(CPack)
 
