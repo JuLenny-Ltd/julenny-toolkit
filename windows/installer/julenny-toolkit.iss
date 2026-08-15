@@ -14,14 +14,12 @@
 ;                                          process and would fail to load an x64 DLL.
 ;   the app payload at AppSourceDir        (see the open question below)
 ;
-; OPEN: AppSourceDir points at an UNPACKAGED (WindowsPackageType=None) WinUI 3
-; build, i.e. option D2 from .plans/installer-and-mcp-packaging.md. The app is
-; still built as an MSIX by windows\build-release.ps1, so confirm which of these
-; is intended before cutting a release:
-;   D1  app stays a separate signed MSIX, installed alongside this installer
-;   D2  app is repackaged unpackaged so this one installer carries everything
-; Under D1 the [Files] entry for {#AppSourceDir} and the "app" component should
-; come out of this script entirely.
+; PACKAGING: option D2 (decided 2026-08-15). ONE installer carries everything -
+; app, CLI, MCP and the example scripts. There is no separate MSIX download.
+; JuLennyFHE.vcxproj is already configured for it (WindowsPackageType=None,
+; WindowsAppSDKSelfContained=true), so AppSourceDir below is a real unpackaged,
+; self-contained build: the Windows App SDK runtime ships inside it and the
+; customer installs no prerequisites.
 
 #define AppVersion "0.7.0"
 ; Unpackaged (WindowsPackageType=None, self-contained) WinUI 3 build output (#23).
@@ -69,8 +67,12 @@ Source: "..\..\build\cli\Release\libcrypto-4-x64.dll";    DestDir: "{app}"; Comp
 ; --- MCP single self-contained exe (SEA, #22) + the config-merge helper ---
 Source: "..\..\mcp\sea\julenny-mcp.exe";                  DestDir: "{app}"; Components: mcp; Flags: ignoreversion
 Source: "merge-claude-config.ps1";                        DestDir: "{app}"; Components: mcp; Flags: ignoreversion
-; --- UI app (D2: plain win32 payload). PLACEHOLDER source dir - fix per #23. ---
-Source: "{#AppSourceDir}\*";                              DestDir: "{app}\app"; Components: app; Flags: ignoreversion recursesubdirs createallsubdirs
+; --- UI app (D2: unpackaged, self-contained win32 payload). ---
+;     Excludes *.pdb: those are debug symbols, ~85MB of the ~188MB payload. They
+;     are no use to a customer, they inflate the download, and they hand a
+;     reverse engineer a map of the binary. Keep them in the build output for
+;     crash analysis; just do not ship them.
+Source: "{#AppSourceDir}\*";                              DestDir: "{app}\app"; Components: app; Flags: ignoreversion recursesubdirs createallsubdirs; Excludes: "*.pdb"
 ; --- Example scripts. Read-only reference copy under {app}, mirroring the .deb's
 ;     /usr/share/julenny-toolkit/examples. The helper below copies the operator's
 ;     chosen side out to a writable folder; it stays installed so they can re-run

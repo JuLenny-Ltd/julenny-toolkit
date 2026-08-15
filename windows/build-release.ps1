@@ -1,4 +1,10 @@
-# Build the JuLenny FHE WinUI 3 app as a Release|x64 packaged MSIX.
+# Build the JuLenny FHE WinUI 3 app as an UNPACKAGED, self-contained Release|x64
+# payload, ready for the Inno installer to bundle.
+#
+# This no longer produces an MSIX. Packaging is D2 (decided 2026-08-15): one
+# installer carries the app, the CLI, the MCP server and the example scripts, so
+# a standalone MSIX would be a second artifact to build, sign and keep in sync
+# for no one's benefit.
 #
 # Usage (from any PowerShell prompt):
 #   pwsh windows\build-release.ps1            # default: Release|x64, Clean+Rebuild
@@ -8,9 +14,9 @@
 #   1. Locates VS 2026 via vswhere and enters an x64 dev shell.
 #   2. Ensures nuget.exe is present, restores packages.config.
 #   3. Invokes msbuild on JuLennyFHE.vcxproj for Release|x64, producing
-#      the packaged MSIX in
-#        windows\JuLennyFHE\AppPackages\JuLennyFHE\JuLennyFHE_<ver>_x64_Test\
-#   4. Prints MSIX path, size, and SHA256.
+#        windows\JuLennyFHE\x64\Release\JuLennyFHE\
+#      containing JuLennyFHE.exe plus the Windows App SDK runtime.
+#   4. Checks the payload is present and self-contained, and reports its size.
 #
 # Prerequisites already documented in windows\README.md:
 #   OpenFHE installed at C:\Users\David\openfhe-install
@@ -68,18 +74,22 @@ try {
 finally { Pop-Location }
 
 # 3. msbuild.
-# Note GenerateAppxPackageOnBuild=true: command-line msbuild defaults this to
-# false for WinUI 3 / Windows App SDK projects, so without it the .exe builds
-# but no MSIX is produced. The VS IDE sets it via the project template.
+# We do NOT pass GenerateAppxPackageOnBuild / AppxBundle / UapAppxPackageBuildMode
+# any more. Packaging is D2 (decided 2026-08-15): the app ships inside the single
+# Inno installer, not as a standalone MSIX, so building one is wasted time and a
+# second artifact to keep in sync.
+#
+# The project is already set up for this - WindowsPackageType=None and
+# WindowsAppSDKSelfContained=true in JuLennyFHE.vcxproj - so a plain Build
+# produces an unpackaged, self-contained payload with the Windows App SDK
+# runtime alongside the exe. Those msbuild flags were the only thing forcing the
+# MSIX path.
 $target = if ($NoClean) { "Build" } else { "Clean;Rebuild" }
 $msbuildArgs = @(
     $vcxproj,
     "/t:$target",
     "/p:Configuration=$Configuration",
     "/p:Platform=$Platform",
-    "/p:AppxBundle=Never",
-    "/p:UapAppxPackageBuildMode=SideloadOnly",
-    "/p:GenerateAppxPackageOnBuild=true",
     "/m",
     "/v:minimal",
     "/clp:Summary"
@@ -105,33 +115,47 @@ if ($exit -ne 0) {
     exit $exit
 }
 
-# 4. Locate the produced MSIX. Read the version from the manifest so we match
-# the exact expected output dir rather than picking the youngest stale dir.
-[xml]$manifest = Get-Content (Join-Path $projDir "Package.appxmanifest")
-$nsMgr = New-Object System.Xml.XmlNamespaceManager $manifest.NameTable
-$nsMgr.AddNamespace("a", "http://schemas.microsoft.com/appx/manifest/foundation/windows10")
-$ver = $manifest.SelectSingleNode("/a:Package/a:Identity", $nsMgr).Version
-if (-not $ver) { throw "Could not read Version from Package.appxmanifest." }
-Write-Host "Manifest version: $ver"
-
-$verDir = Join-Path "$projDir\AppPackages\JuLennyFHE" "JuLennyFHE_${ver}_${Platform}_Test"
-if (-not (Test-Path $verDir)) {
+# 4. Check the unpackaged payload. This folder is what the Inno installer's
+# AppSourceDir points at, so if it is missing or thin the installer will build
+# but ship a broken app.
+$payloadDir = Join-Path $projDir "$Platform\$Configuration\JuLennyFHE"
+if (-not (Test-Path $payloadDir)) {
     Write-Host ""
-    Write-Host "BUILD reported success but expected output dir was not produced:" -ForegroundColor Red
-    Write-Host "  $verDir" -ForegroundColor Red
-    Write-Host "Check the log for whether the packaging targets actually ran:" -ForegroundColor Red
-    Write-Host "  $logFile" -ForegroundColor Red
+    Write-Host "BUILD reported success but the app payload was not produced:" -ForegroundColor Red
+    Write-Host "  $payloadDir" -ForegroundColor Red
+    Write-Host "Check the log: $logFile" -ForegroundColor Red
     exit 1
 }
-$msix = Get-ChildItem $verDir -Filter "JuLennyFHE_${ver}_${Platform}.msix" | Select-Object -First 1
-if (-not $msix) {
-    Write-Host "No JuLennyFHE_${ver}_${Platform}.msix found in $verDir." -ForegroundColor Red
+
+$exe = Join-Path $payloadDir "JuLennyFHE.exe"
+if (-not (Test-Path $exe)) {
+    Write-Host "No JuLennyFHE.exe in $payloadDir." -ForegroundColor Red
     exit 1
 }
+
+# Self-contained means the Windows App SDK runtime sits next to the exe. If it
+# does not, the app will fail to start on a machine without the SDK installed,
+# and that failure would only show up on the customer's machine.
+$runtimeMarker = Join-Path $payloadDir "Microsoft.WindowsAppRuntime.dll"
+if (-not (Test-Path $runtimeMarker)) {
+    Write-Host ""
+    Write-Host "WARNING: Microsoft.WindowsAppRuntime.dll is not next to the exe." -ForegroundColor Yellow
+    Write-Host "The payload may not be self-contained; the app would then need the" -ForegroundColor Yellow
+    Write-Host "Windows App SDK installed on the target machine. Check that" -ForegroundColor Yellow
+    Write-Host "WindowsAppSDKSelfContained is still true in the vcxproj." -ForegroundColor Yellow
+}
+
+$all      = Get-ChildItem $payloadDir -Recurse -File
+$totalMB  = [math]::Round((($all | Measure-Object Length -Sum).Sum) / 1MB, 1)
+$pdbMB    = [math]::Round((($all | Where-Object { $_.Extension -eq '.pdb' } | Measure-Object Length -Sum).Sum) / 1MB, 1)
 
 Write-Host ""
 Write-Host "BUILD SUCCEEDED" -ForegroundColor Green
-Write-Host "MSIX:   $($msix.FullName)"
-Write-Host "Size:   $([math]::Round($msix.Length/1MB,2)) MB"
-Write-Host "SHA256: $((Get-FileHash $msix.FullName).Hash)"
-Write-Host "Log:    $logFile"
+Write-Host "App payload: $payloadDir"
+Write-Host "  files:     $($all.Count)"
+Write-Host "  size:      $totalMB MB  (of which $pdbMB MB is .pdb, excluded by the installer)"
+Write-Host "  exe:       $exe"
+Write-Host "  SHA256:    $((Get-FileHash $exe).Hash)"
+Write-Host "Log:         $logFile"
+Write-Host ""
+Write-Host "Next: windows\installer\julenny-toolkit.iss packages this into setup.exe." -ForegroundColor Cyan

@@ -1,11 +1,15 @@
-# Stage the freshly-built Windows MSIX (and its .cer) into the release folder
-# under the canonical names used by all prior JuLenny FHE releases:
+# Stage the freshly-built Windows installer into the release folder under the
+# canonical names used by all JuLenny FHE releases:
 #
 #   julenny-toolkit-linux-amd64
 #   julenny-toolkit-linux-amd64.deb
-#   julenny-toolkit-windows-amd64.msix
-#   julenny-toolkit-windows-amd64.cer
+#   julenny-toolkit-setup-windows-amd64.exe
 #   SHA256SUMS
+#
+# The Windows artifact is now the Inno installer, not an MSIX + .cer pair
+# (packaging D2, decided 2026-08-15: one installer carries the app, the CLI, the
+# MCP server and the example scripts). Any leftover .msix/.cer in the release
+# folder is deleted so nobody downloads a stale, separately-installable app.
 #
 # No version substring in the artifact filename - the version lives in the
 # folder name (v0.X.Y/). Platform label is `amd64`, not `x64`. This script is
@@ -22,34 +26,28 @@ param(
 
 $ErrorActionPreference = "Stop"
 
-$projDir    = Join-Path $PSScriptRoot "JuLennyFHE"
 $releaseDir = "C:\Users\David\fhe-toolkit-releases\v$Version"
-$pkgDir     = Join-Path $projDir "AppPackages\JuLennyFHE\JuLennyFHE_${Version}.0_x64_Test"
-$msixSrc    = Join-Path $pkgDir "JuLennyFHE_${Version}.0_x64.msix"
-$cerSrc     = Join-Path $pkgDir "JuLennyFHE_${Version}.0_x64.cer"
+$setupSrc   = Join-Path $PSScriptRoot "installer\Output\julenny-toolkit-setup-windows-amd64.exe"
 
 if (-not (Test-Path $releaseDir)) { throw "Release dir not found: $releaseDir" }
-if (-not (Test-Path $msixSrc))    { throw "Source MSIX not found: $msixSrc" }
-if (-not (Test-Path $cerSrc))     { throw "Source CER not found: $cerSrc" }
+if (-not (Test-Path $setupSrc)) {
+    throw "Installer not found: $setupSrc`nBuild it first: iscc windows\installer\julenny-toolkit.iss"
+}
 
 # Canonical destination names (no version, amd64 label).
 $linuxBin = Join-Path $releaseDir "julenny-toolkit-linux-amd64"
 $linuxDeb = Join-Path $releaseDir "julenny-toolkit-linux-amd64.deb"
-$winMsix  = Join-Path $releaseDir "julenny-toolkit-windows-amd64.msix"
-$winCer   = Join-Path $releaseDir "julenny-toolkit-windows-amd64.cer"
+$winSetup = Join-Path $releaseDir "julenny-toolkit-setup-windows-amd64.exe"
 
 # Fix up any non-canonical filenames left in the release folder from earlier
-# attempts (e.g. `julenny-toolkit-0.4.0-linux-amd64`, `julenny-toolkit-0.4.0-windows-x64.msix`).
+# attempts (e.g. `julenny-toolkit-0.4.0-linux-amd64`).
 Get-ChildItem $releaseDir -File | ForEach-Object {
     $name = $_.Name
     $rename = $null
     switch -Regex ($name) {
-        "^julenny-toolkit-${Version}-linux-amd64$"    { $rename = "julenny-toolkit-linux-amd64" }
-        "^julenny-toolkit-${Version}-linux-amd64\.deb$" { $rename = "julenny-toolkit-linux-amd64.deb" }
-        "^julenny-toolkit-${Version}-windows-x64\.msix$"  { $rename = "julenny-toolkit-windows-amd64.msix" }
-        "^julenny-toolkit-${Version}-windows-x64\.cer$"   { $rename = "julenny-toolkit-windows-amd64.cer" }
-        "^julenny-toolkit-${Version}-windows-amd64\.msix$" { $rename = "julenny-toolkit-windows-amd64.msix" }
-        "^julenny-toolkit-${Version}-windows-amd64\.cer$"  { $rename = "julenny-toolkit-windows-amd64.cer" }
+        "^julenny-toolkit-${Version}-linux-amd64$"       { $rename = "julenny-toolkit-linux-amd64" }
+        "^julenny-toolkit-${Version}-linux-amd64\.deb$"  { $rename = "julenny-toolkit-linux-amd64.deb" }
+        "^julenny-toolkit-${Version}-windows-amd64\.exe$" { $rename = "julenny-toolkit-setup-windows-amd64.exe" }
     }
     if ($rename -and $rename -ne $name) {
         $dst = Join-Path $releaseDir $rename
@@ -63,17 +61,25 @@ Get-ChildItem $releaseDir -File | ForEach-Object {
     }
 }
 
-# Copy the Windows artifacts to their canonical names (overwrite if present).
-Write-Host "Staging Windows artifacts:"
-Write-Host "  $msixSrc"
-Write-Host "    -> $winMsix"
-Copy-Item -Force $msixSrc $winMsix
-Write-Host "  $cerSrc"
-Write-Host "    -> $winCer"
-Copy-Item -Force $cerSrc $winCer
+# The MSIX and its .cer are no longer release artifacts (packaging D2: the app
+# ships inside the installer). Clear out any left over from a previous release
+# so customers are not offered a stale, separately-installable app.
+foreach ($stale in @("julenny-toolkit-windows-amd64.msix", "julenny-toolkit-windows-amd64.cer")) {
+    $p = Join-Path $releaseDir $stale
+    if (Test-Path $p) {
+        Write-Host "  Removing superseded artifact: $stale (app now ships inside the installer)"
+        Remove-Item -Force $p
+    }
+}
 
-# Sanity-check: all four expected artifacts present.
-$expected = @($linuxBin, $linuxDeb, $winMsix, $winCer)
+# Copy the Windows installer to its canonical name (overwrite if present).
+Write-Host "Staging Windows artifact:"
+Write-Host "  $setupSrc"
+Write-Host "    -> $winSetup"
+Copy-Item -Force $setupSrc $winSetup
+
+# Sanity-check: all three expected artifacts present.
+$expected = @($linuxBin, $linuxDeb, $winSetup)
 $missing = $expected | Where-Object { -not (Test-Path $_) }
 if ($missing) {
     Write-Host ""
@@ -82,13 +88,12 @@ if ($missing) {
     exit 1
 }
 
-# Regenerate SHA256SUMS. Order matches prior releases: linux bin, linux deb,
-# windows msix, windows cer. Two spaces between hash and filename, lowercase.
+# Regenerate SHA256SUMS. Order: linux bin, linux deb, windows installer.
+# Two spaces between hash and filename, lowercase.
 $order = @(
     "julenny-toolkit-linux-amd64",
     "julenny-toolkit-linux-amd64.deb",
-    "julenny-toolkit-windows-amd64.msix",
-    "julenny-toolkit-windows-amd64.cer"
+    "julenny-toolkit-setup-windows-amd64.exe"
 )
 $lines = $order | ForEach-Object {
     $path = Join-Path $releaseDir $_
