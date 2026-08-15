@@ -1,14 +1,27 @@
 ; JuLenny Toolkit - unified Windows installer (Inno Setup 6).
-; One installer, three checkbox components: UI app / CLI / MCP. Per-user, no admin.
+; One installer, four checkbox components: UI app / CLI / MCP / example scripts.
+; Per-user, no admin rights required.
 ;
-; DRAFT (2026-06-22): authored without a build/test run. Prerequisites before this
-; compiles and works end-to-end:
-;   #22  the SEA single-exe must exist at  mcp\sea\julenny-mcp.exe
-;   #23  the app must be a PLAIN (unpackaged) win32 build; set AppSourceDir below
-;        to its output folder (D2). The path here is a PLACEHOLDER - fix it.
-;   CLI  build\cli\Release\julenny-toolkit.exe (+ the 2 runtime DLLs) - already built.
-; Build:  iscc windows\installer\julenny-toolkit.iss   (Inno Setup's compiler)
+; Build:  iscc windows\installer\julenny-toolkit.iss     (Inno Setup's compiler)
 ; Sign:   signtool the three exes AND the produced setup.exe with the app cert.
+;
+; Inputs it expects to already exist (build them first):
+;   build\cli\Release\julenny-toolkit.exe + libomp.dll + libcrypto-4-x64.dll
+;                                          (windows\build-cli.ps1)
+;   mcp\sea\julenny-mcp.exe                (windows\build-mcp-exe.ps1)
+;   windows\installer\folderpicker.dll     (windows\build-folderpicker.ps1)
+;                                          x86 on purpose: setup.exe is a 32-bit
+;                                          process and would fail to load an x64 DLL.
+;   the app payload at AppSourceDir        (see the open question below)
+;
+; OPEN: AppSourceDir points at an UNPACKAGED (WindowsPackageType=None) WinUI 3
+; build, i.e. option D2 from .plans/installer-and-mcp-packaging.md. The app is
+; still built as an MSIX by windows\build-release.ps1, so confirm which of these
+; is intended before cutting a release:
+;   D1  app stays a separate signed MSIX, installed alongside this installer
+;   D2  app is repackaged unpackaged so this one installer carries everything
+; Under D1 the [Files] entry for {#AppSourceDir} and the "app" component should
+; come out of this script entirely.
 
 #define AppVersion "0.7.0"
 ; Unpackaged (WindowsPackageType=None, self-contained) WinUI 3 build output (#23).
