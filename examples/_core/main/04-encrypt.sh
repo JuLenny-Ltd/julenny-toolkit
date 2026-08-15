@@ -1,22 +1,28 @@
 #!/usr/bin/env bash
-# Beta: pick a dataset for each queryAnalyst input the function-def declares.
+# Data consumer: pick a dataset for each queryAnalyst input the function-def
+# declares.
 #
-# Diff vs joint-record-overlap/beta/04-encrypt.sh:
-#   - Adds a branch on inputs[i].encoding: if it starts with "plaintext-"
-#     (rule-based-cross-match's left_dictionary, right_dictionary, rule_pairs),
-#     upload the raw file via upload_plaintext_dataset (multipart POST with
-#     kind=plaintext flag). No julenny-fhe encrypt pass.
-#   - Skips the dataset_csv_map.json bookkeeping for plaintext inputs —
+# Iterates over the inputs whose role matches this side's responsibility
+# (queryAnalyst), uploads each, and declares preferred-datasets.
+#
+# Each input branches on inputs[i].encoding:
+#   - If it starts with "plaintext-" (for example rule-based-cross-match's
+#     left_dictionary, right_dictionary and rule_pairs), the raw file is
+#     uploaded via upload_plaintext_dataset (multipart POST with the
+#     kind=plaintext flag). No `julenny-fhe crypto encrypt` pass.
+#   - Plaintext inputs also skip the dataset_csv_map.json bookkeeping, because
 #     06-decrypt's resolve-indicator only applies to encrypted indicator
 #     outputs, not plaintext attachments.
 #
-# Everything else mirrors the joint-record-overlap behaviour.
+# Which inputs are plaintext is entirely function-def driven, so this branch is
+# what lets one script serve every scenario.
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-# shellcheck source=_lib.sh
+# shellcheck source=../sides/data-consumer.env
 source "$SCRIPT_DIR/../sides/data-consumer.env"
+# shellcheck source=../lib.sh
 source "$SCRIPT_DIR/../lib.sh"
 load_session
 

@@ -1,19 +1,21 @@
 #!/usr/bin/env bash
-# Beta (data consumer / keysetup main) session setup for rule-based-cross-match.
+# Data-consumer (keysetup main) session setup.
 #
-# Same shape as joint-record-overlap/beta/00-init.sh, with two changes:
+# Function-agnostic: this backs every scenario, because the function is picked
+# from the platform's live list at run time rather than hardcoded here.
+#
 #   1. The collaboration picker lists existing data-consumer collaborations
 #      up front and appends an "n) Create a NEW collaboration + permission"
-#      option, mirroring the dataset picker in 04-encrypt.sh and the Acme-
-#      side picker. Picking 'n' POSTs to /api/fhe-projects and
-#      /api/fhe-permissions (see _lib.sh's create_collaboration /
-#      create_permission helpers). For Beta this 'n' path is primarily useful
-#      in the single-machine smoke-test scenario where one shell drives
-#      both sides; in the standard two-party flow, Acme creates the collab
-#      and Beta picks an existing one. With zero existing collaborations,
-#      'n' becomes the only and default choice.
-#   2. Removes the BFV-only guard. CKKS is now supported by the toolkit
-#      core; this script lets the function-def's declared scheme through.
+#      option, mirroring the dataset picker in 04-encrypt.sh and the
+#      data-owner picker. Picking 'n' POSTs to /api/fhe-projects and
+#      /api/fhe-permissions (see lib.sh's create_collaboration /
+#      create_permission helpers). On this side the 'n' path is primarily
+#      useful in the single-machine smoke-test scenario where one shell drives
+#      both sides; in the standard two-party flow, the data owner creates the
+#      collaboration and the consumer picks an existing one. With zero existing
+#      collaborations, 'n' becomes the only and default choice.
+#   2. No scheme guard: both BFV and CKKS are supported by the toolkit core,
+#      so the function-def's declared scheme is let through.
 #
 # Note: the permission picker (once a collaboration is picked) does NOT offer
 # 'n) Create new permission' because only the data owner (Acme) can permission a
@@ -26,8 +28,9 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-# shellcheck source=_lib.sh
+# shellcheck source=../sides/data-consumer.env
 source "$SCRIPT_DIR/../sides/data-consumer.env"
+# shellcheck source=../lib.sh
 source "$SCRIPT_DIR/../lib.sh"
 
 mkdir -p "$JL_ROOT" "$JL_SIGNING_DIR" "$JL_COLLABS_DIR"
@@ -35,7 +38,7 @@ chmod 700 "$JL_ROOT"
 
 migrate_legacy_workdir_if_needed
 
-step "JuLenny rule-based-cross-match setup (Beta: data consumer / main)"
+step "JuLenny collaboration setup ($JL_OUR_LABEL: $JL_ROLE_LABEL)"
 
 # -------- API connection --------
 JULENNY_API_BASE="${JULENNY_API_BASE:-https://julenny.net}"

@@ -11,14 +11,15 @@
 #     releaser flow - poll for awaiting-release, partial-decrypt, sign,
 #     upload. Acme will see the plaintext answer.
 #
-# Both flows live in _lib.sh as releaser_flow / viewer_flow; this script
+# Both flows live in lib.sh as releaser_flow / viewer_flow; this script
 # only picks which one to call.
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-# shellcheck source=_lib.sh
+# shellcheck source=../sides/data-consumer.env
 source "$SCRIPT_DIR/../sides/data-consumer.env"
+# shellcheck source=../lib.sh
 source "$SCRIPT_DIR/../lib.sh"
 load_session
 

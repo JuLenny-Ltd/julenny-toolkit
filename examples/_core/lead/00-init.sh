@@ -1,22 +1,24 @@
 #!/usr/bin/env bash
-# Acme (data owner / keysetup lead) session setup for rule-based-cross-match.
+# Data-owner (keysetup lead) session setup.
 #
-# Same shape as joint-record-overlap/acme/00-init.sh, with three changes:
+# Function-agnostic: this backs every scenario, because the function is picked
+# from the platform's live list at run time rather than hardcoded here.
+#
 #   1. The collaboration picker lists existing data-owner collaborations
 #      up front and appends an "n) Create a NEW collaboration + permission"
 #      option, mirroring the dataset picker in 04-encrypt.sh. Picking 'n'
-#      POSTs to /api/fhe-projects and /api/fhe-permissions (see _lib.sh's
+#      POSTs to /api/fhe-projects and /api/fhe-permissions (see lib.sh's
 #      create_collaboration / create_permission helpers). With zero existing
 #      collaborations, 'n' becomes the only and default choice.
-#   2. Removes the BFV-only guard. CKKS is now supported by the toolkit
-#      core; this script lets the function-def's declared scheme through
-#      and just records it in config.env.
+#   2. No scheme guard: both BFV and CKKS are supported by the toolkit core,
+#      so the function-def's declared scheme is let through and recorded in
+#      config.env.
 #   3. Once a collaboration is picked, the permission picker uses the same
 #      shape: list existing permissions and append "n) Create a NEW permission via
-#      the API". Acme is the data owner so it can POST /api/fhe-permissions
-#      under the existing collaboration with the same authority it used
-#      to create the collaboration. Same scheme/function picker as the
-#      new-collaboration branch.
+#      the API". The data owner can POST /api/fhe-permissions under the
+#      existing collaboration with the same authority it used to create the
+#      collaboration. Same scheme/function picker as the new-collaboration
+#      branch.
 #
 # Saves everything to ~/.julenny-collab/config.env so later scripts pick
 # it up automatically.
@@ -24,8 +26,9 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-# shellcheck source=_lib.sh
+# shellcheck source=../sides/data-owner.env
 source "$SCRIPT_DIR/../sides/data-owner.env"
+# shellcheck source=../lib.sh
 source "$SCRIPT_DIR/../lib.sh"
 
 mkdir -p "$JL_ROOT" "$JL_SIGNING_DIR" "$JL_COLLABS_DIR"
@@ -33,7 +36,7 @@ chmod 700 "$JL_ROOT"
 
 migrate_legacy_workdir_if_needed
 
-step "JuLenny rule-based-cross-match setup (Acme: data owner / lead)"
+step "JuLenny collaboration setup ($JL_OUR_LABEL: $JL_ROLE_LABEL)"
 
 # -------- API connection --------
 JULENNY_API_BASE="${JULENNY_API_BASE:-https://julenny.net}"

@@ -1,24 +1,22 @@
 #!/usr/bin/env bash
-# Acme: pick a dataset for each dataOwner input the function-def declares.
+# Data owner: pick a dataset for each dataOwner input the function-def declares.
 #
-# Diff vs joint-record-overlap/acme/04-encrypt.sh:
-#   - Adds a branch on inputs[i].encoding: if the encoding string starts
-#     with "plaintext-" (e.g. plaintext-line-list, plaintext-csv), upload
-#     the raw file via the upload_plaintext_dataset helper instead of
-#     running it through `julenny-fhe crypto encrypt`. Used by inputs
-#     declared as plaintext in the function-def (none of the dataOwner
-#     inputs in rule-based-cross-match's current shape, but the branch is
-#     here defensively in case the function-def shape evolves).
+# Iterates over the inputs whose role matches this side's responsibility
+# (dataOwner), uploads each, and declares preferred-datasets.
 #
-# Everything else mirrors the joint-record-overlap behaviour: iterate
-# over inputs whose role matches Acme's responsibility (dataOwner),
-# upload, declare preferred-datasets.
+# Each input branches on inputs[i].encoding: if the encoding string starts
+# with "plaintext-" (e.g. plaintext-line-list, plaintext-csv), the raw file
+# is uploaded via the upload_plaintext_dataset helper instead of being run
+# through `julenny-fhe crypto encrypt`. Which inputs are plaintext is entirely
+# function-def driven, so this branch is what lets one script serve every
+# scenario.
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-# shellcheck source=_lib.sh
+# shellcheck source=../sides/data-owner.env
 source "$SCRIPT_DIR/../sides/data-owner.env"
+# shellcheck source=../lib.sh
 source "$SCRIPT_DIR/../lib.sh"
 load_session
 

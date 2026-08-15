@@ -10,15 +10,16 @@
 #     flow - poll for released, download result + Beta's partial,
 #     partial-decrypt locally, combine, render the plaintext answer.
 #
-# Both flows live in _lib.sh as releaser_flow / viewer_flow; this script
+# Both flows live in lib.sh as releaser_flow / viewer_flow; this script
 # only picks which one to call. Renamed in 0.5.5 to "Acme's end-of-cycle"
 # instead of "release" since the script's role depends on visibility now.
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-# shellcheck source=_lib.sh
+# shellcheck source=../sides/data-owner.env
 source "$SCRIPT_DIR/../sides/data-owner.env"
+# shellcheck source=../lib.sh
 source "$SCRIPT_DIR/../lib.sh"
 load_session
 

@@ -634,7 +634,7 @@ create_permission() {
 # includes "rotation" (see plans/rotation-key-augmentation-contract.md
 # on the platform side).
 #
-# Symmetric with beta/_lib.sh's helpers: same contract, same shape, same
+# Symmetric with the data-consumer helpers: same contract, same shape, same
 # polling cadence. The protocol roles differ (Acme = owner / lead, Beta =
 # consumer / main) but the platform-state plumbing is identical.
 
@@ -1180,7 +1180,9 @@ viewer_flow() {
         # JULENNY_SHOW_SLOTS overrides; fallback 16.
         local n_slots="${JULENNY_SHOW_SLOTS:-}"
         if [[ -z "$n_slots" && -n "${JULENNY_INPUT_CSV:-}" && -f "${JULENNY_INPUT_CSV:-}" ]]; then
-            n_slots="$(wc -l < "$JULENNY_INPUT_CSV")"
+            # grep -c '' not wc -l: wc counts newlines, so it undercounts by
+            # one when the operator's file has no trailing newline.
+            n_slots="$(grep -c '' < "$JULENNY_INPUT_CSV")"
         fi
         [[ -n "$n_slots" && "$n_slots" -gt 0 ]] || n_slots=16
         julenny-fhe crypto combine \

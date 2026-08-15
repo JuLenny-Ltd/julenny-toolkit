@@ -27,7 +27,8 @@ examples/
   rule-based-cross-match/    Thin scenario: acme/ + beta/ + data + README
   federated-average/         Thin scenario
   negotiation-matrix/        Thin scenario
-  joint-record-overlap/      Older self-contained scenario (full scripts per side)
+  decision-tree-inference/   Thin scenario
+  joint-record-overlap/      Thin scenario
 ```
 
 ### `_core/` — the shared driver
@@ -57,9 +58,8 @@ so one scenario folder can run any function of its family. Each scenario also
 carries a `README.md` with its sample data and the hand-verifiable expected
 result.
 
-(`joint-record-overlap/` predates the `_core` refactor and still ships the full
-numbered scripts per side. It works the same way; it just isn't a thin
-bootstrap.)
+Every scenario is a thin bootstrap over `_core`. There is no per-scenario copy of
+the driver, so a fix to the protocol lands in one place for all of them.
 
 ## Running a demo
 
@@ -104,6 +104,7 @@ the data consumer (it encrypts, triggers the execution, and decrypts).
 | `rule-based-cross-match` | `-count`, `-itemized` | CKKS | CPU, GPU | how many / which entries of a shared rule list both private datasets match |
 | `federated-average` | `federated-average` | CKKS | CPU | privately average two parties' ML model weight vectors (data-size weighted) |
 | `negotiation-matrix` | `-count`, `-itemized` | CKKS | CPU, GPU | how many / which contract-term combinations both sides accept |
+| `decision-tree-inference` | `decision-tree-inference` | CKKS | CPU | score one party's private feature vector against the other party's private decision tree |
 | `joint-record-overlap` | `-count`, `-itemized` | BFV | CPU | how many / which records two parties have in common |
 
 The `-count` variants return a single number; the `-itemized` variants return
@@ -123,11 +124,61 @@ quick-start and the agent's map.
 
 ## Prerequisites
 
-- The `julenny-fhe` CLI on your `PATH` (built from this repo, or installed from a
-  release).
+On each party's machine:
+
+- The `julenny-fhe` CLI on your `PATH` (installed from a release, or built from
+  this repo). Confirm with `julenny-fhe --version`.
+- `jq` 1.6 or newer, plus `curl`, `xxd` and `sha256sum`. The last two are
+  standard on any current Debian/Ubuntu install; the package declares the rest as
+  dependencies.
+- `node`, but only for scenarios whose function declares an `encodingRecipe`
+  (currently `decision-tree-inference`). The scripts fail with a clear message if
+  it is needed and missing.
 - A platform API key (`sk_live_...`) for your company account.
 - Your partner's collaboration ID (`XXXX-XXXX`) if you're creating a new
   collaboration.
 
 Per-collaboration state (config, key shares, downloaded artifacts) lives under
 `~/.julenny-collab/`. Your secret key share never leaves your machine.
+
+## Platform UI prep
+
+A few steps happen in the JuLenny web UI rather than in the scripts:
+
+| What | Where | How often |
+|---|---|---|
+| Generate an API key | `/company/api-keys` | once per company |
+| Create a collaboration | `/company/collaborate/new`, or let `00-init` create one | once per partner (reused by later permissions) |
+| Register your signing public key | inline on the collaboration page | once per company, per crypto context |
+
+Signing-key registration is the one step `00-init` cannot fully automate. It
+generates the keypair and keeps the secret half locally, then waits while you
+upload the public half through the UI. Everything after that is scripted.
+
+## Single-machine self-test
+
+To drive both sides on one host, give each shell its own workdir:
+
+```bash
+# Shell 1 (data owner)
+export JL_WORKDIR=$HOME/.julenny-collab-acme
+cd examples/<scenario>/acme && ./run.sh
+```
+
+```bash
+# Shell 2 (data consumer)
+export JL_WORKDIR=$HOME/.julenny-collab-beta
+cd examples/<scenario>/beta && ./run.sh
+```
+
+The two shells then behave as if they were separate machines. Useful for
+smoke-testing before setting up a real two-machine run.
+
+## Pointing at a non-production deployment
+
+The scripts default to `https://julenny.net`. Export a different base URL before
+running `00-init` and it is picked up and persisted for the session:
+
+```bash
+export JULENNY_API_BASE="https://your-staging-host"
+```
