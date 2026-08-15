@@ -86,7 +86,7 @@ if [[ -f "$PT_SIDECAR" ]]; then
     PT_PAIRS="$(jq -r '.rule_pairs.path // empty' "$PT_SIDECAR")"
     if [[ -n "$PT_PAIRS" && -f "$PT_PAIRS" ]]; then
         info "Re-deriving rotation indices locally to cross-check the platform..."
-        LOCAL_JSON="$(julenny-fhe crypto derive-rotation-indices \
+        LOCAL_JSON="$(julenny-toolkit crypto derive-rotation-indices \
             --rule-pairs "$PT_PAIRS" \
             --context-spec "$JULENNY_CRYPTO_CONTEXT_SPEC" \
             --json)" \
@@ -130,7 +130,7 @@ if [[ -f "$MY_ROT_SHARE" && "${JULENNY_FORCE_ROTATION_REGEN:-0}" != "1" ]]; then
     info "Reusing existing Beta rotation-round1-continue share at $MY_ROT_SHARE ($(stat -c%s "$MY_ROT_SHARE") bytes)."
 else
     info "Computing Beta's rotation-round1-continue contribution..."
-    julenny-fhe crypto rotation-contribute \
+    julenny-toolkit crypto rotation-contribute \
         --role main \
         --secret-key "$MY_SECRET" \
         --peer-share "$ROT_OWNER_SHARE" \
@@ -157,7 +157,7 @@ fi
 # Beta's continue + joint_pk) and the platform verifies the byte-equality.
 ROT_COMBINED="$JL_KEYS_DIR/rotation-combined.bin"
 info "Computing Beta's rotation-combine output..."
-julenny-fhe crypto rotation-combine \
+julenny-toolkit crypto rotation-combine \
     --share-a "$ROT_OWNER_SHARE" \
     --share-b "$MY_ROT_SHARE" \
     --joint-pk "$JOINT_PK" \

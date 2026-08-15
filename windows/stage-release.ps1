@@ -1,10 +1,10 @@
 # Stage the freshly-built Windows MSIX (and its .cer) into the release folder
 # under the canonical names used by all prior JuLenny FHE releases:
 #
-#   julenny-fhe-linux-amd64
-#   julenny-fhe-linux-amd64.deb
-#   julenny-fhe-windows-amd64.msix
-#   julenny-fhe-windows-amd64.cer
+#   julenny-toolkit-linux-amd64
+#   julenny-toolkit-linux-amd64.deb
+#   julenny-toolkit-windows-amd64.msix
+#   julenny-toolkit-windows-amd64.cer
 #   SHA256SUMS
 #
 # No version substring in the artifact filename - the version lives in the
@@ -33,23 +33,23 @@ if (-not (Test-Path $msixSrc))    { throw "Source MSIX not found: $msixSrc" }
 if (-not (Test-Path $cerSrc))     { throw "Source CER not found: $cerSrc" }
 
 # Canonical destination names (no version, amd64 label).
-$linuxBin = Join-Path $releaseDir "julenny-fhe-linux-amd64"
-$linuxDeb = Join-Path $releaseDir "julenny-fhe-linux-amd64.deb"
-$winMsix  = Join-Path $releaseDir "julenny-fhe-windows-amd64.msix"
-$winCer   = Join-Path $releaseDir "julenny-fhe-windows-amd64.cer"
+$linuxBin = Join-Path $releaseDir "julenny-toolkit-linux-amd64"
+$linuxDeb = Join-Path $releaseDir "julenny-toolkit-linux-amd64.deb"
+$winMsix  = Join-Path $releaseDir "julenny-toolkit-windows-amd64.msix"
+$winCer   = Join-Path $releaseDir "julenny-toolkit-windows-amd64.cer"
 
 # Fix up any non-canonical filenames left in the release folder from earlier
-# attempts (e.g. `julenny-fhe-0.4.0-linux-amd64`, `julenny-fhe-0.4.0-windows-x64.msix`).
+# attempts (e.g. `julenny-toolkit-0.4.0-linux-amd64`, `julenny-toolkit-0.4.0-windows-x64.msix`).
 Get-ChildItem $releaseDir -File | ForEach-Object {
     $name = $_.Name
     $rename = $null
     switch -Regex ($name) {
-        "^julenny-fhe-${Version}-linux-amd64$"    { $rename = "julenny-fhe-linux-amd64" }
-        "^julenny-fhe-${Version}-linux-amd64\.deb$" { $rename = "julenny-fhe-linux-amd64.deb" }
-        "^julenny-fhe-${Version}-windows-x64\.msix$"  { $rename = "julenny-fhe-windows-amd64.msix" }
-        "^julenny-fhe-${Version}-windows-x64\.cer$"   { $rename = "julenny-fhe-windows-amd64.cer" }
-        "^julenny-fhe-${Version}-windows-amd64\.msix$" { $rename = "julenny-fhe-windows-amd64.msix" }
-        "^julenny-fhe-${Version}-windows-amd64\.cer$"  { $rename = "julenny-fhe-windows-amd64.cer" }
+        "^julenny-toolkit-${Version}-linux-amd64$"    { $rename = "julenny-toolkit-linux-amd64" }
+        "^julenny-toolkit-${Version}-linux-amd64\.deb$" { $rename = "julenny-toolkit-linux-amd64.deb" }
+        "^julenny-toolkit-${Version}-windows-x64\.msix$"  { $rename = "julenny-toolkit-windows-amd64.msix" }
+        "^julenny-toolkit-${Version}-windows-x64\.cer$"   { $rename = "julenny-toolkit-windows-amd64.cer" }
+        "^julenny-toolkit-${Version}-windows-amd64\.msix$" { $rename = "julenny-toolkit-windows-amd64.msix" }
+        "^julenny-toolkit-${Version}-windows-amd64\.cer$"  { $rename = "julenny-toolkit-windows-amd64.cer" }
     }
     if ($rename -and $rename -ne $name) {
         $dst = Join-Path $releaseDir $rename
@@ -85,10 +85,10 @@ if ($missing) {
 # Regenerate SHA256SUMS. Order matches prior releases: linux bin, linux deb,
 # windows msix, windows cer. Two spaces between hash and filename, lowercase.
 $order = @(
-    "julenny-fhe-linux-amd64",
-    "julenny-fhe-linux-amd64.deb",
-    "julenny-fhe-windows-amd64.msix",
-    "julenny-fhe-windows-amd64.cer"
+    "julenny-toolkit-linux-amd64",
+    "julenny-toolkit-linux-amd64.deb",
+    "julenny-toolkit-windows-amd64.msix",
+    "julenny-toolkit-windows-amd64.cer"
 )
 $lines = $order | ForEach-Object {
     $path = Join-Path $releaseDir $_

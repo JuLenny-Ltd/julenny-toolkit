@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.24)
 
 project(fhe_toolkit
-    VERSION     0.6.0
+    VERSION     0.7.0
     DESCRIPTION "JuLenny FHE Toolkit - customer-side client for the JuLenny FHE Platform"
     LANGUAGES   CXX
 )
@@ -49,7 +49,7 @@ if(FHE_TOOLKIT_BUNDLE_MCP AND EXISTS "${JULENNY_MCP_EXE}")
     install(PROGRAMS "${JULENNY_MCP_EXE}" DESTINATION bin COMPONENT runtime)
     if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/linux/merge-claude-config.sh")
         install(PROGRAMS "${CMAKE_CURRENT_SOURCE_DIR}/linux/merge-claude-config.sh"
-            DESTINATION share/julenny-fhe COMPONENT runtime)
+            DESTINATION share/julenny-toolkit COMPONENT runtime)
     endif()
     message(STATUS "  Bundle MCP server:     ${JULENNY_MCP_EXE}")
     # NOTE: CPACK_STRIP_FILES is ON; verify the installed julenny-mcp still runs
@@ -63,7 +63,7 @@ endif()
 # Packaging (CPack) - component-restricted so deps' install rules don't leak
 # ============================================================================
 
-set(CPACK_PACKAGE_NAME           "julenny-fhe")
+set(CPACK_PACKAGE_NAME           "julenny-toolkit")
 set(CPACK_PACKAGE_VENDOR         "JuLenny Ltd")
 set(CPACK_PACKAGE_VERSION_MAJOR  ${PROJECT_VERSION_MAJOR})
 set(CPACK_PACKAGE_VERSION_MINOR  ${PROJECT_VERSION_MINOR})
@@ -87,8 +87,8 @@ set(CPACK_DEB_COMPONENT_INSTALL ON)
 set(CPACK_COMPONENTS_ALL        runtime)
 
 set(CPACK_GENERATOR "DEB")
-set(CPACK_DEBIAN_RUNTIME_PACKAGE_NAME         "julenny-fhe")
-set(CPACK_DEBIAN_RUNTIME_FILE_NAME            "julenny-fhe-linux-amd64.deb")
+set(CPACK_DEBIAN_RUNTIME_PACKAGE_NAME         "julenny-toolkit")
+set(CPACK_DEBIAN_RUNTIME_FILE_NAME            "julenny-toolkit-linux-amd64.deb")
 set(CPACK_DEBIAN_RUNTIME_PACKAGE_MAINTAINER   "JuLenny Ltd <support@julenny.net>")
 set(CPACK_DEBIAN_RUNTIME_PACKAGE_ARCHITECTURE "amd64")
 set(CPACK_DEBIAN_RUNTIME_PACKAGE_SECTION      "utils")

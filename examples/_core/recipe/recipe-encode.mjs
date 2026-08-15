@@ -2,7 +2,7 @@
 // recipe-encode: run a function-def input's `encodingRecipe` against a source
 // file and write the toolkit's generic bundle-input JSON. Cleartext, no keys.
 // The _core encrypt step calls this, then hands the output to
-// `julenny-fhe crypto encrypt` (which encrypts it under the joint key).
+// `julenny-toolkit crypto encrypt` (which encrypts it under the joint key).
 //
 // usage: node recipe-encode.mjs <function-def.json> <input-name> <source> <out.json>
 import { readFileSync, writeFileSync } from "node:fs";

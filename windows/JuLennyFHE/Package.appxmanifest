@@ -11,7 +11,7 @@
     Version="0.5.5.0" />
 
   <Properties>
-    <DisplayName>JuLenny FHE Toolkit</DisplayName>
+    <DisplayName>JuLenny Toolkit</DisplayName>
     <PublisherDisplayName>JuLenny Ltd</PublisherDisplayName>
     <Logo>Assets\StoreLogo.png</Logo>
   </Properties>
@@ -29,7 +29,7 @@
       Executable="$targetnametoken$.exe"
       EntryPoint="$targetentrypoint$">
       <uap:VisualElements
-        DisplayName="JuLenny FHE Toolkit"
+        DisplayName="JuLenny Toolkit"
         Description="Privacy-preserving compute client"
         BackgroundColor="#FFFFFF"
         Square150x150Logo="Assets\Square150x150Logo.png"

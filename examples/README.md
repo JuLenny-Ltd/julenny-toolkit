@@ -4,7 +4,7 @@ End-to-end, runnable demos of a two-party JuLenny FHE collaboration: two
 companies jointly run a fixed function over their **encrypted** inputs, and
 neither side (nor the platform) ever sees the other's plaintext. Each demo walks
 the whole lifecycle — joint key setup, encryption, the platform compute, and
-multi-party threshold decryption — using the `julenny-fhe` CLI.
+multi-party threshold decryption — using the `julenny-toolkit` CLI.
 
 ## The two parties
 
@@ -115,7 +115,7 @@ and the exact expected output.
 
 These scripts double as a reference corpus for AI agents. The JuLenny MCP server
 (in [`../mcp`](../mcp)) exposes the same collaboration flow as tools, and it
-drives the `julenny-fhe` CLI with the same commands and flags these scripts use.
+drives the `julenny-toolkit` CLI with the same commands and flags these scripts use.
 An agent can read this folder to learn the exact phase sequence and arguments,
 then run the pipeline through the MCP tools — the crypto still happens locally
 via the CLI, so keys and plaintext never leave the user's machine. Keeping the
@@ -126,8 +126,8 @@ quick-start and the agent's map.
 
 On each party's machine:
 
-- The `julenny-fhe` CLI on your `PATH` (installed from a release, or built from
-  this repo). Confirm with `julenny-fhe --version`.
+- The `julenny-toolkit` CLI on your `PATH` (installed from a release, or built from
+  this repo). Confirm with `julenny-toolkit --version`.
 - `jq` 1.6 or newer, plus `curl`, `xxd` and `sha256sum`. The last two are
   standard on any current Debian/Ubuntu install; the package declares the rest as
   dependencies.

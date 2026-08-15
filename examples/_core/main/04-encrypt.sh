@@ -9,7 +9,7 @@
 #   - If it starts with "plaintext-" (for example rule-based-cross-match's
 #     left_dictionary, right_dictionary and rule_pairs), the raw file is
 #     uploaded via upload_plaintext_dataset (multipart POST with the
-#     kind=plaintext flag). No `julenny-fhe crypto encrypt` pass.
+#     kind=plaintext flag). No `julenny-toolkit crypto encrypt` pass.
 #   - Plaintext inputs also skip the dataset_csv_map.json bookkeeping, because
 #     06-decrypt's resolve-indicator only applies to encrypted indicator
 #     outputs, not plaintext attachments.
@@ -241,7 +241,7 @@ for ((i = 0; i < MY_INPUT_COUNT; i++)); do
                 || die "recipe executor failed for '$INPUT_NAME'."
 
             MODEL_BUNDLE="$JL_KEYS_DIR/$(basename "$INPUT_FILE").$INPUT_NAME.bundle.bin"
-            julenny-fhe crypto encrypt \
+            julenny-toolkit crypto encrypt \
                 --function-def "$FUNCTION_DEF" \
                 --input-name "$INPUT_NAME" \
                 --input "$BUNDLE_INPUT" \
@@ -266,7 +266,7 @@ for ((i = 0; i < MY_INPUT_COUNT; i++)); do
 
             # Record local plaintext path for 04.5's rotation-index verification.
             # Maps INPUT_NAME -> local file path; 04.5 reads this and calls
-            # `julenny-fhe crypto derive-rotation-indices` to cross-check against
+            # `julenny-toolkit crypto derive-rotation-indices` to cross-check against
             # the platform-derived index set in pendingRotationKeySetup.indices.
             # We also record the dataset id so 04.5 can verify the platform's
             # derivedFromDatasetIds actually contains the datasets WE uploaded.
@@ -287,7 +287,7 @@ for ((i = 0; i < MY_INPUT_COUNT; i++)); do
             echo "============================================================"
 
             CIPHERTEXT="$JL_KEYS_DIR/$(basename "$INPUT_FILE").$INPUT_NAME.enc.bin"
-            julenny-fhe crypto encrypt \
+            julenny-toolkit crypto encrypt \
                 --input "$INPUT_FILE" \
                 --joint-public-key "$JOINT_PK" \
                 --output "$CIPHERTEXT" \

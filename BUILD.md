@@ -70,13 +70,13 @@ cmake --build build -j
 
 Build artifacts land in `build/`:
 
-- `build/cli/julenny-fhe` - the CLI executable
+- `build/cli/julenny-toolkit` - the CLI executable
 - `build/core/libfhe_toolkit_core.a` - the core static library
 
 Run the CLI:
 
 ```bash
-./build/cli/julenny-fhe --help
+./build/cli/julenny-toolkit --help
 ```
 
 ## Running tests

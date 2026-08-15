@@ -32,7 +32,7 @@ fi
 
 # -------- 2. Deterministic combine (must match Acme's combine byte-for-byte) --------
 info "Combining round-1 relin shares (deterministic; must match Acme's)..."
-julenny-fhe crypto relin-combine \
+julenny-toolkit crypto relin-combine \
     --context-spec "$JULENNY_CRYPTO_CONTEXT_SPEC" \
     --round 1 \
     --share-a "$RELIN_R1_LEAD" \
@@ -44,7 +44,7 @@ success "Combined relin-r1: $COMBINED_R1"
 
 # -------- 3. relin-round2 (round 4) --------
 info "Generating relin-round2 contribution..."
-julenny-fhe crypto relin-contribute \
+julenny-toolkit crypto relin-contribute \
     --context-spec "$JULENNY_CRYPTO_CONTEXT_SPEC" \
     --round 2 \
     --secret-key "$MY_SHARE_SECRET" \

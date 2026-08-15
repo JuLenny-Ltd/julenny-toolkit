@@ -10,7 +10,7 @@ result back.
 
 The server **orchestrates** the JuLenny platform API; it does **not** do
 cryptography itself. All key generation, encryption, and decryption run locally
-through the `julenny-fhe` CLI (the server shells out to it, exactly like the
+through the `julenny-toolkit` CLI (the server shells out to it, exactly like the
 [`examples/`](../examples) scripts). The agent never sees your keys or
 plaintext, and nothing crypto-related moves server-side. This is the zero-trust
 guarantee the toolkit is built on — preserved while adding full agent
@@ -30,7 +30,7 @@ verbs and nothing else**:
 
 1. **Platform API verbs** — call the JuLenny REST API (ciphertext and metadata
    only; the platform never holds keys or plaintext).
-2. **Toolkit verbs** — invoke specific `julenny-fhe` CLI commands locally for the
+2. **Toolkit verbs** — invoke specific `julenny-toolkit` CLI commands locally for the
    cryptography.
 
 There is deliberately **no** generic shell/`exec`/`run(command)` tool, **no**
@@ -101,7 +101,7 @@ Add to your Claude Desktop MCP config (`claude_desktop_config.json`):
 }
 ```
 
-(A `julenny-fhe mcp` launcher subcommand and per-OS installers that auto-write
+(A `julenny-toolkit mcp` launcher subcommand and per-OS installers that auto-write
 this config are on the roadmap.)
 
 ## Tools
@@ -125,7 +125,7 @@ These require explicit user confirmation on `decrypt` and especially `release`
 ## Examples as a reference for agents
 
 The [`examples/`](../examples) folder runs this same end-to-end flow with the
-`julenny-fhe` CLI, using the same commands and flags these MCP tools generate.
+`julenny-toolkit` CLI, using the same commands and flags these MCP tools generate.
 It's a learnable reference corpus: an agent can read the examples to understand
 the exact phase sequence (keysetup → encrypt → execute → release → decrypt) and
 the arguments each step takes, then reproduce it through these tools. The

@@ -23,15 +23,15 @@ export function workdir(): string {
 }
 
 /** Per-OS default working directory, used when JULENNY_WORKDIR is unset.
- *  Windows: %LOCALAPPDATA%\julenny-fhe\workdir
- *  else:    $XDG_DATA_HOME/julenny-fhe/workdir (or ~/.local/share/...) */
+ *  Windows: %LOCALAPPDATA%\julenny-toolkit\workdir
+ *  else:    $XDG_DATA_HOME/julenny-toolkit/workdir (or ~/.local/share/...) */
 function defaultWorkdir(): string {
   if (process.platform === 'win32') {
     const base = process.env.LOCALAPPDATA || join(homedir(), 'AppData', 'Local');
-    return join(base, 'julenny-fhe', 'workdir');
+    return join(base, 'julenny-toolkit', 'workdir');
   }
   const base = process.env.XDG_DATA_HOME || join(homedir(), '.local', 'share');
-  return join(base, 'julenny-fhe', 'workdir');
+  return join(base, 'julenny-toolkit', 'workdir');
 }
 
 /** Resolve the realpath of the nearest existing ancestor of `p` (so we can

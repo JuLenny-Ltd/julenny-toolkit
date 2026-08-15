@@ -1,12 +1,12 @@
-# Build the `julenny-fhe` CLI executable for Windows.
+# Build the `julenny-toolkit` CLI executable for Windows.
 #
 # Toolchain: clang-cl (mandatory for OpenFHE compatibility), same as
 # build-core.ps1. Reuses the existing build\ directory when present (the
 # configure just flips FHE_TOOLKIT_BUILD_CLI on), so run build-core.ps1
 # first if you want a clean tree. Produces
-#   build\cli\Release\julenny-fhe.exe
-# which stage-release.ps1 ships as julenny-fhe-windows-amd64.exe; installed
-# (on PATH) it is invoked as plain `julenny-fhe`, same as on Linux.
+#   build\cli\Release\julenny-toolkit.exe
+# which stage-release.ps1 ships as julenny-toolkit-windows-amd64.exe; installed
+# (on PATH) it is invoked as plain `julenny-toolkit`, same as on Linux.
 #
 # Usage from any PowerShell:
 #   powershell -ExecutionPolicy Bypass -File windows\build-cli.ps1
@@ -21,7 +21,7 @@ $ErrorActionPreference = "Stop"
 $repoRoot  = Split-Path -Parent $PSScriptRoot   # ...\fhe-toolkit
 $buildDir  = Join-Path $repoRoot "build"
 $logFile   = Join-Path $PSScriptRoot "build-cli.log"
-$exePath   = Join-Path $buildDir "cli\Release\julenny-fhe.exe"
+$exePath   = Join-Path $buildDir "cli\Release\julenny-toolkit.exe"
 
 if (-not (Test-Path (Join-Path $repoRoot "cli\CMakeLists.txt"))) {
     throw "cli/CMakeLists.txt not found; script must live at <repo>/windows/."
@@ -79,10 +79,10 @@ try {
     if ($cmakeExit -ne 0) { throw "cmake configure failed (exit $cmakeExit). See $logFile." }
 
     Write-Host ""
-    Write-Host "Building julenny-fhe (Release, parallel)..."
+    Write-Host "Building julenny-toolkit (Release, parallel)..."
     $ErrorActionPreference = "Continue"
     try {
-        & cmake --build . --config Release --target julenny-fhe --parallel 2>&1 | Tee-Object -FilePath $logFile -Append
+        & cmake --build . --config Release --target julenny-toolkit --parallel 2>&1 | Tee-Object -FilePath $logFile -Append
         $cmakeExit = $LASTEXITCODE
     } finally { $ErrorActionPreference = $prevEAP }
     if ($cmakeExit -ne 0) { throw "cmake build failed (exit $cmakeExit). See $logFile." }
@@ -108,4 +108,4 @@ try {
     & $exePath --version 2>&1
     $smokeExit = $LASTEXITCODE
 } finally { $ErrorActionPreference = $prevEAP }
-if ($smokeExit -ne 0) { throw "julenny-fhe.exe --version exited $smokeExit." }
+if ($smokeExit -ne 0) { throw "julenny-toolkit.exe --version exited $smokeExit." }

@@ -1,5 +1,5 @@
-#ifndef JULENNY_FHE_CLI_COMMANDS_H
-#define JULENNY_FHE_CLI_COMMANDS_H
+#ifndef JULENNY_TOOLKIT_CLI_COMMANDS_H
+#define JULENNY_TOOLKIT_CLI_COMMANDS_H
 
 #include <string>
 #include <vector>

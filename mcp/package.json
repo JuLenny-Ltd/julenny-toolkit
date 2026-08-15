@@ -2,7 +2,7 @@
   "name": "@julenny/mcp-server",
   "version": "0.1.0",
   "private": true,
-  "description": "JuLenny FHE MCP server - AI agent access to encrypted data collaboration. Orchestrates the JuLenny platform API and shells out to the local julenny-fhe CLI for all cryptography, so keys and plaintext never leave the user's machine.",
+  "description": "JuLenny FHE MCP server - AI agent access to encrypted data collaboration. Orchestrates the JuLenny platform API and shells out to the local julenny-toolkit CLI for all cryptography, so keys and plaintext never leave the user's machine.",
   "license": "BUSL-1.1",
   "type": "module",
   "bin": {

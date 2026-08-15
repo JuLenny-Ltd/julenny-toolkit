@@ -10,7 +10,7 @@ Two or more organizations want to compute a joint result over their data (an ove
 2. Encrypt local data before uploading it to the platform.
 3. Contribute its share to the threshold decryption that reveals the final answer.
 
-The toolkit offers three surfaces for these operations, all performing the identical local cryptographic work: the `julenny-fhe` command-line tool (for backend automation), a desktop app (graphical), and the `julenny-mcp` MCP server (so an AI agent can drive the same steps).
+The toolkit offers three surfaces for these operations, all performing the identical local cryptographic work: the `julenny-toolkit` command-line tool (for backend automation), a desktop app (graphical), and the `julenny-mcp` MCP server (so an AI agent can drive the same steps).
 
 ## The zero-trust guarantee
 
@@ -18,7 +18,7 @@ The platform is designed under a zero-trust assumption: the JuLenny service that
 
 - **All cryptography lives in an offline core.** The `core/` library and the `cli/` tool that wraps it contain no network code at all - no sockets, no HTTP client, nothing that can reach any host. Every key operation, encryption, and partial decryption happens locally against local files, so secret shares and plaintext never pass through anything that could transmit them. Auditors can confirm this by grepping `cli/` and `core/` for any networking API; there are none.
 - **Only ciphertext crosses the network.** Communication with the platform happens over its HTTPS API - driven by your own scripts, the web UI, or the MCP server - and only ever carries ciphertext and encrypted key material. The plaintext-to-ciphertext step always happens first, locally, in the offline core.
-- **The MCP server is blind by design.** `julenny-mcp` is an optional driver that lets an agent orchestrate the workflow. It shells out to the `julenny-fhe` CLI for every cryptographic step and transports the resulting ciphertext to the platform; its tool results are file paths and status only, never plaintext or secret-key bytes. It cannot read what it moves.
+- **The MCP server is blind by design.** `julenny-mcp` is an optional driver that lets an agent orchestrate the workflow. It shells out to the `julenny-toolkit` CLI for every cryptographic step and transports the resulting ciphertext to the platform; its tool results are file paths and status only, never plaintext or secret-key bytes. It cannot read what it moves.
 
 The net effect: the party running the computation only ever holds ciphertext, and the secret material that could decrypt it never leaves the offline core on your own machines.
 
@@ -34,22 +34,22 @@ The source code in this repository is published so that any participating organi
 
 ### Linux (Debian / Ubuntu)
 
-The `.deb` is self-contained: OpenFHE is statically linked into the binary, and the only runtime dependencies are standard system libraries already present on any Debian or Ubuntu install. It installs both the `julenny-fhe` CLI and the `julenny-mcp` MCP server.
+The `.deb` is self-contained: OpenFHE is statically linked into the binary, and the only runtime dependencies are standard system libraries already present on any Debian or Ubuntu install. It installs both the `julenny-toolkit` CLI and the `julenny-mcp` MCP server.
 
 ```bash
-sudo dpkg -i julenny-fhe-linux-amd64.deb
-julenny-fhe --version
+sudo dpkg -i julenny-toolkit-linux-amd64.deb
+julenny-toolkit --version
 ```
 
 ### Windows
 
-Download `julenny-fhe-setup-windows-amd64.exe` from the releases page and run it. The installer lets you choose any combination of three components:
+Download `julenny-toolkit-setup-windows-amd64.exe` from the releases page and run it. The installer lets you choose any combination of three components:
 
-- the **JuLenny FHE** desktop app (graphical UI),
-- the **`julenny-fhe`** command-line tool,
+- the **JuLenny Toolkit** desktop app (graphical UI),
+- the **`julenny-toolkit`** command-line tool,
 - the **`julenny-mcp`** MCP server, with optional one-click wiring into Claude Desktop.
 
-It installs per-user; no administrator rights are required. The app appears as **JuLenny FHE** in the Start menu.
+It installs per-user; no administrator rights are required. The app appears as **JuLenny Toolkit** in the Start menu.
 
 > The installer is not yet code-signed, so Windows SmartScreen may show an "unknown publisher" prompt. Choose **More info -> Run anyway** to proceed.
 
@@ -72,7 +72,7 @@ Each script is small, commented, and uses only HTTPS plus this toolkit. Read the
 ## What's in this repository
 
 ```
-cli/        Command-line tool, julenny-fhe. The primary integration
+cli/        Command-line tool, julenny-toolkit. The primary integration
             surface for backend automation. No network code.
 core/       C++ library shared by the CLI and the desktop app.
             Contains all cryptographic logic. No network code.

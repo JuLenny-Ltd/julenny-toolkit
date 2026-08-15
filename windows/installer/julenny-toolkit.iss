@@ -1,4 +1,4 @@
-; JuLenny FHE - unified Windows installer (Inno Setup 6).
+; JuLenny Toolkit - unified Windows installer (Inno Setup 6).
 ; One installer, three checkbox components: UI app / CLI / MCP. Per-user, no admin.
 ;
 ; DRAFT (2026-06-22): authored without a build/test run. Prerequisites before this
@@ -6,26 +6,26 @@
 ;   #22  the SEA single-exe must exist at  mcp\sea\julenny-mcp.exe
 ;   #23  the app must be a PLAIN (unpackaged) win32 build; set AppSourceDir below
 ;        to its output folder (D2). The path here is a PLACEHOLDER - fix it.
-;   CLI  build\cli\Release\julenny-fhe.exe (+ the 2 runtime DLLs) - already built.
-; Build:  iscc windows\installer\julenny-fhe.iss   (Inno Setup's compiler)
+;   CLI  build\cli\Release\julenny-toolkit.exe (+ the 2 runtime DLLs) - already built.
+; Build:  iscc windows\installer\julenny-toolkit.iss   (Inno Setup's compiler)
 ; Sign:   signtool the three exes AND the produced setup.exe with the app cert.
 
-#define AppVersion "0.6.0"
+#define AppVersion "0.7.0"
 ; Unpackaged (WindowsPackageType=None, self-contained) WinUI 3 build output (#23).
 #define AppSourceDir "..\..\windows\JuLennyFHE\x64\Release\JuLennyFHE"
 
 [Setup]
-AppId={{4E2B7F1A-9C3D-4A6E-B8F0-JULENNYFHE001}}
-AppName=JuLenny FHE
+AppId={{348882B0-EC6F-40E9-AB36-BFF8C5FBF786}}
+AppName=JuLenny Toolkit
 AppVersion={#AppVersion}
 AppPublisher=JuLenny Ltd
-DefaultDirName={localappdata}\Programs\julenny-fhe
+DefaultDirName={localappdata}\Programs\julenny-toolkit
 DisableProgramGroupPage=yes
 PrivilegesRequired=lowest
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 ChangesEnvironment=yes
-OutputBaseFilename=julenny-fhe-setup-windows-amd64
+OutputBaseFilename=julenny-toolkit-setup-windows-amd64
 Compression=lzma2
 SolidCompression=yes
 WizardStyle=modern
@@ -38,8 +38,8 @@ Name: "full";   Description: "Everything (app, CLI, and MCP server)"
 Name: "custom"; Description: "Choose what to install";               Flags: iscustom
 
 [Components]
-Name: "app"; Description: "JuLenny FHE desktop app (graphical UI)";        Types: full
-Name: "cli"; Description: "Command-line tool (julenny-fhe)";              Types: full
+Name: "app"; Description: "JuLenny Toolkit desktop app (graphical UI)";        Types: full
+Name: "cli"; Description: "Command-line tool (julenny-toolkit)";              Types: full
 Name: "mcp"; Description: "MCP server for Claude Desktop (julenny-mcp)";  Types: full
 
 [Files]
@@ -49,7 +49,7 @@ Name: "mcp"; Description: "MCP server for Claude Desktop (julenny-mcp)";  Types:
 Source: "folderpicker.dll"; Flags: dontcopy
 ; --- CLI + its runtime DLLs. The MCP shells out to the CLI, so these install
 ;     whenever EITHER the cli or mcp component is selected. ---
-Source: "..\..\build\cli\Release\julenny-fhe.exe";        DestDir: "{app}"; Components: cli or mcp; Flags: ignoreversion
+Source: "..\..\build\cli\Release\julenny-toolkit.exe";        DestDir: "{app}"; Components: cli or mcp; Flags: ignoreversion
 Source: "..\..\build\cli\Release\libomp.dll";             DestDir: "{app}"; Components: cli or mcp; Flags: ignoreversion
 Source: "..\..\build\cli\Release\libcrypto-4-x64.dll";    DestDir: "{app}"; Components: cli or mcp; Flags: ignoreversion
 ; --- MCP single self-contained exe (SEA, #22) + the config-merge helper ---
@@ -59,15 +59,15 @@ Source: "merge-claude-config.ps1";                        DestDir: "{app}"; Comp
 Source: "{#AppSourceDir}\*";                              DestDir: "{app}\app"; Components: app; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Icons]
-Name: "{autoprograms}\JuLenny FHE"; Filename: "{app}\app\JuLennyFHE.exe"; Components: app
-Name: "{autodesktop}\JuLenny FHE";  Filename: "{app}\app\JuLennyFHE.exe"; Components: app; Tasks: desktopicon
+Name: "{autoprograms}\JuLenny Toolkit"; Filename: "{app}\app\JuLennyFHE.exe"; Components: app
+Name: "{autodesktop}\JuLenny Toolkit";  Filename: "{app}\app\JuLennyFHE.exe"; Components: app; Tasks: desktopicon
 
 [Tasks]
 Name: "desktopicon"; Description: "Create a desktop shortcut"; Components: app; Flags: unchecked
 
 [Registry]
-; Prepend {app} to the user PATH so `julenny-fhe` / `julenny-mcp` resolve and the
-; MCP config can omit JULENNY_FHE_BIN. Only when a command-line piece is installed.
+; Prepend {app} to the user PATH so `julenny-toolkit` / `julenny-mcp` resolve and the
+; MCP config can omit JULENNY_TOOLKIT_BIN. Only when a command-line piece is installed.
 Root: HKCU; Subkey: "Environment"; ValueType: expandsz; ValueName: "Path"; \
   ValueData: "{app};{olddata}"; Check: NeedsAddPath('{app}'); Components: cli or mcp
 
@@ -128,7 +128,7 @@ begin
     '(Only used if you install the MCP server.)',
     False, '');
   WorkdirPage.Add('');
-  WorkdirPage.Values[0] := ExpandConstant('{localappdata}\julenny-fhe\workdir');
+  WorkdirPage.Values[0] := ExpandConstant('{localappdata}\julenny-toolkit\workdir');
   // Swap the legacy folder-tree Browse for the modern IFileDialog picker.
   WorkdirPage.Buttons[0].OnClick := @BrowseClick;
 end;

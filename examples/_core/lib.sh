@@ -390,7 +390,7 @@ wrap_and_upload() {
 
     if (( size_bytes < JL_INLINE_THRESHOLD_BYTES )); then
         info "Wrapping $msg_type (round $round, inline, ${size_bytes} bytes)"
-        julenny-fhe crypto wrap-envelope \
+        julenny-toolkit crypto wrap-envelope \
             --payload "$bin_path" \
             --secret-key "$JULENNY_SIGNING_SECRET" \
             --output "$json_path" \
@@ -416,7 +416,7 @@ wrap_and_upload() {
             || die "object storage PUT returned HTTP $put_code"
         success "  Uploaded to object storage"
 
-        julenny-fhe crypto wrap-envelope \
+        julenny-toolkit crypto wrap-envelope \
             --object-key "$object_key" \
             --size-bytes "$size_bytes" \
             --secret-key "$JULENNY_SIGNING_SECRET" \
@@ -750,7 +750,7 @@ get_rotation_round_offset() {
 # NEW (rule-based-cross-match): plaintext dataset upload
 # ============================================================
 
-# Upload a PLAINTEXT file to /api/fhe-data-upload (no julenny-fhe encrypt
+# Upload a PLAINTEXT file to /api/fhe-data-upload (no julenny-toolkit encrypt
 # pass). For functions like rule-based-cross-match whose function-def declares
 # some inputs as plaintext (dictionaries, rule lists, etc.), each such
 # input gets its own dataset bundle.
@@ -931,7 +931,7 @@ releaser_flow() {
             info "Producing partial decryption (keysetup role: $JULENNY_ROLE)..."
             local lead_flag=""
             [[ "$JULENNY_ROLE" == "lead" ]] && lead_flag="--lead"
-            if ! julenny-fhe crypto partial-decrypt \
+            if ! julenny-toolkit crypto partial-decrypt \
                 --context-spec "$JULENNY_CRYPTO_CONTEXT_SPEC" \
                 --input "$result_bin" \
                 --secret-key "$my_secret" \
@@ -949,7 +949,7 @@ releaser_flow() {
 
             # 4. Sign the partial bytes.
             info "Signing the partial decrypt with the registered signing key..."
-            julenny-fhe crypto sign \
+            julenny-toolkit crypto sign \
                 --input "$partial_bin" \
                 --secret-key "$JULENNY_SIGNING_SECRET" \
                 --output "$sig_bin" \
@@ -1146,7 +1146,7 @@ viewer_flow() {
     info "Producing this side's local partial decryption (keysetup role: $JULENNY_ROLE)..."
     local lead_flag=""
     [[ "$JULENNY_ROLE" == "lead" ]] && lead_flag="--lead"
-    julenny-fhe crypto partial-decrypt \
+    julenny-toolkit crypto partial-decrypt \
         --context-spec "$JULENNY_CRYPTO_CONTEXT_SPEC" \
         --input "$result_bin" \
         --secret-key "$my_secret" \
@@ -1185,19 +1185,19 @@ viewer_flow() {
             n_slots="$(grep -c '' < "$JULENNY_INPUT_CSV")"
         fi
         [[ -n "$n_slots" && "$n_slots" -gt 0 ]] || n_slots=16
-        julenny-fhe crypto combine \
+        julenny-toolkit crypto combine \
             --context-spec "$JULENNY_CRYPTO_CONTEXT_SPEC" \
             --partials "$peer_partial_bin" "$my_partial_bin" \
             --real --show-slots "$n_slots"
         echo
         success "Decryption complete. The combined (averaged) vector is shown above."
         echo
-        info "Showing the first $n_slots slots. To see more: re-run 'julenny-fhe crypto combine'"
+        info "Showing the first $n_slots slots. To see more: re-run 'julenny-toolkit crypto combine'"
         info "with a larger --show-slots, or set JULENNY_SHOW_SLOTS and re-run this script."
         return 0
     fi
 
-    local combine_json; combine_json="$(julenny-fhe crypto combine \
+    local combine_json; combine_json="$(julenny-toolkit crypto combine \
         --context-spec "$JULENNY_CRYPTO_CONTEXT_SPEC" \
         --partials "$peer_partial_bin" "$my_partial_bin" \
         --non-zero --json)"
@@ -1226,7 +1226,7 @@ viewer_flow() {
             # is NOT an indicator vector, so do not resolve slots against a dataset.
             local n_show="${JULENNY_SHOW_SLOTS:-8}"
             echo
-            julenny-fhe crypto combine \
+            julenny-toolkit crypto combine \
                 --context-spec "$JULENNY_CRYPTO_CONTEXT_SPEC" \
                 --partials "$peer_partial_bin" "$my_partial_bin" \
                 --real --show-slots "$n_show"
@@ -1347,7 +1347,7 @@ viewer_flow() {
                     local slots_csv; slots_csv="$(echo "$combine_json" | jq -r '.nonZeroValues | keys | join(",")')"
                     echo
                     step "Resolving $non_zero non-zero slot(s) against $input_csv..."
-                    julenny-fhe crypto resolve-indicator \
+                    julenny-toolkit crypto resolve-indicator \
                         --context-spec "$JULENNY_CRYPTO_CONTEXT_SPEC" \
                         --slots "$slots_csv" \
                         --input "$input_csv" \

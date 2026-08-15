@@ -255,7 +255,7 @@ namespace JuLennyFHE::Services
         std::wstring summary;
     };
 
-    // Façade over julenny-fhe-core for the WinUI 3 app. The app is
+    // Façade over the fhe_toolkit_core library for the WinUI 3 app. The app is
     // strictly offline - operations read and write local files; the
     // platform's web UI or REST API moves the files between parties.
     // No HTTP code lives here.

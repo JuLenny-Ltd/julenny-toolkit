@@ -20,7 +20,7 @@ deserialization test fixture.
 ## How it was generated
 
 ```sh
-julenny-fhe crypto dump-sample --output-dir third_party/fixtures/sample-ciphertext
+julenny-toolkit crypto dump-sample --output-dir third_party/fixtures/sample-ciphertext
 ```
 
 Reproducible on demand: regenerate whenever the crypto context spec

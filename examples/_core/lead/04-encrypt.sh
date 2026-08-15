@@ -7,7 +7,7 @@
 # Each input branches on inputs[i].encoding: if the encoding string starts
 # with "plaintext-" (e.g. plaintext-line-list, plaintext-csv), the raw file
 # is uploaded via the upload_plaintext_dataset helper instead of being run
-# through `julenny-fhe crypto encrypt`. Which inputs are plaintext is entirely
+# through `julenny-toolkit crypto encrypt`. Which inputs are plaintext is entirely
 # function-def driven, so this branch is what lets one script serve every
 # scenario.
 
@@ -182,7 +182,7 @@ for ((i = 0; i < MY_INPUT_COUNT; i++)); do
                 "$FUNCTION_DEF" "$INPUT_NAME" "$INPUT_FILE" "$BUNDLE_INPUT" \
                 || die "recipe executor failed for '$INPUT_NAME'."
             BUNDLE_BIN="$JL_KEYS_DIR/$(basename "$INPUT_FILE").$INPUT_NAME.bundle.bin"
-            julenny-fhe crypto encrypt \
+            julenny-toolkit crypto encrypt \
                 --function-def "$FUNCTION_DEF" \
                 --input-name "$INPUT_NAME" \
                 --input "$BUNDLE_INPUT" \
@@ -214,7 +214,7 @@ for ((i = 0; i < MY_INPUT_COUNT; i++)); do
             echo "============================================================"
 
             CIPHERTEXT="$JL_KEYS_DIR/$(basename "$INPUT_FILE").$INPUT_NAME.enc.bin"
-            julenny-fhe crypto encrypt \
+            julenny-toolkit crypto encrypt \
                 --input "$INPUT_FILE" \
                 --joint-public-key "$JOINT_PK" \
                 --output "$CIPHERTEXT" \

@@ -8,7 +8,7 @@
 #   3. SHA-256-hashes each of the three final joint keys.
 #   4. Requests one signed object storage upload URL per keyType, PUTs the blob.
 #   5. Builds the to-sign JSON locally (mimicking what the web UI would emit).
-#   6. Calls `julenny-fhe crypto wrap-final-keys-envelope` to sign the envelope.
+#   6. Calls `julenny-toolkit crypto wrap-final-keys-envelope` to sign the envelope.
 #   7. POSTs the signed envelope to /keysetup/final-keys.
 #   8. Reports the resulting permission state.
 #
@@ -86,7 +86,7 @@ FINAL_SUM="$JL_KEYS_DIR/final_sum_key.bin"
 
 if [[ ! -f "$FINAL_RELIN" ]]; then
     info "Combining round-2 relin shares -> final relin key..."
-    julenny-fhe crypto relin-combine \
+    julenny-toolkit crypto relin-combine \
         --context-spec "$JULENNY_CRYPTO_CONTEXT_SPEC" \
         --round 2 \
         --share-a "$LEAD_R2" \
@@ -102,7 +102,7 @@ fi
 if [[ "$NEEDS_SUM" == "yes" ]]; then
     if [[ ! -f "$FINAL_SUM" ]]; then
         info "Combining sum-round-1 shares -> final sum key..."
-        julenny-fhe crypto sum-combine \
+        julenny-toolkit crypto sum-combine \
             --context-spec "$JULENNY_CRYPTO_CONTEXT_SPEC" \
             --share-a "$LEAD_SUM" \
             --share-b "$MAIN_SUM" \
@@ -223,7 +223,7 @@ success "To-sign JSON: $TO_SIGN"
 
 # -------- 6. Sign the envelope via the offline toolkit --------
 info "Signing the envelope (offline)..."
-julenny-fhe crypto wrap-final-keys-envelope \
+julenny-toolkit crypto wrap-final-keys-envelope \
     --to-sign "$TO_SIGN" \
     --secret-key "$JULENNY_SIGNING_SECRET" \
     --output "$SIGNED_OUT" \

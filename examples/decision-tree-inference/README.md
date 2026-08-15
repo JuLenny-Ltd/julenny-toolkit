@@ -62,7 +62,7 @@ Two encodings of the same `x = [0.6, 0.7]` are provided:
   over the `features` array and emits one broadcast ciphertext per feature. This
   is the current (v2) path.
 - `features.txt` is the flat one-value-per-line form, for encrypting directly
-  with `julenny-fhe crypto encrypt --schema packed-real`.
+  with `julenny-toolkit crypto encrypt --schema packed-real`.
 
 ## Running it
 

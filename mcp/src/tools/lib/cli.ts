@@ -1,4 +1,4 @@
-// Argv-array runner for the julenny-fhe CLI.
+// Argv-array runner for the julenny-toolkit CLI.
 //
 // Security contract (cowork-mcp-security-guidelines.md §3): invoke the CLI by
 // passing arguments as an argv ARRAY (never a shell string), with a pinned
@@ -15,8 +15,8 @@
 import { execFile } from 'node:child_process';
 
 // Pinned once at module load. Override only via a trusted env var, never via a
-// tool parameter. Defaults to resolving `julenny-fhe` on PATH at spawn time.
-const CLI_BIN = process.env.JULENNY_FHE_BIN || 'julenny-fhe';
+// tool parameter. Defaults to resolving `julenny-toolkit` on PATH at spawn time.
+const CLI_BIN = process.env.JULENNY_TOOLKIT_BIN || 'julenny-toolkit';
 
 export interface CliResult {
   ok: boolean;
@@ -28,7 +28,7 @@ export interface CliResult {
 }
 
 /**
- * Run a julenny-fhe command. `args` is a fully-formed argv array built by the
+ * Run a julenny-toolkit command. `args` is a fully-formed argv array built by the
  * caller from validated, typed parameters (resolved paths, whitelisted enums).
  * Always pass `--json` in `args` for machine-readable output.
  */

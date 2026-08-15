@@ -98,7 +98,7 @@ if [[ -f "$MY_ROT_SHARE" && "${JULENNY_FORCE_ROTATION_REGEN:-0}" != "1" ]]; then
     info "Reusing existing Acme rotation-round1 share at $MY_ROT_SHARE ($(stat -c%s "$MY_ROT_SHARE") bytes)."
 else
     info "Computing Acme's rotation-round1 contribution (lead)..."
-    julenny-fhe crypto rotation-contribute \
+    julenny-toolkit crypto rotation-contribute \
         --role lead \
         --secret-key "$MY_SECRET" \
         --indices "$INDICES_CSV" \
@@ -130,7 +130,7 @@ fi
 # platform verifies SHA256 match on submission.
 ROT_COMBINED="$JL_KEYS_DIR/rotation-combined.bin"
 info "Computing Acme's rotation-combine output..."
-julenny-fhe crypto rotation-combine \
+julenny-toolkit crypto rotation-combine \
     --share-a "$MY_ROT_SHARE" \
     --share-b "$PEER_CONTINUE" \
     --joint-pk "$JOINT_PK" \

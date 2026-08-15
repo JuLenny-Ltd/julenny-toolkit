@@ -1,5 +1,5 @@
-#ifndef JULENNY_FHE_CLI_PROMPTS_H
-#define JULENNY_FHE_CLI_PROMPTS_H
+#ifndef JULENNY_TOOLKIT_CLI_PROMPTS_H
+#define JULENNY_TOOLKIT_CLI_PROMPTS_H
 
 #include <optional>
 #include <string>

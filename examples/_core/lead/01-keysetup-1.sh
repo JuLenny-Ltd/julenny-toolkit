@@ -21,7 +21,7 @@ SUM_R1="$JL_KEYS_DIR/lead-sum-r1.bin"
 
 # -------- 1. pk-share (round 1) --------
 info "Generating FHE keypair (Acme's contribution)..."
-julenny-fhe crypto keysetup-contribute \
+julenny-toolkit crypto keysetup-contribute \
     --context-spec "$JULENNY_CRYPTO_CONTEXT_SPEC" \
     --role lead \
     --output-secret "$FHE_SECRET" \
@@ -34,7 +34,7 @@ wrap_and_upload "$FHE_PUBLIC" 1 "pk-share"
 
 # -------- 2. relin-round1 (round 2) --------
 info "Generating relinearization key round-1 contribution..."
-julenny-fhe crypto relin-contribute \
+julenny-toolkit crypto relin-contribute \
     --context-spec "$JULENNY_CRYPTO_CONTEXT_SPEC" \
     --round 1 --role lead \
     --secret-key "$FHE_SECRET" \
@@ -47,7 +47,7 @@ wrap_and_upload "$RELIN_R1" 2 "relin-round1"
 # -------- 3. sum-round1 (round 5) -- only if the function needs a sum key --------
 if function_requires_sum_keys; then
     info "Generating sum key round-1 contribution..."
-    julenny-fhe crypto sum-contribute \
+    julenny-toolkit crypto sum-contribute \
         --context-spec "$JULENNY_CRYPTO_CONTEXT_SPEC" \
         --role lead \
         --secret-key "$FHE_SECRET" \

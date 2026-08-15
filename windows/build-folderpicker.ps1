@@ -2,7 +2,7 @@
 #
 # IMPORTANT: Inno Setup's setup.exe is a 32-bit process, so this DLL MUST be x86
 # or the wizard's LoadLibrary will fail. (Our app/CLI are x64; this helper is a
-# separate, installer-only artifact.) Output goes where julenny-fhe.iss expects
+# separate, installer-only artifact.) Output goes where julenny-toolkit.iss expects
 # it, next to the .iss (windows\installer\folderpicker.dll, dontcopy-bundled).
 #
 # Usage from any PowerShell:

@@ -1,5 +1,5 @@
 # Golden sample features: x = [0.6, 0.7] (one normalized feature per line; feature j on line j).
-# Encode with: julenny-fhe crypto encrypt --schema packed-real --context-spec ckks-tree-v1 ...
+# Encode with: julenny-toolkit crypto encrypt --schema packed-real --context-spec ckks-tree-v1 ...
 # (or via --function-def decision-tree-inference --input-name features)
 0.6
 0.7

@@ -150,7 +150,7 @@ permission is just a click."]*
 **Step 2: BetaCorp accepts.** [BetaCorp's terminal]
 
 ```
-julenny-fhe permissions accept <permission-id>
+julenny-toolkit permissions accept <permission-id>
 ```
 
 One command.
@@ -164,8 +164,8 @@ the dataset for this permission.
 BetaCorp does the equivalent on the CLI:
 
 ```
-julenny-fhe encrypt --input beta-flags.csv --out beta-flags.enc
-julenny-fhe datasets upload beta-flags.enc --permission <id>
+julenny-toolkit encrypt --input beta-flags.csv --out beta-flags.enc
+julenny-toolkit datasets upload beta-flags.enc --permission <id>
 ```
 
 *[Narration: "Each company encrypts its own data locally, on its own
@@ -220,7 +220,7 @@ BetaCorp downloads the encrypted result and Acme's unlock share, then
 runs:
 
 ```
-julenny-fhe results decrypt <result-id>
+julenny-toolkit results decrypt <result-id>
 ```
 
 His app combines everything locally, plaintext appears in his terminal:

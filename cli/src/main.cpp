@@ -18,7 +18,7 @@ int main(int argc, char** argv) {
     app.require_subcommand(0, 1);
 
     app.set_version_flag("-v,--version", []() {
-        return std::string("julenny-fhe ") + fhe_toolkit_version();
+        return std::string("julenny-toolkit ") + fhe_toolkit_version();
     });
 
     int exit_code = 0;

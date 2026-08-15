@@ -11,10 +11,10 @@
 [CmdletBinding()]
 param(
     [Parameter(Mandatory = $true)] [string] $ApiKey,
-    [string] $McpExePath = "$env:LOCALAPPDATA\Programs\julenny-fhe\julenny-mcp.exe",
+    [string] $McpExePath = "$env:LOCALAPPDATA\Programs\julenny-toolkit\julenny-mcp.exe",
     [string] $ApiUrl     = "https://julenny.net",
     # Optional. When non-empty, written as JULENNY_WORKDIR; blank = MCP default
-    # (%LOCALAPPDATA%\julenny-fhe\workdir, created on first run).
+    # (%LOCALAPPDATA%\julenny-toolkit\workdir, created on first run).
     [string] $Workdir    = "",
     # The connector key shown in Claude Desktop's UI and used as the mcp__<key>__ namespace.
     [string] $ConnectorName = "JuLenny"

@@ -1,6 +1,6 @@
 // Local toolkit (crypto) MCP verbs — family 2 of the security contract.
 //
-// These wrap specific `julenny-fhe` CLI commands so an agent can run the local
+// These wrap specific `julenny-toolkit` CLI commands so an agent can run the local
 // crypto half of the pipeline. The crypto runs on the user's machine; the agent
 // never sees keys or plaintext.
 //
@@ -16,7 +16,7 @@
 //
 // Wired into index.ts; compiles clean (tsc). Built to the VS-approved mapping in
 // .plans/mcp-verb-mapping.md. Runtime-untested end-to-end pending a configured
-// JULENNY_WORKDIR + an installed julenny-fhe on the host.
+// JULENNY_WORKDIR + an installed julenny-toolkit on the host.
 // CLI gaps closed in the same v0.5.6 work (pending NUC build of the new CLI):
 // `crypto inspect --json` (so `inspect` returns non-secret metadata) and
 // `crypto combine --out-file` (so `decrypt_result` writes plaintext to disk and

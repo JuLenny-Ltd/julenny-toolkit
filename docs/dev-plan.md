@@ -434,16 +434,16 @@ access-requests, grants. Need to add the crypto-only command group
 mirroring the Windows app's actions:
 
 ```
-julenny-fhe crypto keysetup-share \
+julenny-toolkit crypto keysetup-share \
   --input <state-file> --output <share-file>
 
-julenny-fhe crypto encrypt \
+julenny-toolkit crypto encrypt \
   --input <plaintext-file> --key <joint-pubkey-file> --output <ciphertext-file>
 
-julenny-fhe crypto partial-decrypt \
+julenny-toolkit crypto partial-decrypt \
   --input <result-ciphertext-file> --output <partial-file>
 
-julenny-fhe crypto combine \
+julenny-toolkit crypto combine \
   --result <result-ciphertext-file> --partials <p1>,<p2>,... \
   [--output <plaintext-file>]
 ```

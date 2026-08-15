@@ -25,24 +25,24 @@ using fhe_toolkit::crypto::get_crypto_context_spec;
 namespace {
 
 // Per-OS default secret-store path. Local-only; no network involvement.
-//   Linux/macOS: $XDG_DATA_HOME/julenny-fhe/secrets
-//                ($HOME/.local/share/julenny-fhe/secrets as fallback)
-//   Windows:     %APPDATA%/julenny-fhe/secrets
+//   Linux/macOS: $XDG_DATA_HOME/julenny-toolkit/secrets
+//                ($HOME/.local/share/julenny-toolkit/secrets as fallback)
+//   Windows:     %APPDATA%/julenny-toolkit/secrets
 std::filesystem::path default_secret_store_path() {
 #ifdef _WIN32
     const char* appdata = std::getenv("APPDATA");
     if (appdata && *appdata) {
-        return std::filesystem::path(appdata) / "julenny-fhe" / "secrets";
+        return std::filesystem::path(appdata) / "julenny-toolkit" / "secrets";
     }
 #else
     if (const char* xdg = std::getenv("XDG_DATA_HOME"); xdg && *xdg) {
-        return std::filesystem::path(xdg) / "julenny-fhe" / "secrets";
+        return std::filesystem::path(xdg) / "julenny-toolkit" / "secrets";
     }
     if (const char* home = std::getenv("HOME"); home && *home) {
-        return std::filesystem::path(home) / ".local" / "share" / "julenny-fhe" / "secrets";
+        return std::filesystem::path(home) / ".local" / "share" / "julenny-toolkit" / "secrets";
     }
 #endif
-    return std::filesystem::path("julenny-fhe-secrets");
+    return std::filesystem::path("julenny-toolkit-secrets");
 }
 
 std::string resolve_store_path(const std::string& flag_value) {

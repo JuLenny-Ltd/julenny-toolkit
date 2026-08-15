@@ -37,7 +37,7 @@ fi
 
 # -------- 2. Derive joint pk (chain on Acme's pk-share) --------
 info "Deriving joint public key..."
-julenny-fhe crypto keysetup-contribute \
+julenny-toolkit crypto keysetup-contribute \
     --context-spec "$JULENNY_CRYPTO_CONTEXT_SPEC" \
     --role main \
     --peer-share "$LEAD_PK_BIN" \
@@ -51,7 +51,7 @@ wrap_and_upload "$JOINT_PK" 1 "pk-share"
 
 # -------- 3. relin-round1-continue (round 3) --------
 info "Generating relin round-1 continue..."
-julenny-fhe crypto relin-contribute \
+julenny-toolkit crypto relin-contribute \
     --context-spec "$JULENNY_CRYPTO_CONTEXT_SPEC" \
     --round 1 --role main \
     --secret-key "$MY_SHARE_SECRET" \
@@ -65,7 +65,7 @@ wrap_and_upload "$MAIN_RELIN_R1" 3 "relin-round1-continue"
 # -------- 4. sum-round1-continue (round 6) -- only if the function needs a sum key --------
 if function_requires_sum_keys; then
     info "Generating sum round-1 continue..."
-    julenny-fhe crypto sum-contribute \
+    julenny-toolkit crypto sum-contribute \
         --context-spec "$JULENNY_CRYPTO_CONTEXT_SPEC" \
         --role main \
         --secret-key "$MY_SHARE_SECRET" \

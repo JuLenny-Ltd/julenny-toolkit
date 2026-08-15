@@ -340,7 +340,7 @@ fi
 
 if [[ ! -f "$SIGNING_SECRET" ]]; then
     step "Generating Ed25519 signing keypair for Beta"
-    julenny-fhe crypto signing-keygen \
+    julenny-toolkit crypto signing-keygen \
         --output-secret "$SIGNING_SECRET" \
         --output-public "$SIGNING_PUBLIC" \
         > /dev/null

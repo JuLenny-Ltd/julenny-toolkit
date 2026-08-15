@@ -1,6 +1,6 @@
 # Build the MCP server as a single self-contained julenny-mcp.exe (Node SEA).
 # No Node install required on the end-user machine. The exe still shells out to
-# julenny-fhe.exe at runtime (both ship in the installer).
+# julenny-toolkit.exe at runtime (both ship in the installer).
 #
 # Recipe: bundle the ESM TypeScript to ONE CommonJS file (esbuild), generate a
 # SEA blob, copy node.exe, and inject the blob with postject. The MCP has no
