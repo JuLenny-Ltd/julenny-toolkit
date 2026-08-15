@@ -6,23 +6,17 @@
 #   . "$PSScriptRoot\lib.ps1"
 #
 # ============================================================================
-# PORT STATUS - this file is NOT yet a complete twin of lib.sh (53 functions).
+# PORT STATUS: this library is COMPLETE. Every function lib.sh exposes has a
+# twin here, including releaser_flow and viewer_flow with all their output
+# layouts (scalar, packed-real-vector, pair-list, binary-indicator, and the
+# hash-bucket resolve path).
 #
-#   DONE  paths and per-collab state, output helpers, config.env read/write,
-#         session load, prompts, data-file picker, HTTP wrapper, download,
-#         keysetup + result-visibility queries, permission/collab/function
-#         listing, the offline-CLI wrapper, peer share transfer, envelope
-#         signing and upload, collaboration/permission creation, and the whole
-#         rotation-key family.
-#   TODO  upload_plaintext_dataset (multipart), all_required_inputs_declared,
-#         releaser_flow, viewer_flow.
+# Still to do elsewhere in the port: the numbered phase scripts, run.ps1, and
+# the per-scenario bootstraps.
 #
 # Deliberately NOT ported: migrate_legacy_workdir_if_needed. It migrates a
 # pre-refactor workdir layout that only ever existed on Linux; the Windows
 # scripts path is new, so there is nothing to migrate from.
-#
-# Do not ship a Windows release until the TODO list is empty and a real
-# two-party run has been verified end to end.
 # ============================================================================
 #
 # Differences from lib.sh, all deliberate:
@@ -542,6 +536,29 @@ function Invoke-JlCli {
         Stop-JlWithError ("julenny-toolkit {0} failed (exit {1}):`n{2}" -f ($CliArgs -join ' '), $LASTEXITCODE, ($output -join "`n"))
     }
     if ($PassThru) { return ($output -join "`n") }
+}
+
+# Same, but returns $false instead of exiting. Used where one failure should
+# skip an item and carry on rather than end the run.
+function Invoke-JlCliAllowFail {
+    param([Parameter(Mandatory = $true)][string[]] $CliArgs)
+    $exe = 'julenny-toolkit'
+    if ($env:JULENNY_TOOLKIT_BIN) { $exe = $env:JULENNY_TOOLKIT_BIN }
+    $output = & $exe @CliArgs 2>&1
+    if ($LASTEXITCODE -ne 0) {
+        Write-JlWarn ("julenny-toolkit {0} failed (exit {1}):" -f ($CliArgs -join ' '), $LASTEXITCODE)
+        $output | ForEach-Object { Write-Host "    $_" }
+        return $false
+    }
+    return $true
+}
+
+# Ed25519 signature as lowercase hex, the form the platform's x-jl-signature
+# header expects (the bash side does this with xxd -p).
+function Get-JlFileHex {
+    param([Parameter(Mandatory = $true)][string] $Path)
+    $bytes = [System.IO.File]::ReadAllBytes($Path)
+    return ([BitConverter]::ToString($bytes) -replace '-', '').ToLower()
 }
 
 # ============================================================================
@@ -1114,4 +1131,592 @@ function Test-JlAllRequiredInputsDeclared {
         if ([string]::IsNullOrWhiteSpace($entry.datasetId)) { return $false }
     }
     return $true
+}
+
+# ============================================================================
+# Result-visibility flows: releaser and viewer
+# ============================================================================
+# These do the threshold-decrypt work. Which one this side runs depends on
+# resultVisibility (see Test-JlAmViewer / Test-JlAmReleaser):
+#
+#   releaser  polls for an awaiting-release execution, downloads the encrypted
+#             result, produces this side's partial decryption using its keysetup
+#             role (lead or main), signs it and uploads it. Never sees plaintext.
+#
+#   viewer    polls for a released execution, downloads the encrypted result and
+#             the peer's partial, produces its own partial, combines both, and
+#             renders the answer per the function-def's output.layout.
+#
+# Same code on both sides; the only side-specific piece is the path to the local
+# FHE secret share, passed in (the owner and consumer filenames differ).
+
+function Get-JlExecutionsInState {
+    param([Parameter(Mandatory = $true)][string] $State)
+    $resp = Invoke-JlApi GET "/api/fhe-permissions/$($script:JULENNY_PERMISSION_ID)/executions?state=$State" -AllowFailure
+    if ($null -eq $resp) { return @() }
+    if (-not ($resp.PSObject.Properties.Name -contains 'executions')) { return @() }
+    return @($resp.executions)
+}
+
+function Invoke-JlReleaserFlow {
+    param([Parameter(Mandatory = $true)][string] $MySecret)
+
+    if (-not (Test-Path -LiteralPath $MySecret)) {
+        Stop-JlWithError "Missing FHE secret share at $MySecret. Did keysetup complete on this machine?"
+    }
+
+    Write-JlStep "Releaser flow: partial-decrypt and upload (resultVisibility: $(Get-JlResultVisibility))"
+
+    # There can be MORE THAN ONE awaiting-release execution: an older one whose
+    # result is unusable cannot be released and sits in the queue until the
+    # platform cancels it. Try every one and skip failures, so a stuck execution
+    # does not block releasing the current cycle's run.
+    Write-JlInfo "Polling for awaiting-release executions on permission $($script:JULENNY_PERMISSION_ID)..."
+    $elapsed = 0
+    $delay = 5
+    $skip = @{}
+    $released = 0
+    $failed = 0
+
+    $leadFlag = @()
+    if ($script:JULENNY_ROLE -eq 'lead') { $leadFlag = @('--lead') }
+
+    while ($true) {
+        $execIds = @(Get-JlExecutionsInState 'awaiting-release' | ForEach-Object { $_.id } | Where-Object { $_ })
+        $pending = @($execIds | Where-Object { -not $skip.ContainsKey($_) })
+
+        if ($pending.Count -gt 0) {
+            Write-JlInfo "Attempting $($pending.Count) awaiting-release execution(s)..."
+            foreach ($execId in $pending) {
+                Write-Host ""
+                Write-JlInfo "Releasing execution $execId..."
+                $resultBin  = Join-Path $script:JL_KEYS_DIR "result-$execId.bin"
+                $partialBin = Join-Path $script:JL_KEYS_DIR "releaser-partial-$execId.bin"
+                $sigBin     = Join-Path $script:JL_KEYS_DIR "releaser-partial-$execId.sig"
+
+                # Download the encrypted result.
+                $ok = $true
+                try {
+                    Invoke-WebRequest -Uri "$($script:JULENNY_API_BASE)/api/executions/$execId/result" `
+                        -Headers @{ 'x-api-key' = $script:JULENNY_API_KEY } `
+                        -OutFile $resultBin -UseBasicParsing -ErrorAction Stop | Out-Null
+                } catch { $ok = $false }
+                if ((-not $ok) -or (-not (Test-Path -LiteralPath $resultBin)) -or ((Get-Item -LiteralPath $resultBin).Length -le 0)) {
+                    Write-JlWarn "Could not download the result for $execId. Skipping it."
+                    Remove-Item -LiteralPath $resultBin -Force -ErrorAction SilentlyContinue
+                    $skip[$execId] = $true
+                    $failed++
+                    continue
+                }
+                Write-JlSuccess "Encrypted result: $resultBin ($((Get-Item -LiteralPath $resultBin).Length) bytes)"
+
+                # Partial-decrypt with our keysetup role. JULENNY_ROLE is fixed at
+                # keysetup time and is independent of resultVisibility. A result
+                # produced under a foreign crypto context aborts the CLI; that is
+                # per-execution, not fatal, so skip and carry on.
+                Write-JlInfo "Producing partial decryption (keysetup role: $($script:JULENNY_ROLE))..."
+                $cliArgs = @(
+                    'crypto', 'partial-decrypt',
+                    '--context-spec', $script:JULENNY_CRYPTO_CONTEXT_SPEC,
+                    '--input',        $resultBin,
+                    '--secret-key',   $MySecret,
+                    '--output',       $partialBin
+                ) + $leadFlag
+                if (-not (Invoke-JlCliAllowFail $cliArgs)) {
+                    Write-JlWarn "partial-decrypt FAILED for execution $execId (see above)."
+                    Write-JlWarn "  Skipping it. It stays awaiting-release; ask the platform side to"
+                    Write-JlWarn "  cancel/fail it if its result is known to be unusable."
+                    $skip[$execId] = $true
+                    $failed++
+                    continue
+                }
+                Write-JlSuccess "Partial decrypt: $partialBin ($((Get-Item -LiteralPath $partialBin).Length) bytes)"
+
+                # Sign the partial bytes.
+                Write-JlInfo "Signing the partial decrypt with the registered signing key..."
+                Invoke-JlCli @(
+                    'crypto', 'sign',
+                    '--input',      $partialBin,
+                    '--secret-key', $script:JULENNY_SIGNING_SECRET,
+                    '--output',     $sigBin
+                )
+                $sigHex = Get-JlFileHex $sigBin
+                if ($sigHex.Length -ne 128) {
+                    Stop-JlWithError "Signature is $($sigHex.Length) hex chars, expected 128."
+                }
+
+                # Upload as multipart, with the signature in a header.
+                Write-JlInfo "Uploading partial decrypt to platform..."
+                $boundary = [System.Guid]::NewGuid().ToString()
+                $body = New-JlMultipartBody -FilePath $partialBin -Boundary $boundary -Fields @{}
+                $state = ''
+                try {
+                    $resp = Invoke-RestMethod -Method POST `
+                        -Uri "$($script:JULENNY_API_BASE)/api/executions/$execId/partial-decrypt" `
+                        -Headers @{ 'x-api-key' = $script:JULENNY_API_KEY; 'x-jl-signature' = $sigHex } `
+                        -ContentType "multipart/form-data; boundary=$boundary" `
+                        -Body $body -ErrorAction Stop
+                    if ($resp -and ($resp.PSObject.Properties.Name -contains 'state')) { $state = $resp.state }
+                } catch {
+                    Write-JlWarn "Upload failed for ${execId}: $($_.Exception.Message)"
+                }
+
+                if ($state -eq 'released') {
+                    Write-JlSuccess "Released. Execution state: $state."
+                    $released++
+                } else {
+                    Write-JlWarn "Upload may have failed for $execId (state: '$state')."
+                    $skip[$execId] = $true
+                    $failed++
+                }
+            }
+            if ($released -gt 0) { break }
+            # Every pending execution failed and is now skipped. Keep polling for
+            # a NEW one rather than giving up.
+        }
+
+        if ($execIds.Count -gt 0) {
+            Write-Host ("  (only unreleasable execution(s) in the queue [{0}]; waiting for a new one, {1}s elapsed)" -f ($execIds -join ' '), $elapsed)
+        } else {
+            Write-Host ("  (no awaiting-release execution yet, {0}s elapsed)" -f $elapsed)
+        }
+
+        Start-Sleep -Seconds $delay
+        $elapsed += $delay
+        if     ($elapsed -gt 60) { $delay = 15 }
+        elseif ($elapsed -gt 30) { $delay = 10 }
+        if ($elapsed -gt 1800) {
+            Stop-JlWithError "Timed out after 30 min waiting for a releasable execution. Has the viewer side triggered?"
+        }
+    }
+
+    Write-Host ""
+    Write-JlSuccess "Released $released execution(s)."
+    if ($failed -gt 0) {
+        Write-JlWarn "$failed execution(s) could NOT be released and remain awaiting-release"
+        Write-JlWarn "  until the platform cancels them."
+    }
+
+    Write-Host ""
+    Write-JlInfo "Next step:"
+    Write-Host "  The viewer side can now run their decrypt script to combine partials and"
+    Write-Host "  reveal the plaintext answer."
+}
+
+# Downloads a URL to a file and returns the HTTP status, without throwing, so
+# the caller can tell 403 (not released yet) from a real failure.
+function Save-JlExecutionFile {
+    param(
+        [Parameter(Mandatory = $true)][string] $Path,
+        [Parameter(Mandatory = $true)][string] $OutFile
+    )
+    try {
+        $r = Invoke-WebRequest -Uri "$($script:JULENNY_API_BASE)$Path" `
+                -Headers @{ 'x-api-key' = $script:JULENNY_API_KEY } `
+                -OutFile $OutFile -UseBasicParsing -PassThru -ErrorAction Stop
+        return [int] $r.StatusCode
+    } catch {
+        $code = 0
+        if ($_.Exception.Response) { $code = [int] $_.Exception.Response.StatusCode }
+        return $code
+    }
+}
+
+# Slot indices of the non-zero values, numerically sorted.
+function Get-JlNonZeroSlots {
+    param([Parameter(Mandatory = $true)] $CombineJson)
+    if (-not ($CombineJson.PSObject.Properties.Name -contains 'nonZeroValues')) { return @() }
+    if ($null -eq $CombineJson.nonZeroValues) { return @() }
+    return @($CombineJson.nonZeroValues.PSObject.Properties.Name | Sort-Object { [int] $_ })
+}
+
+function Invoke-JlViewerFlow {
+    param([Parameter(Mandatory = $true)][string] $MySecret)
+
+    if (-not (Test-Path -LiteralPath $MySecret)) {
+        Stop-JlWithError "Missing FHE secret share at $MySecret. Did keysetup complete on this machine?"
+    }
+
+    Write-JlStep "Viewer flow: combine partials and reveal the plaintext (resultVisibility: $(Get-JlResultVisibility))"
+
+    # If THIS machine just triggered an execution, 05-run-query persisted its id.
+    # Wait for that specific execution rather than offering older released ones:
+    # decrypting a stale execution is an easy mistake to make.
+    $lastExecFile = Join-Path $script:JL_WORKDIR 'last_exec_id'
+    $wantExec = ''
+    if (Test-Path -LiteralPath $lastExecFile) {
+        $wantExec = ([System.IO.File]::ReadAllText($lastExecFile)).Trim()
+    }
+
+    $elapsed = 0
+    $delay = 5
+    $execId = ''
+    $execWhen = ''
+    $released = @()
+
+    if ($wantExec) {
+        Write-JlInfo "Waiting for this cycle's execution ($wantExec) to be released..."
+    } else {
+        Write-JlInfo "Polling for released executions on permission $($script:JULENNY_PERMISSION_ID)..."
+    }
+
+    while ($true) {
+        if ($wantExec) {
+            $doc = Invoke-JlApi GET "/api/executions/$wantExec" -AllowFailure
+            $state = 'unknown'
+            if ($doc -and ($doc.PSObject.Properties.Name -contains 'state')) { $state = $doc.state }
+
+            if ($state -eq 'released') {
+                $execId = $wantExec
+                $execWhen = 'unknown date'
+                if ($doc.PSObject.Properties.Name -contains 'releasedAt' -and $doc.releasedAt) { $execWhen = $doc.releasedAt }
+                elseif ($doc.PSObject.Properties.Name -contains 'triggeredAt' -and $doc.triggeredAt) { $execWhen = $doc.triggeredAt }
+                Remove-Item -LiteralPath $lastExecFile -Force -ErrorAction SilentlyContinue
+                Write-JlSuccess "This cycle's execution is released: $execId ($execWhen)"
+                break
+            } elseif ($state -eq 'failed') {
+                Write-JlWarn "Execution $wantExec failed; falling back to the released-executions picker."
+                Remove-Item -LiteralPath $lastExecFile -Force -ErrorAction SilentlyContinue
+                $wantExec = ''
+                continue
+            } else {
+                Write-Host ("  (execution {0} is '{1}', waiting for release, {2}s elapsed)" -f $wantExec, $state, $elapsed)
+            }
+        } else {
+            $released = @(Get-JlExecutionsInState 'released')
+            if ($released.Count -gt 0) { break }
+            Write-Host ("  (no released execution yet, {0}s elapsed)" -f $elapsed)
+        }
+
+        Start-Sleep -Seconds $delay
+        $elapsed += $delay
+        if     ($elapsed -gt 60) { $delay = 15 }
+        elseif ($elapsed -gt 30) { $delay = 10 }
+        if ($elapsed -gt 1800) {
+            Stop-JlWithError "Timed out after 30 min waiting for a released execution. Has the releaser run their script?"
+        }
+    }
+
+    if (-not $execId) {
+        while ($true) {
+            if ($released.Count -eq 1) {
+                $execId = $released[0].id
+                $execWhen = 'unknown date'
+                if ($released[0].PSObject.Properties.Name -contains 'releasedAt' -and $released[0].releasedAt) { $execWhen = $released[0].releasedAt }
+                Write-JlSuccess "Single released execution: $execId ($execWhen)"
+                break
+            }
+            Write-JlInfo "Found $($released.Count) released executions (newest first):"
+            for ($i = 0; $i -lt $released.Count; $i++) {
+                $when = 'unknown date'
+                if ($released[$i].PSObject.Properties.Name -contains 'releasedAt' -and $released[$i].releasedAt) { $when = $released[$i].releasedAt }
+                Write-Host ("  {0}) {1}  ({2})" -f ($i + 1), $released[$i].id, $when)
+            }
+            $choice = Read-JlValue "Pick an execution (1-$($released.Count), or r to refresh)" '1'
+            if ($choice -match '^[Rr]$') {
+                Write-JlInfo "Refreshing the released-executions list..."
+                $released = @(Get-JlExecutionsInState 'released')
+                continue
+            }
+            $n = 0
+            if (-not [int]::TryParse($choice, [ref] $n) -or $n -lt 1 -or $n -gt $released.Count) {
+                Stop-JlWithError "Invalid choice: $choice (must be between 1 and $($released.Count), or r)"
+            }
+            $execId = $released[$n - 1].id
+            $execWhen = 'unknown date'
+            if ($released[$n - 1].PSObject.Properties.Name -contains 'releasedAt' -and $released[$n - 1].releasedAt) { $execWhen = $released[$n - 1].releasedAt }
+            Write-JlSuccess "Selected: $execId ($execWhen)"
+            break
+        }
+    }
+
+    $resultBin      = Join-Path $script:JL_KEYS_DIR "result-$execId.bin"
+    $peerPartialBin = Join-Path $script:JL_KEYS_DIR "peer-partial-$execId.bin"
+    $myPartialBin   = Join-Path $script:JL_KEYS_DIR "my-partial-$execId.bin"
+
+    Write-JlInfo "Downloading encrypted result from platform..."
+    $code = Save-JlExecutionFile "/api/executions/$execId/result" $resultBin
+    if ($code -eq 403) {
+        Remove-Item -LiteralPath $resultBin -Force -ErrorAction SilentlyContinue
+        Stop-JlWithError "Platform says the result isn't released yet. Has the releaser side run their script?"
+    } elseif ($code -ne 200) {
+        Remove-Item -LiteralPath $resultBin -Force -ErrorAction SilentlyContinue
+        Stop-JlWithError "Platform returned HTTP $code when downloading the result. Cannot proceed."
+    }
+    if ((Get-Item -LiteralPath $resultBin).Length -le 0) { Stop-JlWithError "Result file is empty." }
+    Write-JlSuccess "Encrypted result: $resultBin ($((Get-Item -LiteralPath $resultBin).Length) bytes)"
+
+    Write-JlInfo "Downloading peer's partial decrypt..."
+    $code = Save-JlExecutionFile "/api/executions/$execId/partial" $peerPartialBin
+    if ($code -ne 200) {
+        Remove-Item -LiteralPath $peerPartialBin -Force -ErrorAction SilentlyContinue
+        Stop-JlWithError "Platform returned HTTP $code for the peer's partial. Releaser may not have uploaded yet."
+    }
+    if ((Get-Item -LiteralPath $peerPartialBin).Length -le 0) { Stop-JlWithError "Peer's partial is empty." }
+    Write-JlSuccess "Peer's partial: $peerPartialBin ($((Get-Item -LiteralPath $peerPartialBin).Length) bytes)"
+
+    Write-JlInfo "Producing this side's local partial decryption (keysetup role: $($script:JULENNY_ROLE))..."
+    $leadFlag = @()
+    if ($script:JULENNY_ROLE -eq 'lead') { $leadFlag = @('--lead') }
+    Invoke-JlCli (@(
+        'crypto', 'partial-decrypt',
+        '--context-spec', $script:JULENNY_CRYPTO_CONTEXT_SPEC,
+        '--input',        $resultBin,
+        '--secret-key',   $MySecret,
+        '--output',       $myPartialBin
+    ) + $leadFlag)
+    Write-JlSuccess "Our partial: $myPartialBin"
+
+    # ---- combine and render, driven by the function-def's output.layout ----
+    $functionDefPath = Join-Path $script:JL_WORKDIR 'function-def.json'
+    $def = Get-JlFunctionDefObject $functionDefPath
+
+    $outputLayout = 'scalar'
+    if ($def -and ($def.PSObject.Properties.Name -contains 'output') -and $def.output -and
+        ($def.output.PSObject.Properties.Name -contains 'layout') -and $def.output.layout) {
+        $outputLayout = $def.output.layout
+    }
+
+    $weightInputs = 0
+    if ($def -and ($def.PSObject.Properties.Name -contains 'inputs') -and $def.inputs) {
+        $weightInputs = @($def.inputs | Where-Object { $_.schema -eq 'weight-vector' }).Count
+    }
+
+    Write-JlStep "Decrypting the answer (combining both partials)..."
+
+    # Weight-vector functions (federated-average) produce REAL-valued slots.
+    # Integer rounding would destroy them, so combine with --real and skip the
+    # indicator-style analysis entirely.
+    if ($weightInputs -gt 0) {
+        $nSlots = 0
+        if ($script:JULENNY_SHOW_SLOTS) { $nSlots = [int] $script:JULENNY_SHOW_SLOTS }
+        if ($nSlots -le 0 -and $script:JULENNY_INPUT_CSV -and (Test-Path -LiteralPath $script:JULENNY_INPUT_CSV)) {
+            $nSlots = @([System.IO.File]::ReadAllLines($script:JULENNY_INPUT_CSV)).Count
+        }
+        if ($nSlots -le 0) { $nSlots = 16 }
+
+        Invoke-JlCli @(
+            'crypto', 'combine',
+            '--context-spec', $script:JULENNY_CRYPTO_CONTEXT_SPEC,
+            '--partials',     $peerPartialBin, $myPartialBin,
+            '--real', '--show-slots', "$nSlots"
+        )
+        Write-Host ""
+        Write-JlSuccess "Decryption complete. The combined (averaged) vector is shown above."
+        Write-Host ""
+        Write-JlInfo "Showing the first $nSlots slots. To see more: re-run 'julenny-toolkit crypto combine'"
+        Write-JlInfo "with a larger --show-slots, or set JULENNY_SHOW_SLOTS and re-run this script."
+        return
+    }
+
+    $combineRaw = Invoke-JlCli @(
+        'crypto', 'combine',
+        '--context-spec', $script:JULENNY_CRYPTO_CONTEXT_SPEC,
+        '--partials',     $peerPartialBin, $myPartialBin,
+        '--non-zero', '--json'
+    ) -PassThru
+    $combine = $combineRaw | ConvertFrom-Json
+
+    $nonZero    = [int] $combine.nonZeroSlots
+    $totalSlots = [int] $combine.totalSlots
+    Write-JlInfo "Combined plaintext: $nonZero non-zero slot(s) out of $totalSlots."
+    Write-JlInfo "Function output layout: $outputLayout"
+
+    switch -Regex ($outputLayout) {
+
+        '^(scalar|scalar-int)$' {
+            $answer = ''
+            if ($combine.PSObject.Properties.Name -contains 'answer') { $answer = $combine.answer }
+            Write-Host ""
+            if (-not [string]::IsNullOrWhiteSpace("$answer")) {
+                Write-JlSuccess "Answer: $answer"
+            } else {
+                Write-JlWarn "Output is declared '$outputLayout' but combine didn't report a uniform answer."
+                Write-JlWarn "Raw non-zero slot positions and values:"
+                foreach ($s in (Get-JlNonZeroSlots $combine)) {
+                    Write-Host ("    [{0}] = {1}" -f $s, $combine.nonZeroValues.$s)
+                }
+            }
+        }
+
+        '^packed-real-vector$' {
+            # Real-valued score vector (decision-tree per-class scores). Show the
+            # slot values; the predicted class is the argmax. NOT an indicator
+            # vector, so do not resolve slots against a dataset.
+            $nShow = 8
+            if ($script:JULENNY_SHOW_SLOTS) { $nShow = [int] $script:JULENNY_SHOW_SLOTS }
+            Write-Host ""
+            Invoke-JlCli @(
+                'crypto', 'combine',
+                '--context-spec', $script:JULENNY_CRYPTO_CONTEXT_SPEC,
+                '--partials',     $peerPartialBin, $myPartialBin,
+                '--real', '--show-slots', "$nShow"
+            )
+            Write-Host ""
+            Write-JlSuccess "Decryption complete. The real-valued result vector is shown above (predicted class = argmax)."
+        }
+
+        '^(packed-int-vector|indicator-hash)$' {
+            if ($script:JULENNY_OUR_SIDE -eq 'data-owner') { $myRole = 'dataOwner' } else { $myRole = 'queryAnalyst' }
+
+            $inputName = ''
+            if ($def -and $def.inputs) {
+                $mine = @($def.inputs | Where-Object {
+                    $_.role -eq $myRole -and -not ("$($_.encoding)").StartsWith('plaintext')
+                })
+                if ($mine.Count -gt 0) { $inputName = $mine[0].name }
+            }
+            if (-not $inputName -and $script:JULENNY_INPUT_NAME) { $inputName = $script:JULENNY_INPUT_NAME }
+
+            $pairInput = ''
+            if ($def -and $def.inputs) {
+                $pairs = @($def.inputs | Where-Object { "$($_.layout)" -eq 'pair-list' })
+                if ($pairs.Count -gt 0) { $pairInput = $pairs[0].name }
+            }
+
+            $isBinaryIndicator = $false
+            if ($def -and $def.inputs -and $inputName) {
+                $isBinaryIndicator = @($def.inputs | Where-Object {
+                    $_.name -eq $inputName -and $_.schema -eq 'binary-indicator'
+                }).Count -gt 0
+            }
+
+            if ($pairInput) {
+                # Rule-pair functions: the output slot index is the ROW NUMBER in
+                # the pair-list input (0-based, blank lines skipped). Hash-based
+                # resolve-indicator does not apply; print the matched rows.
+                Write-Host ""
+                if ($nonZero -eq 0) {
+                    Write-JlSuccess "Answer: 0 matches. (No rule pair was satisfied by both sides.)"
+                } else {
+                    $pairFile = ''
+                    $mapFile = Join-Path $script:JL_WORKDIR 'my_plaintext_paths.json'
+                    if (Test-Path -LiteralPath $mapFile) {
+                        $map = Get-Content -LiteralPath $mapFile -Raw | ConvertFrom-Json
+                        if ($map.PSObject.Properties.Name -contains $pairInput) { $pairFile = $map.$pairInput.path }
+                    }
+                    if (-not $pairFile -or -not (Test-Path -LiteralPath $pairFile)) {
+                        $pairFile = Select-JlDataFile "File with the '$pairInput' rows used for this run"
+                    }
+                    Write-JlInfo "Pair list: $pairFile"
+                    $rows = @([System.IO.File]::ReadAllLines($pairFile) | Where-Object { $_.Trim() -ne '' })
+                    Write-JlSuccess "Matched rule pairs (satisfied by BOTH sides):"
+                    foreach ($s in (Get-JlNonZeroSlots $combine)) {
+                        $idx = [int] $s
+                        if ($idx -lt $rows.Count) {
+                            Write-Host ("    pair {0}: {1}" -f $idx, $rows[$idx])
+                        } else {
+                            Write-JlWarn ("    pair {0}: index beyond the pair list ({1} rows) - wrong file?" -f $idx, $rows.Count)
+                        }
+                    }
+                }
+            } elseif ($isBinaryIndicator) {
+                # negotiation-matrix family: slots are GRID POSITIONS in the
+                # agreed term grid, not hash buckets, so resolve-indicator does
+                # not apply. Print positions directly.
+                Write-Host ""
+                if ($nonZero -eq 0) {
+                    Write-JlSuccess "Answer: 0 matches. (No grid position was accepted by both sides.)"
+                } else {
+                    Write-JlSuccess "Both sides accepted these grid positions:"
+                    foreach ($s in (Get-JlNonZeroSlots $combine)) {
+                        Write-Host ("    position {0}  (slot value {1})" -f $s, $combine.nonZeroValues.$s)
+                    }
+                    Write-JlInfo "Map positions back to contract terms with your grid file (comment lines excluded)."
+                }
+            } elseif ($nonZero -eq 0) {
+                Write-Host ""
+                Write-JlSuccess "Answer: 0 matches.  (No slots overlapped; the two datasets are disjoint.)"
+            } elseif ($null -eq $def) {
+                Write-JlWarn "No function-def at $functionDefPath; cannot resolve indicator slots."
+                foreach ($s in (Get-JlNonZeroSlots $combine)) {
+                    Write-Host ("    [{0}] = {1}" -f $s, $combine.nonZeroValues.$s)
+                }
+            } elseif (-not $inputName) {
+                Write-JlWarn "Could not determine this side's indicator input from the function-def."
+                Write-JlWarn "Set JULENNY_INPUT_NAME to your indicator input and re-run to resolve names."
+                foreach ($s in (Get-JlNonZeroSlots $combine)) {
+                    Write-Host ("    [{0}] = {1}" -f $s, $combine.nonZeroValues.$s)
+                }
+            } else {
+                # Resolve hash-bucket positions back to record names against THIS
+                # side's own dataset CSV.
+                $execDoc = Invoke-JlApi GET "/api/executions/$execId" -AllowFailure
+
+                # /execute maps inputDatasetIds positionally to the function-def's
+                # .inputs[] order, so the dataset behind OUR indicator input sits
+                # at that input's index. Scanning for "any dataset of ours" picked
+                # the wrong one when this side owned several inputs.
+                $names = @($def.inputs | ForEach-Object { $_.name })
+                $inputIdx = [Array]::IndexOf($names, $inputName)
+                $myDsetId = ''
+                if ($inputIdx -ge 0 -and $execDoc -and ($execDoc.PSObject.Properties.Name -contains 'inputDatasetIds')) {
+                    $ids = @($execDoc.inputDatasetIds)
+                    if ($inputIdx -lt $ids.Count) { $myDsetId = $ids[$inputIdx] }
+                }
+
+                $myDsetName = ''
+                if ($myDsetId) {
+                    $mine = @(Get-JlMyDatasetsInProject | Where-Object { $_.id -eq $myDsetId })
+                    if ($mine.Count -gt 0) { $myDsetName = $mine[0].name }
+                    Write-JlInfo "Your dataset for this execution: '$myDsetName' ($myDsetId)"
+                }
+
+                $csvMapFile = Join-Path $script:JL_WORKDIR 'dataset_csv_map.json'
+                $inputCsv = ''
+                if ($myDsetId -and (Test-Path -LiteralPath $csvMapFile)) {
+                    $csvMap = Get-Content -LiteralPath $csvMapFile -Raw | ConvertFrom-Json
+                    if ($csvMap.PSObject.Properties.Name -contains $myDsetId) { $inputCsv = $csvMap.$myDsetId }
+                }
+
+                if ($inputCsv -and (Test-Path -LiteralPath $inputCsv)) {
+                    Write-JlInfo "Originating CSV (from dataset map): $inputCsv"
+                } else {
+                    if ($inputCsv) {
+                        Write-JlWarn "Map says the CSV was $inputCsv but that file no longer exists."
+                    } elseif ($myDsetId) {
+                        Write-JlWarn "No CSV mapping for dataset $myDsetId. The CSV you provide MUST"
+                        Write-JlWarn "  be the EXACT one that was encrypted to create this dataset."
+                    }
+                    $default = ''
+                    if ($script:JULENNY_INPUT_CSV) { $default = $script:JULENNY_INPUT_CSV }
+                    $inputCsv = Select-JlDataFile "Originating CSV for dataset '$myDsetName'" $default
+
+                    if ($myDsetId) {
+                        $existing = @{}
+                        if (Test-Path -LiteralPath $csvMapFile) {
+                            $tmp = Get-Content -LiteralPath $csvMapFile -Raw | ConvertFrom-Json
+                            foreach ($p in $tmp.PSObject.Properties) { $existing[$p.Name] = $p.Value }
+                        }
+                        $existing[$myDsetId] = $inputCsv
+                        $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+                        [System.IO.File]::WriteAllText($csvMapFile, (ConvertTo-Json $existing -Depth 5), $utf8NoBom)
+                        Write-JlInfo "Mapped dataset $myDsetId -> $inputCsv in $csvMapFile."
+                    }
+                }
+
+                $slotsCsv = (Get-JlNonZeroSlots $combine) -join ','
+                Write-Host ""
+                Write-JlStep "Resolving $nonZero non-zero slot(s) against $inputCsv..."
+                Invoke-JlCli @(
+                    'crypto', 'resolve-indicator',
+                    '--context-spec', $script:JULENNY_CRYPTO_CONTEXT_SPEC,
+                    '--slots',        $slotsCsv,
+                    '--input',        $inputCsv,
+                    '--function-def', $functionDefPath,
+                    '--input-name',   $inputName
+                )
+            }
+        }
+
+        default {
+            Write-JlWarn "Unknown output.layout '$outputLayout'. Showing raw combine output."
+            Write-Host $combineRaw
+        }
+    }
+
+    Write-Host ""
+    Write-JlSuccess "Decryption complete. The plaintext answer is shown above."
+    Write-Host ""
+    Write-JlInfo "If the answer is what you expected: keysetup, encryption, computation, and decryption all worked end-to-end."
 }
