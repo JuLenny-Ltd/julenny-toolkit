@@ -964,3 +964,154 @@ function Get-JlRotationRoundOffset {
         'combine'         { return $base + 3 }
     }
 }
+
+# ============================================================================
+# Dataset upload
+# ============================================================================
+# Windows PowerShell 5.1 has no -Form parameter (that is 6.1+), so the
+# multipart body is assembled by hand as a byte array. This MUST stay bytes
+# end to end: building it as a string would run the payload through .NET string
+# encoding and corrupt any non-UTF8 byte, which is every ciphertext file.
+function New-JlMultipartBody {
+    param(
+        [Parameter(Mandatory = $true)][string]    $FilePath,
+        [Parameter(Mandatory = $true)][hashtable] $Fields,
+        [Parameter(Mandatory = $true)][string]    $Boundary,
+        [string] $FileFieldName = 'file'
+    )
+    $LF = "`r`n"
+    $enc = New-Object System.Text.UTF8Encoding($false)
+    $ms  = New-Object System.IO.MemoryStream
+
+    function Write-Text {
+        param([string] $Text)
+        $b = $enc.GetBytes($Text)
+        $ms.Write($b, 0, $b.Length)
+    }
+
+    $fileName = [System.IO.Path]::GetFileName($FilePath)
+    Write-Text "--$Boundary$LF"
+    Write-Text "Content-Disposition: form-data; name=`"$FileFieldName`"; filename=`"$fileName`"$LF"
+    Write-Text "Content-Type: application/octet-stream$LF$LF"
+
+    $fileBytes = [System.IO.File]::ReadAllBytes($FilePath)
+    $ms.Write($fileBytes, 0, $fileBytes.Length)
+    Write-Text $LF
+
+    foreach ($k in $Fields.Keys) {
+        Write-Text "--$Boundary$LF"
+        Write-Text "Content-Disposition: form-data; name=`"$k`"$LF$LF"
+        Write-Text ("{0}{1}" -f $Fields[$k], $LF)
+    }
+    Write-Text "--$Boundary--$LF"
+
+    $bytes = $ms.ToArray()
+    $ms.Dispose()
+    return $bytes
+}
+
+# Uploads a dataset. Small files go in one multipart shot; larger ones use the
+# signed-URL flow (upload-url -> PUT -> confirm) so the bytes bypass the API
+# body cap. Kind is "plaintext" (raw input) or "ciphertext" (encrypted bundle).
+# Returns the new dataset id.
+function Send-JlDataset {
+    param(
+        [Parameter(Mandatory = $true)][string] $FilePath,
+        [Parameter(Mandatory = $true)][string] $DatasetName,
+        [ValidateSet('plaintext', 'ciphertext')][string] $Kind = 'plaintext'
+    )
+    if (-not (Test-Path -LiteralPath $FilePath -PathType Leaf)) {
+        Stop-JlWithError "Send-JlDataset: file not found: $FilePath"
+    }
+    $sizeBytes = (Get-Item -LiteralPath $FilePath).Length
+
+    if ($sizeBytes -lt $script:JL_INLINE_THRESHOLD_BYTES) {
+        Write-JlInfo ("Uploading {0} {1} as '{2}' (single-shot, {3} bytes)..." -f $Kind.ToUpper(), $FilePath, $DatasetName, $sizeBytes)
+
+        $boundary = [System.Guid]::NewGuid().ToString()
+        $body = New-JlMultipartBody -FilePath $FilePath -Boundary $boundary -Fields @{
+            name = $DatasetName
+            kind = $Kind
+        }
+        $uri = "$($script:JULENNY_API_BASE)/api/fhe-data-upload?permissionId=$($script:JULENNY_PERMISSION_ID)"
+        try {
+            $resp = Invoke-RestMethod -Method POST -Uri $uri `
+                        -Headers @{ 'x-api-key' = $script:JULENNY_API_KEY } `
+                        -ContentType "multipart/form-data; boundary=$boundary" `
+                        -Body $body -ErrorAction Stop
+        } catch {
+            Stop-JlWithError "Dataset upload failed: $($_.Exception.Message)"
+        }
+        $id = ''
+        if ($resp -and ($resp.PSObject.Properties.Name -contains 'datasetId')) { $id = $resp.datasetId }
+        if ([string]::IsNullOrWhiteSpace($id)) {
+            Stop-JlWithError "Dataset upload succeeded but no datasetId was returned."
+        }
+        return $id
+    }
+
+    Write-JlInfo ("Uploading {0} {1} as '{2}' via signed URL ({3} bytes, exceeds inline cap)..." -f $Kind.ToUpper(), $FilePath, $DatasetName, $sizeBytes)
+    $urlResp = Invoke-JlApi POST "/api/fhe-data-upload/upload-url" -Body @{
+        name         = $DatasetName
+        permissionId = $script:JULENNY_PERMISSION_ID
+    }
+    $upUrl = ''
+    $id = ''
+    if ($urlResp) {
+        if ($urlResp.PSObject.Properties.Name -contains 'uploadUrl') { $upUrl = $urlResp.uploadUrl }
+        if ($urlResp.PSObject.Properties.Name -contains 'datasetId') { $id    = $urlResp.datasetId }
+    }
+    if ([string]::IsNullOrWhiteSpace($upUrl) -or [string]::IsNullOrWhiteSpace($id)) {
+        Stop-JlWithError "upload-url did not return both an uploadUrl and a datasetId."
+    }
+
+    try {
+        Invoke-WebRequest -Method PUT -Uri $upUrl -InFile $FilePath `
+                          -ContentType 'application/octet-stream' `
+                          -UseBasicParsing -ErrorAction Stop | Out-Null
+    } catch {
+        Stop-JlWithError "object storage PUT failed: $($_.Exception.Message)"
+    }
+
+    $confirm = Invoke-JlApi POST "/api/fhe-data-upload/confirm" -Body @{
+        datasetId     = $id
+        name          = $DatasetName
+        kind          = $Kind
+        fileName      = [System.IO.Path]::GetFileName($FilePath)
+        permissionId  = $script:JULENNY_PERMISSION_ID
+        retentionDays = 90
+    }
+    $confirmedId = ''
+    if ($confirm -and ($confirm.PSObject.Properties.Name -contains 'datasetId')) {
+        $confirmedId = $confirm.datasetId
+    }
+    if ([string]::IsNullOrWhiteSpace($confirmedId)) {
+        Stop-JlWithError "Upload confirm succeeded but no datasetId was returned."
+    }
+    return $confirmedId
+}
+
+# True when EVERY input the function-def declares has a datasetId registered via
+# /preferred-datasets. Gates execution: if the peer has not finished their
+# 04-encrypt, the platform rejects the trigger, so it is nicer to gate here and
+# let watch mode poll cleanly.
+function Test-JlAllRequiredInputsDeclared {
+    param([string] $FunctionDefPath = '')
+    $def = Get-JlFunctionDefObject $FunctionDefPath
+    if ($null -eq $def) { return $false }
+    if (-not ($def.PSObject.Properties.Name -contains 'inputs') -or $null -eq $def.inputs) { return $false }
+
+    $resp = Invoke-JlApi GET "/api/fhe-permissions/$($script:JULENNY_PERMISSION_ID)/preferred-datasets" -AllowFailure
+    if ($null -eq $resp) { return $false }
+
+    foreach ($input in @($def.inputs)) {
+        $name = $input.name
+        if ([string]::IsNullOrWhiteSpace($name)) { continue }
+        if (-not ($resp.PSObject.Properties.Name -contains $name)) { return $false }
+        $entry = $resp.$name
+        if ($null -eq $entry) { return $false }
+        if (-not ($entry.PSObject.Properties.Name -contains 'datasetId')) { return $false }
+        if ([string]::IsNullOrWhiteSpace($entry.datasetId)) { return $false }
+    }
+    return $true
+}
