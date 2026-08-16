@@ -56,6 +56,11 @@ if (-not (Get-Variable -Name JULENNY_OUR_SIDE -Scope Script -ErrorAction Silentl
 # ============================================================================
 # Paths
 # ============================================================================
+# Where _core itself lives. Captured while this file is being dot-sourced, so it
+# points at _core rather than at whichever phase script did the dot-sourcing.
+# Used to locate recipe\recipe-encode.mjs.
+$script:JL_CORE_DIR = $PSScriptRoot
+
 # Root workdir on this machine. Holds:
 #   signing\                    Ed25519 signing keys (account-scoped,
 #                               scheme-agnostic). Reused across collaborations.
@@ -1131,6 +1136,239 @@ function Test-JlAllRequiredInputsDeclared {
         if ([string]::IsNullOrWhiteSpace($entry.datasetId)) { return $false }
     }
     return $true
+}
+
+# ============================================================================
+# Dataset encryption and upload (phase 4)
+# ============================================================================
+# One implementation for both sides; the caller passes its platform role. Each
+# input is handled per the function-def's declared encoding and layout, which is
+# what lets one script serve every scenario.
+
+function Set-JlJsonMapEntry {
+    param(
+        [Parameter(Mandatory = $true)][string] $Path,
+        [Parameter(Mandatory = $true)][string] $Key,
+        [Parameter(Mandatory = $true)] $Value
+    )
+    $map = @{}
+    if (Test-Path -LiteralPath $Path) {
+        $existing = Get-Content -LiteralPath $Path -Raw | ConvertFrom-Json
+        foreach ($p in $existing.PSObject.Properties) { $map[$p.Name] = $p.Value }
+    }
+    $map[$Key] = $Value
+    $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+    [System.IO.File]::WriteAllText($Path, (ConvertTo-Json $map -Depth 10), $utf8NoBom)
+}
+
+function Invoke-JlEncryptAndUploadInputs {
+    param([Parameter(Mandatory = $true)][ValidateSet('dataOwner', 'queryAnalyst')][string] $MyRole)
+
+    $functionDefPath = Join-Path $script:JL_WORKDIR 'function-def.json'
+    $pickFile        = Join-Path $script:JL_WORKDIR 'my_dataset_picks.json'
+    $csvMapFile      = Join-Path $script:JL_WORKDIR 'dataset_csv_map.json'
+    $ptSidecar       = Join-Path $script:JL_WORKDIR 'my_plaintext_paths.json'
+
+    $def = Get-JlFunctionDefObject $functionDefPath
+    if ($null -eq $def) {
+        Stop-JlWithError "Function-def not found at $functionDefPath. Re-run 00-init.ps1."
+    }
+
+    Write-JlStep "$($script:JL_OUR_LABEL): pick datasets for $MyRole inputs"
+
+    $myInputs = @()
+    if ($def.PSObject.Properties.Name -contains 'inputs' -and $def.inputs) {
+        $myInputs = @($def.inputs | Where-Object { $_.role -eq $MyRole })
+    }
+    if ($myInputs.Count -eq 0) {
+        Write-JlInfo "Function declares no $MyRole inputs. Nothing to upload here."
+        return
+    }
+    Write-JlInfo "Function requires $($myInputs.Count) $MyRole input(s)."
+
+    # -------- Joint public key, only needed if some input is encrypted --------
+    $jointPk = ''
+    $hasCiphertextInput = $false
+    foreach ($inp in $myInputs) {
+        $enc = "$($inp.encoding)"
+        $lay = "$($inp.layout)"
+        if ((-not $enc.StartsWith('plaintext-')) -or ($lay -eq 'encrypted-bundle')) {
+            $hasCiphertextInput = $true
+            break
+        }
+    }
+    if ($hasCiphertextInput) {
+        foreach ($cand in @((Join-Path $script:JL_KEYS_DIR 'joint_public_key.bin'),
+                            (Join-Path $script:JL_PEER_DIR 'joint-pk.bin'))) {
+            if (Test-Path -LiteralPath $cand) { $jointPk = $cand; break }
+        }
+        if (-not $jointPk) {
+            Write-JlInfo "Fetching joint public key from platform..."
+            $perm = Get-JlPermission
+            $jointKeyId = ''
+            if ($perm -and ($perm.PSObject.Properties.Name -contains 'jointKeyId')) { $jointKeyId = $perm.jointKeyId }
+            if ([string]::IsNullOrWhiteSpace($jointKeyId)) {
+                Stop-JlWithError "Permission has no jointKeyId. Keysetup may not be complete."
+            }
+            $jointPk = Join-Path $script:JL_KEYS_DIR 'joint_public_key.bin'
+            Save-JlApiFile -Path "/api/fhe-joint-keys/$jointKeyId/public-key" -OutFile $jointPk
+            Write-JlSuccess "Joint pk downloaded -> $jointPk"
+        }
+    }
+
+    # -------- Per-input loop --------
+    $picks = @{}
+    foreach ($inp in $myInputs) {
+        $inputName = $inp.name
+        $inputEnc  = "$($inp.encoding)"
+        $inputLay  = "$($inp.layout)"
+        $isBundle    = ($inputLay -eq 'encrypted-bundle')
+        $isPlaintext = ($inputEnc.StartsWith('plaintext-') -and -not $isBundle)
+
+        Write-Host ""
+        Write-Host "============================================================"
+        if ($isBundle) {
+            Write-Host " INPUT '$inputName' (encrypted bundle via recipe, role: $MyRole)"
+        } elseif ($isPlaintext) {
+            Write-Host " INPUT '$inputName' (PLAINTEXT, role: $MyRole)"
+        } else {
+            Write-Host " INPUT '$inputName' (ciphertext, role: $MyRole)"
+        }
+        Write-Host "============================================================"
+
+        # Offer datasets already uploaded under this collaboration.
+        $existing = @(Get-JlMyDatasetsInProject)
+        $pickedId = ''
+        if ($existing.Count -gt 0) {
+            Write-JlInfo "Existing dataset(s) in this project:"
+            for ($i = 0; $i -lt $existing.Count; $i++) {
+                $created = '?'
+                if ($existing[$i].PSObject.Properties.Name -contains 'createdAt' -and $existing[$i].createdAt) {
+                    $created = "$($existing[$i].createdAt)".Substring(0, [Math]::Min(10, "$($existing[$i].createdAt)".Length))
+                }
+                Write-Host ("  {0}) {1}  (id: {2}, uploaded {3})" -f ($i + 1), $existing[$i].name, $existing[$i].id, $created)
+            }
+            Write-Host "  u) Upload a NEW dataset"
+            Write-Host ""
+
+            $defaultPick = '1'
+            if ($env:JULENNY_NEW_TEST -eq '1') { $defaultPick = 'u' }
+            $choice = Read-JlValue "Pick for '$inputName' (1-$($existing.Count), or u)" $defaultPick
+
+            if ($choice -notmatch '^[Uu]$') {
+                $n = 0
+                if (-not [int]::TryParse($choice, [ref] $n) -or $n -lt 1 -or $n -gt $existing.Count) {
+                    Stop-JlWithError "Invalid choice: '$choice' (must be 1-$($existing.Count) or 'u')"
+                }
+                $pickedId = $existing[$n - 1].id
+                Write-JlSuccess "Selected existing '$($existing[$n - 1].name)' ($pickedId) for '$inputName'."
+            }
+        }
+
+        if (-not $pickedId) {
+            $default = ''
+            if ($script:JULENNY_INPUT_CSV) { $default = $script:JULENNY_INPUT_CSV }
+            $inputFile = Select-JlDataFile "Pick the file for input '$inputName'" $default
+
+            if ($inputFile -ne $default) { Set-JlConfigValue 'JULENNY_INPUT_CSV' $inputFile }
+
+            $datasetName = Read-JlValue "Display name for the uploaded dataset" `
+                                        "$($script:JL_OUR_LABEL) $inputName ($(Get-Date -Format 'yyyy-MM-dd'))"
+
+            $base = [System.IO.Path]::GetFileName($inputFile)
+
+            if ($isBundle) {
+                # recipe-encode (cleartext) -> encrypt under the joint key -> upload
+                if (-not $jointPk) { Stop-JlWithError "encrypted-bundle input needs the joint public key, but none was fetched." }
+                if (-not (Get-Command node -ErrorAction SilentlyContinue)) {
+                    Stop-JlWithError "node is required to run the encodingRecipe executor (_core/recipe/recipe-encode.mjs)."
+                }
+                Write-Host ""
+                Write-Host "============================================================"
+                Write-Host " ENCODING + ENCRYPTING BUNDLE FOR '$inputName': $inputFile"
+                Write-Host "============================================================"
+
+                $bundleInput = Join-Path $script:JL_KEYS_DIR "$base.$inputName.bundle-input.json"
+                $recipe = Join-Path $script:JL_CORE_DIR 'recipe\recipe-encode.mjs'
+                if (-not (Test-Path -LiteralPath $recipe)) {
+                    Stop-JlWithError "Recipe executor not found at $recipe"
+                }
+                & node $recipe $functionDefPath $inputName $inputFile $bundleInput
+                if ($LASTEXITCODE -ne 0) { Stop-JlWithError "recipe executor failed for '$inputName'." }
+
+                $bundleBin = Join-Path $script:JL_KEYS_DIR "$base.$inputName.bundle.bin"
+                Invoke-JlCli @(
+                    'crypto', 'encrypt',
+                    '--function-def',      $functionDefPath,
+                    '--input-name',        $inputName,
+                    '--input',             $bundleInput,
+                    '--joint-public-key',  $jointPk,
+                    '--output',            $bundleBin
+                )
+                Write-JlSuccess "Encrypted bundle: $bundleBin ($((Get-Item -LiteralPath $bundleBin).Length) bytes)"
+                $pickedId = Send-JlDataset -FilePath $bundleBin -DatasetName $datasetName -Kind 'ciphertext'
+                Write-JlSuccess "Uploaded encrypted bundle '$datasetName' ($pickedId)."
+
+            } elseif ($isPlaintext) {
+                Write-Host ""
+                Write-Host "============================================================"
+                Write-Host " UPLOADING PLAINTEXT FILE FOR '$inputName': $inputFile"
+                Write-Host "    encoding=$inputEnc, $((Get-Item -LiteralPath $inputFile).Length) bytes"
+                Write-Host "============================================================"
+                $pickedId = Send-JlDataset -FilePath $inputFile -DatasetName $datasetName -Kind 'plaintext'
+                Write-JlSuccess "Uploaded plaintext '$datasetName' ($pickedId)."
+
+                # Sidecar: phase 4.5 re-derives rotation indices from these files
+                # to cross-check the platform, and needs the dataset id too.
+                Set-JlJsonMapEntry -Path $ptSidecar -Key $inputName `
+                                   -Value ([ordered]@{ path = $inputFile; datasetId = $pickedId })
+
+            } else {
+                Write-Host ""
+                Write-Host "============================================================"
+                Write-Host " ENCRYPTING FILE FOR '$inputName': $inputFile"
+                Write-Host "    encoding=$inputEnc, $((Get-Item -LiteralPath $inputFile).Length) bytes"
+                Write-Host "============================================================"
+
+                $ciphertext = Join-Path $script:JL_KEYS_DIR "$base.$inputName.enc.bin"
+                Invoke-JlCli @(
+                    'crypto', 'encrypt',
+                    '--input',            $inputFile,
+                    '--joint-public-key', $jointPk,
+                    '--output',           $ciphertext,
+                    '--function-def',     $functionDefPath,
+                    '--input-name',       $inputName
+                )
+                Write-JlSuccess "Encrypted: $ciphertext ($((Get-Item -LiteralPath $ciphertext).Length) bytes)"
+
+                $pickedId = Send-JlDataset -FilePath $ciphertext -DatasetName $datasetName -Kind 'ciphertext'
+                Write-JlSuccess "Uploaded as '$datasetName' ($pickedId)."
+
+                # Remember which cleartext file produced this dataset, so the
+                # viewer flow can resolve indicator slots back to record names
+                # without asking. Written on BOTH sides: with resultVisibility
+                # dataOwner the owner is the viewer and needs it too. (The bash
+                # version only writes this on the consumer side.)
+                Set-JlJsonMapEntry -Path $csvMapFile -Key $pickedId -Value $inputFile
+                Write-JlInfo "Mapped dataset $pickedId -> $inputFile in $csvMapFile."
+            }
+        }
+
+        Write-JlInfo "Declaring '$inputName' = $pickedId on the platform..."
+        Invoke-JlApi PUT "/api/fhe-permissions/$($script:JULENNY_PERMISSION_ID)/preferred-datasets/$inputName" `
+                     -Body @{ datasetId = $pickedId } | Out-Null
+        Write-JlSuccess "Platform now knows: $inputName -> $pickedId."
+
+        $picks[$inputName] = $pickedId
+    }
+
+    $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+    [System.IO.File]::WriteAllText($pickFile, (ConvertTo-Json $picks -Depth 5), $utf8NoBom)
+
+    Write-Host ""
+    Write-JlSuccess "$($script:JL_OUR_LABEL)'s dataset picks for this execution:"
+    foreach ($k in $picks.Keys) { Write-Host ("   {0} -> {1}" -f $k, $picks[$k]) }
+    Write-JlInfo "Saved to $pickFile (local to this machine)."
 }
 
 # ============================================================================
