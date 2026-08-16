@@ -230,7 +230,7 @@ end;
 // Run the copy only when the component is installed AND a side was chosen.
 function ShouldCopyExamples: Boolean;
 begin
-  Result := IsComponentSelected('examples') and (GetExamplesRole('') <> '');
+  Result := WizardIsComponentSelected('examples') and (GetExamplesRole('') <> '');
 end;
 
 // Hide both example pages unless the component is selected, and hide the
@@ -239,9 +239,9 @@ function ShouldSkipPage(PageID: Integer): Boolean;
 begin
   Result := False;
   if (PageID = ExamplesRolePage.ID) then
-    Result := not IsComponentSelected('examples')
+    Result := not WizardIsComponentSelected('examples')
   else if (PageID = ExamplesDirPage.ID) then
-    Result := (not IsComponentSelected('examples')) or (GetExamplesRole('') = '');
+    Result := (not WizardIsComponentSelected('examples')) or (GetExamplesRole('') = '');
 end;
 
 function GetApiKey(Param: String): String;
