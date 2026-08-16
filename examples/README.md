@@ -39,20 +39,25 @@ One implementation backs both sides of every scenario. The side-specific bits
 
 ```
 _core/
-  run.sh                 One-command driver: menu -> runs the phases in order
-  lib.sh                 Shared helper library (API calls, keysetup, encrypt,
+  run.sh   / run.ps1     One-command driver: menu -> runs the phases in order
+  lib.sh   / lib.ps1     Shared helper library (API calls, keysetup, encrypt,
                          release/decrypt dispatch, collaboration creation)
   sides/
-    data-owner.env       Profile for the Acme/lead side
-    data-consumer.env    Profile for the Beta/main side
+    data-owner.env    / .ps1    Profile for the Acme/lead side
+    data-consumer.env / .ps1    Profile for the Beta/main side
   lead/                  Data-owner phase scripts (00-init .. 05-release)
   main/                  Data-consumer phase scripts (00-init .. 06-decrypt)
+  recipe/                Node helpers for encodingRecipe inputs (shared)
 ```
+
+Each script has a `.sh` and a `.ps1` form. They are twins: same phases, same
+round numbers, same message types, same `config.env` format, so a Linux machine
+and a Windows machine can be the two sides of one collaboration.
 
 ### Scenario folders — thin bootstraps
 
-Each scenario's `acme/run.sh` and `beta/run.sh` just select the side and the
-scenario's `data/` directory, then hand off to `_core/run.sh`. The actual
+Each scenario's `acme/` and `beta/` driver just selects the side and the
+scenario's `data/` directory, then hands off to the one in `_core/`. The actual
 function (and its count/itemized variant) is chosen interactively at init time,
 so one scenario folder can run any function of its family. Each scenario also
 carries a `README.md` with its sample data and the hand-verifiable expected
@@ -63,7 +68,9 @@ the driver, so a fix to the protocol lands in one place for all of them.
 
 ## Running a demo
 
-On each party's machine, from that party's side folder:
+On each party's machine, from that party's side folder.
+
+**Linux:**
 
 ```bash
 cd examples/<scenario>/acme   # data owner, on Acme's machine
@@ -73,7 +80,21 @@ cd examples/<scenario>/beta   # data consumer, on Beta's machine
 ./run.sh
 ```
 
-`run.sh` is menu-driven. The first time it walks you through picking (or
+**Windows:**
+
+```powershell
+cd examples\<scenario>\acme   # data owner
+.\run.ps1
+
+cd examples\<scenario>\beta   # data consumer
+.\run.ps1
+```
+
+Every script exists in both forms and they do the same work, so the two sides of
+a collaboration can be on different operating systems. The installer copies only
+the set your machine can run, so you will see `.sh` **or** `.ps1`, not both.
+
+The driver (`run.sh` / `run.ps1`) is menu-driven. The first time it walks you through picking (or
 creating) a collaboration and permission, registering your signing key, and
 fetching the function definition; on later runs it offers to continue, start a
 new test cycle, switch collaboration/permission, or just decrypt the latest
@@ -85,7 +106,7 @@ the data consumer (it encrypts, triggers the execution, and decrypts).
 
 ### The phases (numbered scripts)
 
-`run.sh` runs these in order; you can also run them individually.
+The driver runs these in order; you can also run them individually. Each exists as `.sh` and `.ps1`.
 
 | phase | script | what it does |
 |---|---|---|
@@ -128,12 +149,16 @@ On each party's machine:
 
 - The `julenny-toolkit` CLI on your `PATH` (installed from a release, or built from
   this repo). Confirm with `julenny-toolkit --version`.
-- `jq` 1.6 or newer, plus `curl`, `xxd` and `sha256sum`. The last two are
-  standard on any current Debian/Ubuntu install; the package declares the rest as
-  dependencies.
-- `node`, but only for scenarios whose function declares an `encodingRecipe`
-  (currently `decision-tree-inference`). The scripts fail with a clear message if
-  it is needed and missing.
+- **Linux only:** `jq` 1.6 or newer, plus `curl`, `xxd` and `sha256sum`. The last
+  two are standard on any current Debian/Ubuntu install; the `.deb` declares the
+  rest as dependencies, so `apt install ./julenny-toolkit-linux-amd64.deb` pulls
+  them in.
+- **Windows:** nothing extra. The PowerShell scripts use built-in cmdlets for
+  everything the bash ones shell out to, so there is no `jq` or `curl` to
+  install, and no WSL. Windows PowerShell 5.1 (preinstalled) is enough.
+- `node`, on both platforms, but only for scenarios whose function declares an
+  `encodingRecipe` (currently `decision-tree-inference`). The scripts fail with a
+  clear message if it is needed and missing.
 - A platform API key (`sk_live_...`) for your company account.
 - Your partner's collaboration ID (`XXXX-XXXX`) if you're creating a new
   collaboration.
@@ -157,18 +182,34 @@ upload the public half through the UI. Everything after that is scripted.
 
 ## Single-machine self-test
 
-To drive both sides on one host, give each shell its own workdir:
+To drive both sides on one host, give each shell its own state root. Override
+`JL_ROOT`, not `JL_WORKDIR`: `JL_WORKDIR` is derived per collaboration and gets
+overwritten as soon as a joint key is selected.
 
 ```bash
 # Shell 1 (data owner)
-export JL_WORKDIR=$HOME/.julenny-collab-acme
+export JL_ROOT=$HOME/.julenny-collab-acme
 cd examples/<scenario>/acme && ./run.sh
 ```
 
 ```bash
 # Shell 2 (data consumer)
-export JL_WORKDIR=$HOME/.julenny-collab-beta
+export JL_ROOT=$HOME/.julenny-collab-beta
 cd examples/<scenario>/beta && ./run.sh
+```
+
+On Windows:
+
+```powershell
+# Shell 1 (data owner)
+$env:JL_ROOT = "$env:USERPROFILE\.julenny-collab-acme"
+cd examples\<scenario>\acme; .\run.ps1
+```
+
+```powershell
+# Shell 2 (data consumer)
+$env:JL_ROOT = "$env:USERPROFILE\.julenny-collab-beta"
+cd examples\<scenario>\beta; .\run.ps1
 ```
 
 The two shells then behave as if they were separate machines. Useful for
