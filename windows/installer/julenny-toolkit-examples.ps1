@@ -105,16 +105,27 @@ function Remove-IfPresent {
 
 if ($Role -ne 'both') {
     if ($Role -eq 'owner') {
-        $sideToDrop = 'beta'; $roleDirToDrop = 'main'; $profileToDrop = 'data-consumer.env'
+        $sideToDrop = 'beta'; $roleDirToDrop = 'main'; $profileToDrop = 'data-consumer'
     } else {
-        $sideToDrop = 'acme'; $roleDirToDrop = 'lead'; $profileToDrop = 'data-owner.env'
+        $sideToDrop = 'acme'; $roleDirToDrop = 'lead'; $profileToDrop = 'data-owner'
     }
     Get-ChildItem -LiteralPath $Dest -Directory | ForEach-Object {
         Remove-IfPresent (Join-Path $_.FullName $sideToDrop)
     }
     Remove-IfPresent (Join-Path $Dest "_core\$roleDirToDrop")
-    Remove-IfPresent (Join-Path $Dest "_core\sides\$profileToDrop")
+    # Both extensions: the side profile exists as a .ps1 and a .env twin.
+    foreach ($ext in @('ps1', 'env')) {
+        Remove-IfPresent (Join-Path $Dest "_core\sides\$profileToDrop.$ext")
+    }
 }
+
+# Drop the Linux scripts. Windows cannot run a .sh, and leaving them beside
+# their .ps1 twins invites someone to try the wrong one.
+Get-ChildItem -LiteralPath $Dest -Recurse -Filter *.sh -File |
+    Remove-Item -Force -Confirm:$false
+# The .env side profiles are the bash twins of the .ps1 ones; same reasoning.
+Get-ChildItem -LiteralPath $Dest -Recurse -Filter *.env -File |
+    Remove-Item -Force -Confirm:$false
 
 # ---------- next steps ----------
 if ($Role -eq 'consumer') { $sideDir = 'beta' } else { $sideDir = 'acme' }

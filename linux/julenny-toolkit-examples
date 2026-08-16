@@ -129,14 +129,21 @@ mkdir -p "$DEST"
 cp -R "$SRC"/. "$DEST"/
 chmod -R u+w "$DEST"
 
+# Both extensions on the side profile: it exists as a .env and a .ps1 twin.
 case "$ROLE" in
     owner)
-        rm -rf "$DEST"/*/beta "$DEST"/_core/main "$DEST"/_core/sides/data-consumer.env
+        rm -rf "$DEST"/*/beta "$DEST"/_core/main \
+               "$DEST"/_core/sides/data-consumer.env "$DEST"/_core/sides/data-consumer.ps1
         ;;
     consumer)
-        rm -rf "$DEST"/*/acme "$DEST"/_core/lead "$DEST"/_core/sides/data-owner.env
+        rm -rf "$DEST"/*/acme "$DEST"/_core/lead \
+               "$DEST"/_core/sides/data-owner.env "$DEST"/_core/sides/data-owner.ps1
         ;;
 esac
+
+# Drop the Windows scripts. This machine cannot run a .ps1, and leaving them
+# beside their .sh twins invites someone to try the wrong one.
+find "$DEST" -name '*.ps1' -delete
 
 find "$DEST" -name '*.sh' -exec chmod +x {} +
 
