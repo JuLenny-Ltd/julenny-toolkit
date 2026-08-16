@@ -52,10 +52,10 @@ export function registerPermissionTools(server: McpServer, api: JulennyApiClient
     'Grant a partner permission to run an FHE function on your data',
     {
       partnerCollaborationId: z.string().describe('Partner collaboration ID (XXXX-XXXX)'),
-      functionSlug: z.string().describe('Function slug'),
-      allowedExecutions: z.number().describe('Max number of executions allowed'),
+      functionSlug: z.string().describe('Function slug. Many functions come in -count and -itemized variants: -count returns a single number, -itemized returns which entries matched. Confirm which the user wants rather than picking one.'),
+      allowedExecutions: z.number().describe('Max number of executions allowed. ASK THE USER; do not guess a value. Each execution costs credits, and running out means the data owner must top up before the consumer can run again (see add_executions). A permission cannot be created without this, so confirm it up front.'),
       resultVisibility: z.enum(['dataOwner', 'dataConsumer']).optional().describe('Who decrypts and sees the plaintext result. Exactly one side sees it: dataConsumer (default) or dataOwner. There is NO mode where both sides see the result - do not offer that as a choice. The other side contributes its half of the threshold decryption without ever seeing the answer.'),
-      expirationDate: z.string().optional().describe('ISO date when permission expires'),
+      expirationDate: z.string().optional().describe('ISO date when the permission expires. Ask the user whether they want one; omit it for no expiry. Unlike allowedExecutions this cannot be extended later, so a short expiry silently strands the collaboration.'),
       projectId: z.string().optional().describe('Existing collaboration/project ID to add permission to'),
       jointKeyId: z.string().optional().describe('Joint key ID from an existing collaboration'),
     },
@@ -76,7 +76,7 @@ export function registerPermissionTools(server: McpServer, api: JulennyApiClient
 
   server.tool(
     'add_executions',
-    'Add more executions to an existing permission',
+    'Add more executions to an existing permission. Use this when a permission has run out rather than creating a new one: it tops up the existing grant, so the joint keys are kept and no new keysetup is needed. Only the data owner can do this.',
     {
       permissionId: z.string().describe('Permission ID'),
       count: z.number().describe('Number of executions to add'),
