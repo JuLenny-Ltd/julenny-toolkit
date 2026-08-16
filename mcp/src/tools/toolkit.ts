@@ -25,8 +25,10 @@
 
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
+import { readdirSync, statSync } from 'node:fs';
+import { join } from 'node:path';
 import { runCli } from './lib/cli.js';
-import { resolveInWorkdir } from './lib/paths.js';
+import { resolveInWorkdir, workdir } from './lib/paths.js';
 
 const ok = (obj: Record<string, unknown>) => ({
   content: [{ type: 'text' as const, text: JSON.stringify({ ok: true, ...obj }, null, 2) }],
@@ -83,6 +85,40 @@ export function registerToolkitTools(server: McpServer) {
         return ok({ publicKeyPath: j.publicKeyPath ?? p.outputPublic });
       } catch (e) {
         return fail(e instanceof Error ? e.message : 'invalid parameters');
+      }
+    },
+  );
+
+  // ---- list_workdir_files (auto: names and sizes only, never contents) ----
+  //
+  // The scripts path lists the files in the scenario's data folder and asks the
+  // operator which to use (pick_data_file in _core/lib.sh). The MCP had no
+  // equivalent, so the agent could not see what was available and had no way to
+  // offer a choice. That led it to ask the user for a path elsewhere on disk and
+  // to request filesystem access, neither of which this server can ever use.
+  //
+  // Returns metadata only. Filenames and sizes are not plaintext, so this keeps
+  // the blind-by-design contract intact.
+  server.tool(
+    'list_workdir_files',
+    'List the files in the working folder so the user can be shown what is available and asked which to use. Call this BEFORE asking the user about an input file: their data is normally already in the working folder, and this server cannot read anything outside it. Returns names, sizes and modification times only, never file contents.',
+    {
+      subdirectory: z.string().optional().describe('Optional workdir-relative subfolder to list. Omit for the working folder itself.'),
+    },
+    async ({ subdirectory }) => {
+      try {
+        const dir = subdirectory ? resolveInWorkdir(subdirectory) : workdir();
+        const entries = readdirSync(dir, { withFileTypes: true });
+        const files = entries
+          .filter((e) => e.isFile())
+          .map((e) => {
+            const st = statSync(join(dir, e.name));
+            return { name: e.name, bytes: st.size, modified: st.mtime.toISOString() };
+          });
+        const directories = entries.filter((e) => e.isDirectory()).map((e) => e.name);
+        return ok({ workdir: dir, files, directories });
+      } catch (e) {
+        return fail(e instanceof Error ? e.message : 'could not list the working folder');
       }
     },
   );
