@@ -123,38 +123,6 @@ export function registerToolkitTools(server: McpServer) {
     },
   );
 
-  // ---- generate_keys (auto) ----
-  server.tool(
-    'generate_keys',
-    'NOT PART OF A COLLABORATION. Do not call this during keysetup. The FHE keypair used for a collaboration is created by keysetup_contribute, which writes it to files in the working folder; this tool instead writes to a separate passphrase-protected secret store that no other toolkit command reads. It also requires FHE_TOOLKIT_PASSPHRASE to be set, and will hang waiting for an interactive prompt if it is not. Ensures a local FHE keypair exists in that store for the given context (keys never leave the machine; returns the alias, not the bytes). Idempotent: if keys already exist this succeeds and leaves them untouched, so there is never a reason to retry it.',
-    {
-      contextSpec: z.enum(['bfv-default-v1', 'ckks-default-v1']).describe('Crypto context spec'),
-      force: z.boolean().optional().describe('DESTRUCTIVE. Replaces existing keys for this context, which permanently breaks every collaboration already using them. Never pass this to resolve an error or because keys already exist; only when the user has explicitly asked to start over.'),
-    },
-    async ({ contextSpec, force }) => {
-      // Passphrase comes from the environment (FHE_TOOLKIT_PASSPHRASE); never a
-      // tool parameter, never returned.
-      const args = ['keys', 'generate', '--context-spec', contextSpec, '--json'];
-      if (force) args.push('--force');
-      const r = await runCli(args);
-      if (!r.ok) {
-        // Keys already existing is the desired end state, not a failure.
-        // Reporting it as one made clients retry in a loop, and the CLI's
-        // "pass --force to overwrite" hint invites a destructive "fix".
-        if (/already exist/i.test(r.error || '')) {
-          return ok({
-            contextSpec,
-            alreadyExisted: true,
-            note: 'Keys for this context already exist and were left untouched. Nothing further is needed; do not retry and do not pass force.',
-          });
-        }
-        return fail(r.error || 'generate failed', { exitCode: r.exitCode });
-      }
-      const j = (r.json ?? {}) as Record<string, unknown>;
-      return ok({ contextSpec, alreadyExisted: false, publicKeyAlias: j.publicKeyKey, secretKeyAlias: j.secretKeyKey });
-    },
-  );
-
   // ---- encrypt (auto) ----
   server.tool(
     'encrypt',
