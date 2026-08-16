@@ -58,8 +58,17 @@ export function registerGuideTools(server: McpServer, api: JulennyApiClient) {
           return ok({ ...base, stage: 'expired', summary: 'This permission has expired; no further actions are possible.', nextActions: [] });
         }
 
-        // ---- STAGE 1: keysetup (permission not yet active) ----
-        if (perm.status !== 'active') {
+        // ---- STAGE 1: keysetup (permission not active, OR keysetup unfinished) ----
+        //
+        // Gate on keysetupState as well as status. A permission can be
+        // status:'active' - a valid, granted permission - while its joint keys
+        // are still being built. Checking status alone skipped this entire stage
+        // and reported 'provide-inputs', sending the agent to encrypt under a
+        // joint key that does not exist yet. run.sh branches on keysetupState for
+        // exactly this reason.
+        const ksState = String(perm.keysetupState || '');
+        const keysetupUnfinished = ksState !== '' && ksState !== 'complete';
+        if (perm.status !== 'active' || keysetupUnfinished) {
           let ks: any;
           try { ks = await api.get(`/api/fhe-permissions/${p.permissionId}/keysetup`); }
           catch {
@@ -72,7 +81,7 @@ export function registerGuideTools(server: McpServer, api: JulennyApiClient) {
           if (ks.state === 'AWAITING_FINALIZATION') {
             const iFinalized = !!(myCollab && ks.finalKeySubmissions?.[myCollab]);
             if (iFinalized) {
-              return ok({ ...base, stage: 'keysetup-finalize-wait', keysetup: { state: ks.state }, summary: 'You have submitted final keys; waiting for the other party to finalize. Then the permission activates.', nextActions: ['wait, then call next_step again'] });
+              return ok({ ...base, stage: 'keysetup-finalize-wait', keysetup: { state: ks.state }, summary: 'You have submitted final keys. BLOCKED on the other party to finalize theirs before the permission activates. TELL THE USER to ask them to run their finalize step; polling alone will not unblock it.', nextActions: ['TELL THE USER to ask the other party to finalize', 'then call next_step again'] });
             }
             return ok({ ...base, stage: 'keysetup-finalize', keysetup: { state: ks.state }, summary: 'All keysetup rounds are in. Finalize the joint keys.', nextActions: ['publish_final_keys (joint public key + relin key, plus sum/rotation keys only if requiredEvalKeys lists them)'] });
           }
@@ -84,7 +93,7 @@ export function registerGuideTools(server: McpServer, api: JulennyApiClient) {
           if (myTurn) {
             return ok({ ...base, stage: 'keysetup', keysetup: ksInfo, summary: `Your turn: keysetup round ${ks.currentRound}/${ks.totalRounds} (${entry!.messageType} - ${entry!.description}). Contribute it, then publish the round message for the peer.`, nextActions: ['register_signing_key first if you have not for this crypto context', `contribute round ${ks.currentRound} (${entry!.messageType}) via the matching keysetup verb`, 'publish_keysetup_message to send it to the peer'] });
           }
-          return ok({ ...base, stage: 'keysetup-wait', keysetup: ksInfo, summary: `Waiting on the ${entry ? entry.expectedParty : 'other'} party for keysetup round ${ks.currentRound}/${ks.totalRounds}. Use download_keysetup_message when their message lands, then call next_step again.`, nextActions: ['download_keysetup_message (from=peer) when available', 'then call next_step again'] });
+          return ok({ ...base, stage: 'keysetup-wait', keysetup: ksInfo, summary: `BLOCKED on the ${entry ? entry.expectedParty : 'other'} party for keysetup round ${ks.currentRound}/${ks.totalRounds}. Nothing on this side can progress until they act, and polling alone will never unblock it. TELL THE USER to contact the other party and ask them to run their side now, naming the round that is outstanding. Do not call further keysetup verbs until their message has landed.`, nextActions: ['TELL THE USER to ask the other party to run their side for this round', 'download_keysetup_message (from=peer) once it has landed', 'then call next_step again'] });
         }
 
         // ---- permission is active: fetch def inputs + declared datasets ----
@@ -132,7 +141,7 @@ export function registerGuideTools(server: McpServer, api: JulennyApiClient) {
           return ok({ ...base, stage: 'release', executionId: awaitingRelease.id, summary: 'An execution is awaiting release and you are the releaser. Release your partial so the viewer can combine.', nextActions: [`release(executionId=${awaitingRelease.id})`] });
         }
         if (awaitingRelease && amViewer) {
-          return ok({ ...base, stage: 'decrypt-wait', executionId: awaitingRelease.id, summary: 'Execution is awaiting the releaser. Wait, then call next_step again.', nextActions: ['wait for the releaser, then call next_step again'] });
+          return ok({ ...base, stage: 'decrypt-wait', executionId: awaitingRelease.id, summary: 'BLOCKED on the releaser: they must upload their partial decryption before you can combine and see the answer. TELL THE USER to ask the other party to run their release step; polling alone will not unblock it.', nextActions: ['TELL THE USER to ask the other party to release', 'then call next_step again'] });
         }
         if (released && !amViewer) {
           return ok({ ...base, stage: 'done', executionId: released.id, summary: 'Released. The other party is the viewer; nothing left on your side for this execution.', nextActions: [] });
@@ -143,7 +152,7 @@ export function registerGuideTools(server: McpServer, api: JulennyApiClient) {
 
         // ---- STAGE 3: ready to run (no pending execution) ----
         if (!allDeclared) {
-          return ok({ ...base, stage: 'await-peer-inputs', summary: 'Your inputs are declared; waiting for the other party to declare theirs before an execution can run.', nextActions: ['wait for the partner, then call next_step again'] });
+          return ok({ ...base, stage: 'await-peer-inputs', summary: 'Your inputs are declared. BLOCKED on the other party to declare theirs before an execution can run. TELL THE USER to ask them to upload and declare their input; polling alone will not unblock it.', nextActions: ['TELL THE USER to ask the other party to declare their inputs', 'then call next_step again'] });
         }
         if (role === 'dataConsumer') {
           if ((perm.remainingExecutions ?? 1) <= 0) {
@@ -151,7 +160,7 @@ export function registerGuideTools(server: McpServer, api: JulennyApiClient) {
           }
           return ok({ ...base, stage: 'run', remainingExecutions: perm.remainingExecutions, summary: 'All inputs are declared. You are the consumer; trigger the execution.', nextActions: ['estimate_execution (optional cost preview)', 'trigger_execution'] });
         }
-        return ok({ ...base, stage: 'await-trigger', summary: 'All inputs are declared. You are the data owner; wait for the consumer to trigger the execution, then you will release or the consumer will view per resultVisibility.', nextActions: ['wait for the consumer to trigger, then call next_step again'] });
+        return ok({ ...base, stage: 'await-trigger', summary: 'All inputs are declared. You are the data owner. BLOCKED on the consumer to trigger the execution; you then release or they view, per resultVisibility. TELL THE USER to ask the consumer to run it; polling alone will not unblock it.', nextActions: ['TELL THE USER to ask the consumer to trigger the execution', 'then call next_step again'] });
       } catch (e) {
         return fail(e instanceof Error ? e.message : 'next_step failed');
       }
