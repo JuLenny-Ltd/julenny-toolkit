@@ -452,8 +452,23 @@ function Get-JlKeysetupState {
     return Invoke-JlApi GET "/api/fhe-permissions/$($script:JULENNY_PERMISSION_ID)/keysetup"
 }
 
+# Fetches the permission out of the active-permissions LIST, filtered to our
+# side's view, rather than by id. That is what lib.sh does, and the list
+# endpoint is the one that self-heals a permission whose derived fields drifted.
 function Get-JlPermission {
-    return Invoke-JlApi GET "/api/fhe-permissions/$($script:JULENNY_PERMISSION_ID)"
+    param(
+        [string] $PermissionId = '',
+        [string] $View = ''
+    )
+    if (-not $PermissionId) { $PermissionId = $script:JULENNY_PERMISSION_ID }
+    if (-not $View)         { $View = $script:JL_PERM_VIEW }
+
+    $resp = Invoke-JlApi GET "/api/fhe-permissions?status=active&view=$View"
+    if ($resp -and ($resp.PSObject.Properties.Name -contains 'permissions')) {
+        $match = @($resp.permissions | Where-Object { $_.id -eq $PermissionId })
+        if ($match.Count -gt 0) { return $match[0] }
+    }
+    Stop-JlWithError "Permission $PermissionId not found in view=$View."
 }
 
 # "dataConsumer" (default) or "dataOwner": which side decrypts the plaintext.
@@ -1136,6 +1151,342 @@ function Test-JlAllRequiredInputsDeclared {
         if ([string]::IsNullOrWhiteSpace($entry.datasetId)) { return $false }
     }
     return $true
+}
+
+# ============================================================================
+# Session setup (phase 0)
+# ============================================================================
+# Function-agnostic: the function is picked from the platform's live list at run
+# time rather than hardcoded, which is why one implementation backs every
+# scenario. Both sides share this; the differences are which permissions each
+# side can see and whether it may create one.
+
+function Select-JlFunction {
+    param([string] $Prompt = 'Pick a function')
+
+    Write-Host ""
+    Write-Host "Which scheme should the function use?"
+    Write-Host "  1) CKKS  (real-valued analytics)"
+    Write-Host "  2) BFV   (exact-integer functions)"
+    Write-Host "  3) Any"
+    $schemeChoice = Read-JlValue "Choose (1-3)" '1'
+    switch ($schemeChoice) {
+        '1' { $funcs = @(Get-JlFunctionsByScheme 'CKKS'); $schemeLabel = 'CKKS' }
+        '2' { $funcs = @(Get-JlFunctionsByScheme 'BFV');  $schemeLabel = 'BFV' }
+        '3' { $funcs = @(Get-JlFunctions);                $schemeLabel = 'any' }
+        default { Stop-JlWithError "Invalid choice: $schemeChoice" }
+    }
+    if ($funcs.Count -eq 0) { Stop-JlWithError "No functions found for scheme '$schemeLabel'." }
+
+    Write-Host ""
+    Write-JlInfo "Functions available (scheme=$schemeLabel):"
+    for ($i = 0; $i -lt $funcs.Count; $i++) {
+        $desc = "$($funcs[$i].description)"
+        if ($desc.Length -gt 80) { $desc = $desc.Substring(0, 80) }
+        Write-Host ("  [{0}] {1} v{2}  |  scheme: {3}  |  {4}" -f `
+            ($i + 1), $funcs[$i].slug, $funcs[$i].version, $funcs[$i].scheme, $desc)
+    }
+    Write-Host ""
+
+    if ($funcs.Count -eq 1) {
+        Write-JlInfo "Only one function; selecting [1]."
+        return $funcs[0]
+    }
+    $pick = Read-JlValue "$Prompt (1-$($funcs.Count))" '1'
+    $n = 0
+    if (-not [int]::TryParse($pick, [ref] $n) -or $n -lt 1 -or $n -gt $funcs.Count) {
+        Stop-JlWithError "Invalid choice: $pick"
+    }
+    return $funcs[$n - 1]
+}
+
+function Invoke-JlInitSession {
+    param(
+        # Only the data owner can create a permission under an existing
+        # collaboration; the consumer must wait for one to be granted.
+        [switch] $CanCreatePermission
+    )
+
+    Write-JlStep "JuLenny collaboration setup ($($script:JL_OUR_LABEL): $($script:JL_ROLE_LABEL))"
+
+    # -------- API connection --------
+    if ($env:JULENNY_API_BASE) {
+        $script:JULENNY_API_BASE = $env:JULENNY_API_BASE
+    } else {
+        $script:JULENNY_API_BASE = 'https://julenny.net'
+    }
+    $script:JULENNY_API_KEY = Read-JlSecret "$($script:JL_OUR_LABEL)'s API key (starts with sk_live_)"
+    if (-not $script:JULENNY_API_KEY.StartsWith('sk_live_')) {
+        Stop-JlWithError "API key must start with sk_live_"
+    }
+
+    if ($script:JULENNY_OUR_SIDE -eq 'data-owner') { $myRoleName = 'dataOwner' } else { $myRoleName = 'dataConsumer' }
+
+    # -------- Pick or create a collaboration --------
+    Write-JlStep "Fetching your collaborations..."
+    $all = @(Get-JlCollaborations)
+
+    # Primary signal is the platform's yourPermissionRoles array; permissionCount
+    # is the fallback. permissionCount is already role-scoped by the view, so >0
+    # means "I hold at least one permission of my role here". Filtering on
+    # project ownership instead wrongly hides collabs the other party created.
+    $mine = @($all | Where-Object {
+        $roles = @()
+        if ($_.PSObject.Properties.Name -contains 'yourPermissionRoles' -and $_.yourPermissionRoles) {
+            $roles = @($_.yourPermissionRoles)
+        }
+        ($roles -contains $myRoleName) -or ([int]("0" + "$($_.permissionCount)") -gt 0)
+    } | Sort-Object createdAt -Descending)
+
+    Write-Host ""
+    if ($mine.Count -gt 0) {
+        Write-JlInfo "Active collaborations where you're the $myRoleName (newest first):"
+        for ($i = 0; $i -lt $mine.Count; $i++) {
+            $peer = $mine[$i].partnerCompanyName
+            if (-not $peer) { $peer = $mine[$i].ownerCompanyName }
+            if (-not $peer) { $peer = '?' }
+            $created = "$($mine[$i].createdAt)"
+            if ($created.Length -gt 10) { $created = $created.Substring(0, 10) }
+            Write-Host ("  [{0}] {1}  |  peer: {2}  |  {3} permission(s)  |  keysetup: {4}  |  created {5}  |  id: {6}" -f `
+                ($i + 1), $mine[$i].name, $peer, $mine[$i].permissionCount, $mine[$i].keysetupState, $created, $mine[$i].id)
+        }
+    } else {
+        Write-JlInfo "No active collaborations where you're the $myRoleName."
+    }
+    Write-Host "  n) Create a NEW collaboration + permission via the API"
+    if (-not $CanCreatePermission) {
+        Write-Host "     (uncommon on this side - usually the data owner initiates. Useful for single-machine smoke tests.)"
+    }
+    Write-Host ""
+
+    if ($mine.Count -eq 0) {
+        $projectChoice = 'n'
+        Write-JlInfo "No existing collaborations; defaulting to 'n' (create new)."
+    } else {
+        $projectChoice = Read-JlValue "Pick a collaboration (1-$($mine.Count), or n)" '1'
+    }
+
+    $projectId = ''
+    $permId = ''
+    $jointKeyId = ''
+
+    if ($projectChoice -match '^[Nn]$') {
+        Write-JlStep "Creating a new collaboration + permission via API"
+        if (-not $CanCreatePermission) {
+            Write-JlWarn "Heads up: in the normal two-party flow the data owner creates the collaboration."
+            Write-JlWarn "Use this path only for single-machine smoke tests where you drive both sides."
+            Write-Host ""
+        }
+
+        $fn = Select-JlFunction
+        $fnSlug = $fn.slug
+        $fnVersion = $fn.version
+
+        # The operator types the PEER's Collaboration ID (XXXX-XXXX, shown on
+        # their Company page). It goes straight to the API, which resolves it
+        # internally: the toolkit never handles a raw company id.
+        Write-Host ""
+        Write-JlInfo "The partner company must already exist on the platform."
+        Write-JlInfo "Ask $($script:JL_PEER_LABEL) for their Collaboration ID (format XXXX-XXXX,"
+        Write-JlInfo "visible on their Company page in the JuLenny web UI)."
+        $partnerId = Read-JlValue "Partner ($($script:JL_PEER_LABEL)) Collaboration ID (XXXX-XXXX)"
+        if (-not $partnerId) { Stop-JlWithError "Partner Collaboration ID is required." }
+
+        $defaultName = "$($script:JL_OUR_LABEL) x $($script:JL_PEER_LABEL) ($fnSlug, $(Get-Date -Format 'yyyy-MM-dd'))"
+        $collabName = Read-JlValue "Collaboration name" $defaultName
+
+        Write-JlStep "Creating collaboration via POST /api/fhe-projects..."
+        $projectId = New-JlCollaboration -PartnerCollaborationId $partnerId -Name $collabName
+        Write-JlSuccess "Collaboration created: $projectId"
+
+        $allowed = Read-JlValue "How many executions should this permission allow?" '10'
+        $visibility = 'dataConsumer'
+        if ($CanCreatePermission) {
+            Write-Host ""
+            Write-Host "Who should see the plaintext result?"
+            Write-Host "  1) The data consumer ($($script:JL_PEER_LABEL))  [default]"
+            Write-Host "  2) The data owner ($($script:JL_OUR_LABEL))"
+            $visChoice = Read-JlValue "Choose (1-2)" '1'
+            if ($visChoice -eq '2') { $visibility = 'dataOwner' }
+        }
+
+        Write-JlStep "Creating permission via POST /api/fhe-permissions..."
+        $permId = New-JlPermission -ProjectId $projectId -FunctionSlug $fnSlug `
+                                   -FunctionVersion $fnVersion -ConsumerCollaborationId $partnerId `
+                                   -AllowedExecutions ([int] $allowed) -ResultVisibility $visibility
+        Write-JlSuccess "Permission created: $permId  ($fnSlug v$fnVersion)"
+
+    } else {
+        $n = 0
+        if (-not [int]::TryParse($projectChoice, [ref] $n) -or $n -lt 1 -or $n -gt $mine.Count) {
+            Stop-JlWithError "Invalid choice: $projectChoice"
+        }
+        $project = $mine[$n - 1]
+        $projectId = $project.id
+        if ($project.PSObject.Properties.Name -contains 'jointKeyId') { $jointKeyId = $project.jointKeyId }
+        Write-JlSuccess "Selected collaboration: $($project.name) ($projectId)"
+
+        $perms = @(Get-JlPermissionsForJointKey $projectId)
+        Write-Host ""
+        if ($perms.Count -gt 0) {
+            Write-JlInfo "Permissions under this collaboration:"
+            for ($i = 0; $i -lt $perms.Count; $i++) {
+                Write-Host ("  [{0}] {1}  |  {2} v{3}  |  keysetup: {4}" -f `
+                    ($i + 1), $perms[$i].id, $perms[$i].fheFunction, $perms[$i].functionVersion, $perms[$i].keysetupState)
+            }
+        } else {
+            Write-JlInfo "No permissions found under this collaboration."
+        }
+        if ($CanCreatePermission) { Write-Host "  n) Create a NEW permission via the API" }
+        Write-Host ""
+
+        if ($perms.Count -eq 0 -and -not $CanCreatePermission) {
+            Stop-JlWithError "No permissions here yet. Ask $($script:JL_PEER_LABEL) (the data owner) to add one."
+        }
+
+        $default = '1'
+        if ($perms.Count -eq 0) { $default = 'n' }
+        $permChoice = Read-JlValue "Pick a permission (1-$($perms.Count)$(if ($CanCreatePermission) { ', or n' }))" $default
+
+        if ($permChoice -match '^[Nn]$') {
+            if (-not $CanCreatePermission) {
+                Stop-JlWithError "Only the data owner can create a permission."
+            }
+            $fn = Select-JlFunction
+            $partnerId = Read-JlValue "Partner ($($script:JL_PEER_LABEL)) Collaboration ID (XXXX-XXXX)"
+            if (-not $partnerId) { Stop-JlWithError "Partner Collaboration ID is required." }
+            $allowed = Read-JlValue "How many executions should this permission allow?" '10'
+            Write-Host ""
+            Write-Host "Who should see the plaintext result?"
+            Write-Host "  1) The data consumer ($($script:JL_PEER_LABEL))  [default]"
+            Write-Host "  2) The data owner ($($script:JL_OUR_LABEL))"
+            $visChoice = Read-JlValue "Choose (1-2)" '1'
+            $visibility = 'dataConsumer'
+            if ($visChoice -eq '2') { $visibility = 'dataOwner' }
+
+            $permId = New-JlPermission -ProjectId $projectId -FunctionSlug $fn.slug `
+                                       -FunctionVersion $fn.version -ConsumerCollaborationId $partnerId `
+                                       -AllowedExecutions ([int] $allowed) -ResultVisibility $visibility
+            Write-JlSuccess "Permission created: $permId"
+        } else {
+            $n = 0
+            if (-not [int]::TryParse($permChoice, [ref] $n) -or $n -lt 1 -or $n -gt $perms.Count) {
+                Stop-JlWithError "Invalid choice: $permChoice"
+            }
+            $permId = $perms[$n - 1].id
+            if ($perms[$n - 1].PSObject.Properties.Name -contains 'jointKeyId') { $jointKeyId = $perms[$n - 1].jointKeyId }
+            Write-JlSuccess "Selected permission: $permId"
+        }
+    }
+
+    $script:JULENNY_PERMISSION_ID = $permId
+
+    # -------- Resolve the joint key and activate the per-collab workdir --------
+    if (-not $jointKeyId) {
+        $perm = Get-JlPermission -PermissionId $permId
+        if ($perm -and ($perm.PSObject.Properties.Name -contains 'jointKeyId')) { $jointKeyId = $perm.jointKeyId }
+    }
+    if (-not $jointKeyId) {
+        Stop-JlWithError "Could not resolve a jointKeyId for permission $permId."
+    }
+    Set-JlActiveJointKey $jointKeyId
+    Write-JlSuccess "Workdir: $($script:JL_WORKDIR)"
+
+    # -------- Re-fetch the permission for its derived fields --------
+    $permObj = Get-JlPermission -PermissionId $permId
+    $fnSlug    = $permObj.fheFunction
+    $fnVersion = $permObj.functionVersion
+    $ctxSpec   = $permObj.cryptoContextSpec
+    $visibility = 'dataConsumer'
+    if ($permObj.PSObject.Properties.Name -contains 'resultVisibility' -and $permObj.resultVisibility) {
+        $visibility = $permObj.resultVisibility
+    }
+    $peerCollab = ''
+    if ($permObj.PSObject.Properties.Name -contains $script:JL_PEER_COLLAB_FIELD) {
+        $peerCollab = $permObj.$($script:JL_PEER_COLLAB_FIELD)
+    }
+
+    Write-JlSuccess "Permission resolved: $permId  ($fnSlug v$fnVersion)"
+    Write-JlInfo "  $($script:JL_OUR_LABEL) is:  $($script:JL_ROLE_LABEL)"
+    if ($peerCollab) {
+        Write-JlInfo "  $($script:JL_PEER_LABEL) (peer): collab $peerCollab"
+    }
+    Write-JlInfo "  Result is visible to: $visibility"
+
+    # -------- Function definition --------
+    Write-JlStep "Fetching function definition from platform..."
+    $fnDef = Invoke-JlApi GET "/api/functions/$fnSlug/$fnVersion/definition"
+    $fnDefPath = Join-Path $script:JL_WORKDIR 'function-def.json'
+    $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+    [System.IO.File]::WriteAllText($fnDefPath, (ConvertTo-Json $fnDef -Depth 30), $utf8NoBom)
+    Write-JlSuccess "Function definition saved: $fnDefPath ($fnSlug v$fnVersion)"
+
+    $scheme = ''
+    if ($fnDef.PSObject.Properties.Name -contains 'scheme') { $scheme = $fnDef.scheme }
+
+    # -------- Signing keypair --------
+    # Account-scoped and scheme-agnostic: generated once per machine and reused
+    # across every collaboration.
+    if (-not (Test-Path -LiteralPath $script:JL_SIGNING_DIR)) {
+        New-Item -ItemType Directory -Force -Path $script:JL_SIGNING_DIR | Out-Null
+    }
+    if (-not (Test-Path -LiteralPath $script:JL_SIGNING_SECRET)) {
+        Write-JlInfo "Generating signing keypair..."
+        Invoke-JlCli @(
+            'crypto', 'signing-keygen',
+            '--output-secret', $script:JL_SIGNING_SECRET,
+            '--output-public', $script:JL_SIGNING_PUBLIC
+        )
+        Write-JlSuccess "Signing keypair created."
+    } else {
+        Write-JlInfo "Reusing existing signing keypair at $($script:JL_SIGNING_SECRET)."
+    }
+
+    # -------- Register the signing public key --------
+    Write-JlStep "Registering $($script:JL_OUR_LABEL)'s signing public key with the platform..."
+    $pubHex = Get-JlFileHex $script:JL_SIGNING_PUBLIC
+    if ($pubHex.Length -ne 64) {
+        Stop-JlWithError "Signing public key hex is $($pubHex.Length) chars, expected 64."
+    }
+    Invoke-JlApi POST "/api/companies/me/fhe-public-keys" -Body @{
+        cryptoContextSpec   = $ctxSpec
+        signingPublicKeyHex = $pubHex
+    } | Out-Null
+    Write-JlSuccess "Signing public key registered for crypto context: $ctxSpec"
+
+    # -------- Default input file --------
+    $inputCsv = ''
+    if ($script:JL_DATA_DIR -and (Test-Path -LiteralPath $script:JL_DATA_DIR)) {
+        $first = @(Get-ChildItem -LiteralPath $script:JL_DATA_DIR -File | Sort-Object Name)
+        if ($first.Count -gt 0) { $inputCsv = $first[0].FullName }
+    }
+
+    # -------- Write config.env --------
+    # Same KEY="value" format lib.sh reads, so the file is identical on both
+    # platforms. Written fresh here rather than appended.
+    $lines = @(
+        "# JuLenny session config for $($script:JL_OUR_LABEL) ($($script:JL_ROLE_LABEL)).",
+        "JULENNY_API_BASE=`"$($script:JULENNY_API_BASE)`"",
+        "JULENNY_API_KEY=`"$($script:JULENNY_API_KEY)`"",
+        "JULENNY_PROJECT_ID=`"$projectId`"",
+        "JULENNY_JOINT_KEY_ID=`"$jointKeyId`"",
+        "JULENNY_PERMISSION_ID=`"$permId`"",
+        "JULENNY_OUR_SIDE=`"$($script:JULENNY_OUR_SIDE)`"",
+        "JULENNY_ROLE=`"$($script:JL_ROLE_DIR)`"",
+        "JULENNY_RESULT_VISIBILITY=`"$visibility`"",
+        "JULENNY_SCHEME=`"$scheme`"",
+        "JULENNY_CRYPTO_CONTEXT_SPEC=`"$ctxSpec`"",
+        "JULENNY_INPUT_CSV=`"$($inputCsv -replace '\\', '\\')`"",
+        "JULENNY_SIGNING_SECRET=`"$($script:JL_SIGNING_SECRET -replace '\\', '\\')`"",
+        "JULENNY_SIGNING_PUBLIC=`"$($script:JL_SIGNING_PUBLIC -replace '\\', '\\')`""
+    )
+    [System.IO.File]::WriteAllText($script:JL_CONFIG, (($lines -join "`n") + "`n"), $utf8NoBom)
+    Write-JlSuccess "Session config written to $($script:JL_CONFIG)"
+
+    Write-Host ""
+    Write-JlInfo "Next step (on this machine):"
+    Write-Host "  run.ps1                # one-command driver"
+    Write-Host "  01-keysetup-1.ps1      # or run the numbered scripts in order"
 }
 
 # ============================================================================
