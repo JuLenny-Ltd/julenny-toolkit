@@ -156,13 +156,43 @@ esac
 
 echo
 success "Examples installed to $DEST"
+
+# List what was actually copied, and give a command that can be pasted as-is.
+# A "<scenario>" placeholder is not a next step; the operator should not have to
+# go and work out what the options are.
+_scenarios=()
+for _d in "$DEST"/*/; do
+    _name="$(basename "$_d")"
+    [[ "$_name" == "_core" ]] && continue
+    _scenarios+=("$_name")
+done
+
 echo
-echo "${B}Next steps${RST}"
-echo "  1. Pick a scenario:   ls $DEST"
-echo "  2. Run your side:     cd $DEST/<scenario>/$_side_dir && ./run.sh"
+echo "${B}Scenarios available${RST}"
+for _name in "${_scenarios[@]}"; do
+    if [[ "$_name" == "joint-record-overlap" ]]; then
+        echo "  $_name   (simplest: exact whole-number answers)"
+    else
+        echo "  $_name"
+    fi
+done
+
+# Prefer joint-record-overlap for the worked example: BFV, so the answer is an
+# exact integer the operator can check by hand.
+_first="joint-record-overlap"
+if [[ ! -d "$DEST/$_first" ]]; then
+    _first="${_scenarios[0]:-<scenario>}"
+fi
+
 echo
-info "Start with $DEST/README.md for the prerequisites and the phase breakdown,"
-info "and each scenario's README.md for its sample data and expected result."
+echo "${B}To start${RST}"
+echo "  cd $DEST/$_first/$_side_dir"
+echo "  ./run.sh"
+echo
+info "run.sh is menu-driven and resumes wherever you left off. It waits when it"
+info "needs the other side to act."
+info "Each scenario's README.md gives its sample data and the expected answer, so"
+info "you can confirm the result is correct. $DEST/README.md has the full phase breakdown."
 if [[ "$ROLE" == "both" ]]; then
     echo
     info "You installed both sides. To drive them from one host, give each shell"

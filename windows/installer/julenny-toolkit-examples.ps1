@@ -132,13 +132,40 @@ if ($Role -eq 'consumer') { $sideDir = 'beta' } else { $sideDir = 'acme' }
 
 Write-Host ""
 Write-Ok "Examples installed to $Dest"
+
+# List what was actually copied, and give a command that can be pasted as-is.
+# A "<scenario>" placeholder is not a next step; the operator should not have to
+# go and work out what the options are.
+$scenarios = @(Get-ChildItem -LiteralPath $Dest -Directory |
+               Where-Object { $_.Name -ne '_core' } |
+               Select-Object -ExpandProperty Name)
+
 Write-Host ""
-Write-Host "Next steps"
-Write-Host "  1. Pick a scenario:   dir `"$Dest`""
-Write-Host "  2. Run your side:     cd `"$Dest\<scenario>\$sideDir`"; .\run.ps1"
+Write-Host "Scenarios available"
+foreach ($s in $scenarios) {
+    if ($s -eq 'joint-record-overlap') {
+        Write-Host "  $s   (simplest: exact whole-number answers)"
+    } else {
+        Write-Host "  $s"
+    }
+}
+
+# Prefer joint-record-overlap for the worked example: BFV, so the answer is an
+# exact integer the operator can check by hand.
+$first = 'joint-record-overlap'
+if (-not (Test-Path -LiteralPath (Join-Path $Dest $first))) {
+    if ($scenarios.Count -gt 0) { $first = $scenarios[0] } else { $first = '<scenario>' }
+}
+
 Write-Host ""
-Write-Info "Start with $Dest\README.md for the prerequisites and the phase breakdown,"
-Write-Info "and each scenario's README.md for its sample data and expected result."
+Write-Host "To start"
+Write-Host "  cd `"$Dest\$first\$sideDir`""
+Write-Host "  .\run.ps1"
+Write-Host ""
+Write-Info "run.ps1 is menu-driven and resumes wherever you left off. It waits when it"
+Write-Info "needs the other side to act."
+Write-Info "Each scenario's README.md gives its sample data and the expected answer, so"
+Write-Info "you can confirm the result is correct. $Dest\README.md has the full phase breakdown."
 if ($Role -eq 'both') {
     Write-Host ""
     Write-Info "You installed both sides. To drive them from one host, give each shell"
