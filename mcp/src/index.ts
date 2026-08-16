@@ -46,9 +46,11 @@ KEY BRANCH POINTS (read these off the function-def and permission):
     for functions that need them. This controls how many keysetup rounds run -
     do NOT generate a key the def does not list.
   - resultVisibility (on the permission): who may see the plaintext result.
+    Exactly ONE side sees it: "dataConsumer" (default) or "dataOwner". There is
+    no mode in which both parties see the answer - never offer that as a choice.
     If it names YOUR role you are the VIEWER (you combine partials and read the
     answer). If it names the other party you are the RELEASER (you upload your
-    partial so they can view). Fixed at keysetup time.
+    partial so they can view, without seeing it yourself). Fixed at keysetup time.
   - input.role / input.layout (on the function-def): which inputs YOU own, and
     whether each is an encrypted-bundle (run its encodingRecipe, then encrypt)
     or a plaintext input (upload as-is, e.g. a rule list).

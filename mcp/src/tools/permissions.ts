@@ -54,7 +54,7 @@ export function registerPermissionTools(server: McpServer, api: JulennyApiClient
       partnerCollaborationId: z.string().describe('Partner collaboration ID (XXXX-XXXX)'),
       functionSlug: z.string().describe('Function slug'),
       allowedExecutions: z.number().describe('Max number of executions allowed'),
-      resultVisibility: z.enum(['dataOwner', 'dataConsumer']).optional().describe('Who sees results (default: dataConsumer)'),
+      resultVisibility: z.enum(['dataOwner', 'dataConsumer']).optional().describe('Who decrypts and sees the plaintext result. Exactly one side sees it: dataConsumer (default) or dataOwner. There is NO mode where both sides see the result - do not offer that as a choice. The other side contributes its half of the threshold decryption without ever seeing the answer.'),
       expirationDate: z.string().optional().describe('ISO date when permission expires'),
       projectId: z.string().optional().describe('Existing collaboration/project ID to add permission to'),
       jointKeyId: z.string().optional().describe('Joint key ID from an existing collaboration'),
