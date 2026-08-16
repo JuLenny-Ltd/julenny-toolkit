@@ -1134,6 +1134,289 @@ function Test-JlAllRequiredInputsDeclared {
 }
 
 # ============================================================================
+# Keysetup finalization (phase 3)
+# ============================================================================
+# lead/03 and main/03 are 95% identical in bash. Here the shared work lives in
+# one function and the two scripts just call it, so the combines cannot drift
+# apart between sides.
+#
+# CRITICAL: the combines always pass share-a = the LEAD's share and
+# share-b = the MAIN's share, on BOTH machines. The ordering is by role, not by
+# "mine first". Both sides must produce byte-identical keys, because the
+# platform compares their SHA-256 hashes to decide the keysetup is sound.
+
+function Request-JlFinalKeyUploadUrl {
+    param([Parameter(Mandatory = $true)][string] $KeyType)
+    $resp = Invoke-JlApi POST "/api/fhe-permissions/$($script:JULENNY_PERMISSION_ID)/keysetup/final-keys/upload-url" `
+                         -Body @{ keyType = $KeyType }
+    $url = ''
+    $key = ''
+    if ($resp) {
+        if ($resp.PSObject.Properties.Name -contains 'uploadUrl') { $url = $resp.uploadUrl }
+        if ($resp.PSObject.Properties.Name -contains 'objectKey') { $key = $resp.objectKey }
+    }
+    if ([string]::IsNullOrWhiteSpace($url) -or [string]::IsNullOrWhiteSpace($key)) {
+        Stop-JlWithError "upload-url for $KeyType did not return both an uploadUrl and an objectKey."
+    }
+    return @{ UploadUrl = $url; ObjectKey = $key }
+}
+
+function Send-JlBlobToStorage {
+    param(
+        [Parameter(Mandatory = $true)][string] $Url,
+        [Parameter(Mandatory = $true)][string] $Path
+    )
+    try {
+        Invoke-WebRequest -Method PUT -Uri $Url -InFile $Path `
+            -ContentType 'application/octet-stream' -UseBasicParsing -ErrorAction Stop | Out-Null
+    } catch {
+        Stop-JlWithError "object storage PUT failed for ${Path}: $($_.Exception.Message)"
+    }
+}
+
+# Lowercase hex, matching sha256sum. Get-FileHash returns uppercase, and the
+# platform compares these strings against the peer's.
+function Get-JlSha256 {
+    param([Parameter(Mandatory = $true)][string] $Path)
+    return (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLower()
+}
+
+function Invoke-JlFinalizeKeysetup {
+    Write-JlStep "$($script:JL_OUR_LABEL): finalize joint keysetup"
+
+    # Idempotence marker, per permission. When a new permission is created under
+    # an existing complete joint key the crypto is already done locally, but the
+    # finalKeys envelope still has to be POSTed against the NEW permission id.
+    $marker = Join-Path $script:JL_WORKDIR "finalkeys_submitted_$($script:JULENNY_PERMISSION_ID)"
+    if (Test-Path -LiteralPath $marker) {
+        Write-JlInfo "Final keys already submitted for permission $($script:JULENNY_PERMISSION_ID)."
+        Write-JlInfo "(Remove $marker and rerun if you need to re-submit.)"
+        return
+    }
+
+    # If the platform already considers this complete, there is nothing to do
+    # even if this machine never held the intermediates (joint key set up
+    # elsewhere and reused here). Detect that BEFORE requiring local files.
+    $precheck = Invoke-JlApi POST "/api/fhe-permissions/$($script:JULENNY_PERMISSION_ID)/keysetup/final-keys/upload-url" `
+                             -Body @{ keyType = 'joint_public_key' } -AllowFailure
+    if ($null -eq $precheck) {
+        $state = Get-JlKeysetupState
+        if ($state -and ($state.PSObject.Properties.Name -contains 'state') -and $state.state -eq 'complete') {
+            Write-JlInfo "Final keys already registered for this permission (keysetup complete). Skipping finalize."
+            New-Item -ItemType File -Path $marker -Force | Out-Null
+            return
+        }
+    }
+
+    $needsSum = Test-JlFunctionRequiresSumKeys
+
+    # Role decides which share is "a" and which is "b"; side decides which of
+    # them is local and which came from the peer.
+    $iAmLead = ($script:JL_ROLE_DIR -eq 'lead')
+    if ($iAmLead) {
+        $leadR2  = Join-Path $script:JL_KEYS_DIR 'lead-relin-r2.bin'
+        $mainR2  = Join-Path $script:JL_PEER_DIR 'main-relin-r2.bin'
+        $leadSum = Join-Path $script:JL_KEYS_DIR 'lead-sum-r1.bin'
+        $mainSum = Join-Path $script:JL_PEER_DIR 'main-sum-r1.bin'
+        $peerR2  = $mainR2
+        $peerSum = $mainSum
+        $mineR2  = $leadR2
+        $mineSum = $leadSum
+        $peerSumMessageType = 'sum-round1-continue'
+    } else {
+        $leadR2  = Join-Path $script:JL_PEER_DIR 'lead-relin-r2.bin'
+        $mainR2  = Join-Path $script:JL_KEYS_DIR 'main-relin-r2.bin'
+        $leadSum = Join-Path $script:JL_PEER_DIR 'lead-sum-r1.bin'
+        $mainSum = Join-Path $script:JL_KEYS_DIR 'main-sum-r1.bin'
+        $peerR2  = $leadR2
+        $peerSum = $leadSum
+        $mineR2  = $mainR2
+        $mineSum = $mainSum
+        $peerSumMessageType = 'sum-round1'
+    }
+
+    $combinedR1 = Join-Path $script:JL_KEYS_DIR 'combined-relin-r1.bin'
+    if (-not (Test-Path -LiteralPath $mineR2))     { Stop-JlWithError "Missing $mineR2. Did 02-keysetup-2.ps1 run?" }
+    if (-not (Test-Path -LiteralPath $combinedR1)) { Stop-JlWithError "Missing $combinedR1. Did 02-keysetup-2.ps1 run?" }
+    if ($needsSum -and -not (Test-Path -LiteralPath $mineSum)) {
+        Stop-JlWithError "Missing $mineSum. Did 01-keysetup-1.ps1 run?"
+    }
+
+    # The joint pk lands in different places depending on the side and on which
+    # steps ran; check both.
+    $jointPk = ''
+    foreach ($cand in @((Join-Path $script:JL_KEYS_DIR 'joint_public_key.bin'),
+                        (Join-Path $script:JL_PEER_DIR 'joint-pk.bin'))) {
+        if (Test-Path -LiteralPath $cand) { $jointPk = $cand; break }
+    }
+    if (-not $jointPk) { Stop-JlWithError "Cannot find the joint public key on disk." }
+
+    # -------- 1. Fetch the peer's round-2 (and sum) shares --------
+    # Skip if already present: a reused-joint-key permission has no fresh peer
+    # upload for THIS permission, but the original bytes are still correct.
+    if (-not (Test-Path -LiteralPath $peerR2)) {
+        Write-JlInfo "Waiting for $($script:JL_PEER_LABEL)'s relin-round2 contribution..."
+        Wait-JlPeerShare 'relin-round2'
+        Save-JlPeerShare -MessageType 'relin-round2' -OutPath $peerR2
+    } else {
+        Write-JlInfo "Reusing existing peer share: $peerR2"
+    }
+    if ($needsSum) {
+        if (-not (Test-Path -LiteralPath $peerSum)) {
+            Write-JlInfo "Waiting for $($script:JL_PEER_LABEL)'s $peerSumMessageType contribution..."
+            Wait-JlPeerShare $peerSumMessageType
+            Save-JlPeerShare -MessageType $peerSumMessageType -OutPath $peerSum
+        } else {
+            Write-JlInfo "Reusing existing peer share: $peerSum"
+        }
+    }
+
+    # -------- 2. Final combines (deterministic; identical on both sides) --------
+    $finalRelin = Join-Path $script:JL_KEYS_DIR 'final_relin_key.bin'
+    $finalSum   = Join-Path $script:JL_KEYS_DIR 'final_sum_key.bin'
+
+    if (-not (Test-Path -LiteralPath $finalRelin)) {
+        Write-JlInfo "Combining round-2 relin shares -> final relin key..."
+        Invoke-JlCli @(
+            'crypto', 'relin-combine',
+            '--context-spec', $script:JULENNY_CRYPTO_CONTEXT_SPEC,
+            '--round', '2',
+            '--share-a',     $leadR2,
+            '--share-b',     $mainR2,
+            '--combined-r1', $combinedR1,
+            '--output',      $finalRelin
+        )
+        Write-JlSuccess "Final relin key: $finalRelin ($((Get-Item -LiteralPath $finalRelin).Length) bytes)"
+    } else {
+        Write-JlInfo "Reusing existing final relin key: $finalRelin"
+    }
+
+    if ($needsSum) {
+        if (-not (Test-Path -LiteralPath $finalSum)) {
+            Write-JlInfo "Combining sum-round-1 shares -> final sum key..."
+            Invoke-JlCli @(
+                'crypto', 'sum-combine',
+                '--context-spec', $script:JULENNY_CRYPTO_CONTEXT_SPEC,
+                '--share-a',  $leadSum,
+                '--share-b',  $mainSum,
+                '--joint-pk', $jointPk,
+                '--output',   $finalSum
+            )
+            Write-JlSuccess "Final sum key: $finalSum ($((Get-Item -LiteralPath $finalSum).Length) bytes)"
+        } else {
+            Write-JlInfo "Reusing existing final sum key: $finalSum"
+        }
+    }
+
+    Write-JlInfo "Joint public key: $jointPk ($((Get-Item -LiteralPath $jointPk).Length) bytes)"
+
+    # -------- 3. Hashes (the cross-party byte-equality check) --------
+    $jointPkSha = Get-JlSha256 $jointPk
+    $relinSha   = Get-JlSha256 $finalRelin
+    $sumSha     = ''
+    if ($needsSum) { $sumSha = Get-JlSha256 $finalSum }
+
+    Write-JlInfo "Hashes computed."
+    Write-JlInfo "  joint_public_key: $jointPkSha"
+    Write-JlInfo "  joint_relin_key:  $relinSha"
+    if ($needsSum) { Write-JlInfo "  eval_sum_key:     $sumSha" }
+
+    # -------- 4. Upload URLs, then PUT each blob --------
+    Write-JlInfo "Requesting upload URLs..."
+    $jpkTarget = Request-JlFinalKeyUploadUrl 'joint_public_key'
+    $relTarget = Request-JlFinalKeyUploadUrl 'joint_relin_key'
+    $sumTarget = $null
+    if ($needsSum) { $sumTarget = Request-JlFinalKeyUploadUrl 'eval_sum_key' }
+
+    Write-JlInfo "Uploading the final keys to object storage..."
+    Send-JlBlobToStorage -Url $jpkTarget.UploadUrl -Path $jointPk
+    Write-JlSuccess "  joint_public_key -> $($jpkTarget.ObjectKey)"
+    Send-JlBlobToStorage -Url $relTarget.UploadUrl -Path $finalRelin
+    Write-JlSuccess "  joint_relin_key  -> $($relTarget.ObjectKey)"
+    if ($needsSum) {
+        Send-JlBlobToStorage -Url $sumTarget.UploadUrl -Path $finalSum
+        Write-JlSuccess "  eval_sum_key     -> $($sumTarget.ObjectKey)"
+    }
+
+    # -------- 5. Build the to-sign JSON --------
+    # Ordered dictionaries throughout: this document gets signed, so its shape
+    # should not depend on hashtable enumeration order. The sum entry comes
+    # first when present, matching the bash version.
+    $toSign    = Join-Path $script:JL_ENV_DIR 'final-keys-to-sign.json'
+    $signedOut = Join-Path $script:JL_ENV_DIR 'final-keys-signed.json'
+    $timestamp = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ss.fffZ')
+
+    $keys = @()
+    if ($needsSum) {
+        $keys += [ordered]@{ keyType = 'eval_sum_key'; objectKey = $sumTarget.ObjectKey; sha256Hex = $sumSha }
+    }
+    $keys += [ordered]@{ keyType = 'joint_public_key'; objectKey = $jpkTarget.ObjectKey; sha256Hex = $jointPkSha }
+    $keys += [ordered]@{ keyType = 'joint_relin_key';  objectKey = $relTarget.ObjectKey; sha256Hex = $relinSha }
+
+    $doc = [ordered]@{
+        keys         = $keys
+        permissionId = $script:JULENNY_PERMISSION_ID
+        timestamp    = $timestamp
+    }
+    $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+    [System.IO.File]::WriteAllText($toSign, (ConvertTo-Json $doc -Depth 10), $utf8NoBom)
+    Write-JlSuccess "To-sign JSON: $toSign"
+
+    # -------- 6. Sign it offline --------
+    Write-JlInfo "Signing the envelope (offline)..."
+    Invoke-JlCli @(
+        'crypto', 'wrap-final-keys-envelope',
+        '--to-sign',    $toSign,
+        '--secret-key', $script:JULENNY_SIGNING_SECRET,
+        '--output',     $signedOut
+    )
+    Write-JlSuccess "Signed envelope: $signedOut"
+
+    # -------- 7. POST it --------
+    Write-JlInfo "POSTing signed envelope to /keysetup/final-keys..."
+    $resp = $null
+    try {
+        $resp = Invoke-RestMethod -Method POST `
+            -Uri "$($script:JULENNY_API_BASE)/api/fhe-permissions/$($script:JULENNY_PERMISSION_ID)/keysetup/final-keys" `
+            -Headers @{ 'x-api-key' = $script:JULENNY_API_KEY } `
+            -InFile $signedOut -ContentType 'application/json' -ErrorAction Stop
+    } catch {
+        Stop-JlWithError "Submission failed: $($_.Exception.Message)"
+    }
+
+    # -------- 8. Report --------
+    $state = ''
+    if ($resp) {
+        if     ($resp.PSObject.Properties.Name -contains 'permissionState') { $state = $resp.permissionState }
+        elseif ($resp.PSObject.Properties.Name -contains 'state')           { $state = $resp.state }
+    }
+    $msg = ''
+    if ($resp -and ($resp.PSObject.Properties.Name -contains 'message')) { $msg = $resp.message }
+
+    Write-Host ""
+    switch -Regex ($state) {
+        '^(active|complete)$' {
+            Write-JlSuccess "Keysetup is COMPLETE. Permission is active."
+            if ($msg) { Write-JlSuccess "  Server: $msg" }
+            New-Item -ItemType File -Path $marker -Force | Out-Null
+            Write-Host ""
+            Write-JlInfo "Next step (on this machine): 04-encrypt.ps1"
+        }
+        '^(awaiting-peer-submission|awaiting-finalization)$' {
+            Write-JlInfo "Your submission is in. Waiting for $($script:JL_PEER_LABEL) to run their finalize."
+            if ($msg) { Write-JlInfo "  Server: $msg" }
+            New-Item -ItemType File -Path $marker -Force | Out-Null
+            Write-Host ""
+            Write-JlInfo "Tell $($script:JL_PEER_LABEL) to run 03-finalize-keysetup on their machine."
+        }
+        default {
+            Write-JlWarn "Unexpected response state: '$state'"
+            Write-Host ($resp | ConvertTo-Json -Depth 10)
+        }
+    }
+}
+
+# ============================================================================
 # Result-visibility flows: releaser and viewer
 # ============================================================================
 # These do the threshold-decrypt work. Which one this side runs depends on
