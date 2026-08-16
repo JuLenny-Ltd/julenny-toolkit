@@ -126,7 +126,7 @@ export function registerToolkitTools(server: McpServer) {
   // ---- generate_keys (auto) ----
   server.tool(
     'generate_keys',
-    'Ensure a local FHE keypair exists for this crypto context (keys never leave the machine; returns the alias, not the bytes). Idempotent: if keys already exist this succeeds and leaves them untouched, so it is safe to call again and there is never a reason to retry it.',
+    'NOT PART OF A COLLABORATION. Do not call this during keysetup. The FHE keypair used for a collaboration is created by keysetup_contribute, which writes it to files in the working folder; this tool instead writes to a separate passphrase-protected secret store that no other toolkit command reads. It also requires FHE_TOOLKIT_PASSPHRASE to be set, and will hang waiting for an interactive prompt if it is not. Ensures a local FHE keypair exists in that store for the given context (keys never leave the machine; returns the alias, not the bytes). Idempotent: if keys already exist this succeeds and leaves them untouched, so there is never a reason to retry it.',
     {
       contextSpec: z.enum(['bfv-default-v1', 'ckks-default-v1']).describe('Crypto context spec'),
       force: z.boolean().optional().describe('DESTRUCTIVE. Replaces existing keys for this context, which permanently breaks every collaboration already using them. Never pass this to resolve an error or because keys already exist; only when the user has explicitly asked to start over.'),
