@@ -55,31 +55,80 @@ It asks which side of the collaboration this machine is (data owner, data consum
 
 ### Windows
 
-Download `julenny-toolkit-setup-windows-amd64.exe` from the releases page and run it. The installer lets you choose any combination of three components:
+Download `julenny-toolkit-setup-windows-amd64.exe` from the releases page and run it. The installer lets you choose any combination of four components:
 
 - the **JuLenny Toolkit** desktop app (graphical UI),
 - the **`julenny-toolkit`** command-line tool,
-- the **`julenny-mcp`** MCP server, with optional one-click wiring into Claude Desktop.
+- the **`julenny-mcp`** MCP server, with optional one-click wiring into Claude Desktop,
+- the **example scripts**, where the installer asks which side of the collaboration this machine is and where to put them.
 
 It installs per-user; no administrator rights are required. The app appears as **JuLenny Toolkit** in the Start menu.
 
+> **Close Claude Desktop before installing** if you are installing the MCP server. Claude Desktop rewrites its configuration file when it exits, which erases the connector the installer adds. Claude Code is unaffected and can stay open.
+
 > The installer is not yet code-signed, so Windows SmartScreen may show an "unknown publisher" prompt. Choose **More info -> Run anyway** to proceed.
+
+## Using the MCP server
+
+`julenny-mcp` is a standard MCP server speaking the protocol over stdin/stdout. It works with **any MCP client**: Claude Desktop, Claude Code, Cursor, Windsurf, Zed, Continue, VS Code, and anything else that supports MCP.
+
+Only Claude Desktop is configured for you, by the Windows installer. Every other client needs one entry in its own config, using the same shape:
+
+```json
+{
+  "mcpServers": {
+    "JuLenny": {
+      "command": "C:\\Users\\<you>\\AppData\\Local\\Programs\\julenny-toolkit\\julenny-mcp.exe",
+      "env": {
+        "JULENNY_API_KEY": "sk_live_...",
+        "JULENNY_API_URL": "https://julenny.net"
+      }
+    }
+  }
+}
+```
+
+On Linux the command is simply `julenny-mcp`, since the `.deb` puts it on your `PATH`.
+
+| Client | Config file |
+|---|---|
+| Claude Desktop | configured by the installer. Appears under **Settings → Developer**, not Connectors |
+| Cursor | `~/.cursor/mcp.json` (global) or `.cursor/mcp.json` (per project) |
+| Claude Code | `claude mcp add julenny -- <path-to>/julenny-mcp` |
+| VS Code | `.vscode/mcp.json`, which uses a `servers` key rather than `mcpServers` |
+| Windsurf, Zed, Continue | their own MCP config; the `mcpServers` shape above applies |
+
+The MCP server never performs cryptography itself. It shells out to the `julenny-toolkit` CLI for every key operation and only ever transports ciphertext, so your keys and plaintext stay on your machine regardless of which client drives it.
 
 ## Quick start
 
-The fastest way to see the toolkit in action is to run the end-to-end example. Each example folder represents one organization in a two-party collaboration; you can run them on two machines (one acting as the data owner, one as the data consumer) or as two shells on the same machine for local testing.
+The fastest way to see the toolkit in action is to run the end-to-end example. Each example folder represents one organization in a two-party collaboration; you can run them on two machines (one the data owner, one the data consumer) or as two shells on the same machine for local testing.
+
+One menu-driven driver runs the whole lifecycle and picks up wherever you left off:
 
 ```bash
-cd examples/joint-record-overlap
+# Linux, data-owner machine
+cd <examples>/joint-record-overlap/acme && ./run.sh
 
-# On the data-owner machine:
-cd acme && ./00-init.sh   # ... and follow each numbered script in order
-
-# On the data-consumer machine:
-cd beta && ./00-init.sh   # ... and follow each numbered script in order
+# Linux, data-consumer machine
+cd <examples>/joint-record-overlap/beta && ./run.sh
 ```
 
-Each script is small, commented, and uses only HTTPS plus this toolkit. Read them as the canonical reference for integrating the toolkit into your own pipelines.
+```powershell
+# Windows, data-owner machine
+cd <examples>\joint-record-overlap\acme; .\run.ps1
+
+# Windows, data-consumer machine
+cd <examples>\joint-record-overlap\beta; .\run.ps1
+```
+
+Every script exists in both forms and does the same work, so the two sides of a collaboration can run on different operating systems. The installer copies only the set your machine can run.
+
+The driver chains the numbered phase scripts (`00-init` through `06-decrypt`), which you can also run individually to follow the protocol step by step. Each is small, commented, and uses only HTTPS plus this toolkit. Read them as the canonical reference for integrating the toolkit into your own pipelines.
+
+Windows needs nothing beyond the toolkit itself: the PowerShell scripts use built-in cmdlets, so there is no `jq` or `curl` to install and no WSL.
+
+See [`examples/README.md`](examples/README.md) for the full phase breakdown, the scenarios available, and the single-machine self-test setup.
 
 ## What's in this repository
 

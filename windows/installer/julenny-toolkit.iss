@@ -114,6 +114,95 @@ var
   ExamplesRolePage: TInputOptionWizardPage;
   ExamplesDirPage:  TInputDirWizardPage;
 
+// ---------------------------------------------------------------------------
+// Claude Desktop detection.
+//
+// Claude Desktop rewrites claude_desktop_config.json from its in-memory state
+// when it exits. If it is running while we merge the JuLenny connector in, the
+// entry is silently erased the next time the user closes it, and the installer
+// looks like it worked when it did not.
+//
+// DANGER: Claude Desktop and Claude CODE share the image name claude.exe.
+//   Desktop     ...\WindowsApps\Claude_<pkg>\app\Claude.exe
+//               ...\AnthropicClaude\...\claude.exe          (non-store install)
+//   Claude Code ...\.vscode\extensions\anthropic.claude-code-...\claude.exe
+//               ...\Roaming\Claude\claude-code\<ver>\claude.exe
+// Matching on the image name and calling taskkill /IM would kill the user's
+// Claude Code sessions. Everything below filters on the executable PATH and
+// pipes matched processes straight to Stop-Process, so only Desktop is touched.
+// ---------------------------------------------------------------------------
+
+// DESIGN: the warning must not depend on this detection working.
+//
+// The process name, install paths and package identity all belong to a
+// particular Claude Desktop build and will drift. So the reliable mechanism is
+// the plain-text warning on the API-key wizard page, which is always shown
+// whenever the MCP component is selected and cannot silently stop working.
+// Everything below is a convenience layered on top: if it correctly spots
+// Desktop we offer to close it, and if it never matches again after some future
+// update, the user still got told.
+//
+// Matching is deliberately conservative. It requires BOTH a claude.exe process
+// AND a main window title, because Claude Desktop is a GUI app and the Claude
+// Code processes that share the image name are not. Paths are used only to
+// exclude, never to include, so a renamed Desktop path degrades to "not
+// detected" rather than to "kill something else".
+function ClaudeDesktopFilter: String;
+begin
+  Result := 'Get-Process -Name claude -ErrorAction SilentlyContinue | ' +
+            'Where-Object { $_.MainWindowTitle -and $_.Path ' +
+            '-and $_.Path -notmatch ''claude-code'' -and $_.Path -notmatch ''\.vscode'' }';
+end;
+
+function IsClaudeDesktopRunning: Boolean;
+var
+  ResultCode: Integer;
+begin
+  Result := False;
+  if Exec('powershell.exe',
+          '-NoProfile -ExecutionPolicy Bypass -Command "if (' + ClaudeDesktopFilter + ') { exit 1 } else { exit 0 }"',
+          '', SW_HIDE, ewWaitUntilTerminated, ResultCode) then
+    Result := (ResultCode = 1);
+end;
+
+// CloseMainWindow, not Stop-Process -Force: this asks the app to shut down
+// normally so it saves its own state. Safe to let it write its config here,
+// because this runs BEFORE merge-claude-config.ps1 adds our entry.
+procedure CloseClaudeDesktop;
+var
+  ResultCode: Integer;
+begin
+  Exec('powershell.exe',
+       '-NoProfile -ExecutionPolicy Bypass -Command "' + ClaudeDesktopFilter +
+       ' | ForEach-Object { $_.CloseMainWindow() | Out-Null }"',
+       '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+end;
+
+// Runs after the wizard, before any files are copied, and so before the [Run]
+// step that merges the connector in.
+function PrepareToInstall(var NeedsRestart: Boolean): String;
+begin
+  Result := '';   // a non-empty result aborts the install; never wanted here
+  if not WizardIsComponentSelected('mcp') then
+    exit;
+  if not IsClaudeDesktopRunning then
+    exit;        // the wizard page already warned; do not nag
+
+  if MsgBox('Claude Desktop appears to be running.'#13#10#13#10 +
+            'It rewrites its configuration when it closes, which would erase the JuLenny '
+            'connector this installer is about to add.'#13#10#13#10 +
+            'Ask Claude Desktop to close now?'#13#10#13#10 +
+            'This does not affect Claude Code.',
+            mbConfirmation, MB_YESNO) = IDYES then
+  begin
+    CloseClaudeDesktop;
+    Sleep(3000);
+    if IsClaudeDesktopRunning then
+      MsgBox('Claude Desktop is still running. Please close it manually, then click OK.',
+             mbInformation, MB_OK);
+  end;
+end;
+
 // Modern folder picker exported by folderpicker.dll (bundled dontcopy, x86,
 // extracted to {tmp} on first call). files: + delayload so a load failure is
 // catchable rather than fatal.
@@ -163,9 +252,16 @@ end;
 
 procedure InitializeWizard;
 begin
+  // The Claude Desktop warning lives here rather than relying on process
+  // detection: this text is always shown when the MCP component is selected,
+  // and cannot stop working when Claude Desktop changes its process name or
+  // install path.
   ApiKeyPage := CreateInputQueryPage(wpSelectComponents,
     'JuLenny API key',
     'Connect the MCP server to your JuLenny account',
+    'IMPORTANT: close Claude Desktop before continuing. It rewrites its' + #13#10 +
+    'configuration when it exits and will erase the connector added here.' + #13#10 +
+    '(Claude Code is unaffected and can stay open.)' + #13#10 + #13#10 +
     'Paste your JuLenny API key. You can leave this blank and add it later in' + #13#10 +
     'Claude Desktop''s configuration. (Only used if you install the MCP server.)');
   ApiKeyPage.Add('API key:', False);
