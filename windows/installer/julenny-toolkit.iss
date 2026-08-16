@@ -45,7 +45,7 @@ SetupIconFile=..\..\windows\JuLennyFHE\Assets\app.ico
 UninstallDisplayIcon={app}\app\JuLennyFHE.exe
 
 [Types]
-Name: "full";   Description: "Everything (app, CLI, and MCP server)"
+Name: "full";   Description: "Everything (app, CLI, MCP server, and example scripts)"
 Name: "custom"; Description: "Choose what to install";               Flags: iscustom
 
 [Components]
