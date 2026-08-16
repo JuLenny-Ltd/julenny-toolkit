@@ -12,6 +12,7 @@ import { registerAuditTools } from './tools/audit.js';
 import { registerToolkitTools } from './tools/toolkit.js';
 import { registerPipelineTools } from './tools/pipeline.js';
 import { registerGuideTools } from './tools/guide.js';
+import { workdir } from './tools/lib/paths.js';
 
 const apiKey = process.env.JULENNY_API_KEY;
 if (!apiKey) {
@@ -32,8 +33,21 @@ const SERVER_INSTRUCTIONS = `JuLenny FHE toolkit - customer-side client for the 
 Two parties run a privacy-preserving computation (e.g. decision-tree inference)
 where neither reveals its data and the platform only ever sees ciphertext. Each
 party drives its own side with these verbs. They are atomic and blind: results
-are file paths and status, never plaintext or secret key bytes. All file
-arguments are workdir-relative (the server is confined to one working folder).
+are file paths and status, never plaintext or secret key bytes.
+
+THE WORKING FOLDER
+  ${workdir()}
+
+Every file argument is a NAME relative to that folder ("customers.csv"), never a
+path. The server is confined there by design: absolute paths, '..' segments and
+symlinks pointing outside are all rejected. Keys, inputs, ciphertexts and
+results all live in that folder or below it.
+
+This means you cannot read a file anywhere else on the user's machine, and there
+is no permission you can request that would change that. If the user's input
+file is not in the working folder, do NOT ask them for its path and do NOT ask
+for filesystem access. Tell them to copy it into the folder named above, then
+refer to it by filename alone.
 
 You do NOT have to memorize the sequence. At any point call
   next_step(permissionId)
