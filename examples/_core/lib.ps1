@@ -81,6 +81,11 @@ $script:JL_SIGNING_PUBLIC = Join-Path $script:JL_SIGNING_DIR 'signing_public_key
 $script:JL_COLLABS_DIR    = Join-Path $script:JL_ROOT 'collabs'
 $script:JL_CURRENT_FILE   = Join-Path $script:JL_ROOT 'CURRENT'
 
+# The scenario's data\ directory, set by the per-side bootstrap. It arrives as an
+# environment variable because the bootstrap launches run.ps1 as a child process,
+# mirroring how the bash bootstraps export JL_DATA_DIR.
+if ($env:JL_DATA_DIR) { $script:JL_DATA_DIR = $env:JL_DATA_DIR }
+
 # Per-collab paths. Set-JlActiveJointKey fills these in; empty until a joint key
 # is chosen (00-init) or resolved at load time.
 $script:JL_WORKDIR  = ''
@@ -310,7 +315,9 @@ function Get-JlActiveJointKey {
             return $current
         }
     }
-    $collabs = Get-JlLocalCollabs
+    # @(...) around the call: a function returning an empty array unrolls to
+    # $null at the call site, and $null.Count throws under Set-StrictMode.
+    $collabs = @(Get-JlLocalCollabs)
     if ($collabs.Count -gt 0) { return $collabs[0].Name }
     return ''
 }

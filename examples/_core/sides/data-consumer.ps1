@@ -12,8 +12,12 @@ $script:JULENNY_OUR_SIDE = 'data-consumer'
 
 # Display labels. A scenario may override JL_OUR_LABEL / JL_PEER_LABEL in its
 # scenario config to fit a narrative; these are the defaults if it does not.
-if (-not $script:JL_OUR_LABEL)  { $script:JL_OUR_LABEL  = 'Beta' }
-if (-not $script:JL_PEER_LABEL) { $script:JL_PEER_LABEL = 'Acme' }
+#
+# Tested with Get-Variable rather than by reading the variable: a phase script
+# launched by run.ps1 inherits Set-StrictMode, under which reading a variable
+# that was never set is a terminating error.
+if (-not (Get-Variable -Name JL_OUR_LABEL  -Scope Script -ErrorAction SilentlyContinue)) { $script:JL_OUR_LABEL  = 'Beta' }
+if (-not (Get-Variable -Name JL_PEER_LABEL -Scope Script -ErrorAction SilentlyContinue)) { $script:JL_PEER_LABEL = 'Acme' }
 $script:JL_ROLE_LABEL = 'data consumer / main'
 
 # This side stores its FHE secret share under this filename. ASYMMETRIC by
