@@ -98,11 +98,38 @@ export function registerGuideTools(server: McpServer, api: JulennyApiClient) {
           }
 
           const entry: RoundEntry | undefined = (ks.roundManifest || []).find((e: RoundEntry) => e.round === ks.currentRound);
-          const myTurn = !!entry && (entry.expectedParty === 'both' || entry.expectedParty === myParty) && !myContribs.includes(ks.currentRound);
           const ksInfo = { state: ks.state, currentRound: ks.currentRound, totalRounds: ks.totalRounds, round: entry ? { messageType: entry.messageType, description: entry.description, expectedParty: entry.expectedParty } : null };
 
-          if (myTurn) {
-            return ok({ ...base, stage: 'keysetup', keysetup: ksInfo, summary: `Your turn: keysetup round ${ks.currentRound}/${ks.totalRounds} (${entry!.messageType} - ${entry!.description}). Contribute it, then publish the round message for the peer.`, nextActions: ['register_signing_key first if you have not for this crypto context', `contribute round ${ks.currentRound} (${entry!.messageType}) via the matching keysetup verb`, 'publish_keysetup_message to send it to the peer'] });
+          // Report EVERY round this party still owes, not just currentRound.
+          //
+          // currentRound only advances once the round it names is satisfied, so when it sits on a
+          // round the peer owes, this side looked "blocked" - even when a LATER round is ours alone
+          // and needs nothing from them. That is exactly why the example scripts bundle pk-share
+          // with relin-round1 and publish both at once: relin-round1 is owner-only and does not
+          // depend on the peer's pk-share at all.
+          //
+          // Gating on currentRound alone stopped an agent one message short and stalled the whole
+          // collaboration, with each side waiting on the other. Scan the manifest instead.
+          const owed: RoundEntry[] = (ks.roundManifest || []).filter((e: RoundEntry) =>
+            (e.expectedParty === 'both' || e.expectedParty === myParty) && !myContribs.includes(e.round),
+          ).sort((a: RoundEntry, b: RoundEntry) => a.round - b.round);
+
+          if (owed.length > 0) {
+            const first = owed[0];
+            const alsoOwed = owed.slice(1);
+            return ok({
+              ...base,
+              stage: 'keysetup',
+              keysetup: { ...ksInfo, roundsYouOwe: owed.map(e => ({ round: e.round, messageType: e.messageType, expectedParty: e.expectedParty })) },
+              summary: owed.length === 1
+                ? `Your turn: keysetup round ${first.round}/${ks.totalRounds} (${first.messageType} - ${first.description}). Contribute it, then publish the round message for the peer.`
+                : `You owe ${owed.length} keysetup rounds: ${owed.map(e => `${e.round} (${e.messageType})`).join(', ')}. Do them ALL now, in order, publishing each. Do not stop after the first and wait: the later ones do not depend on the peer, and stopping early stalls both sides.`,
+              nextActions: [
+                'register_signing_key first if you have not for this crypto context',
+                ...owed.map(e => `contribute round ${e.round} (${e.messageType}) via the matching keysetup verb, then publish_keysetup_message`),
+                ...(alsoOwed.length > 0 ? ['then call next_step again to confirm nothing else is outstanding'] : []),
+              ],
+            });
           }
           return ok({ ...base, stage: 'keysetup-wait', keysetup: ksInfo, summary: `BLOCKED on the ${entry ? entry.expectedParty : 'other'} party for keysetup round ${ks.currentRound}/${ks.totalRounds}. Nothing on this side can progress until they act, and polling alone will never unblock it. TELL THE USER to contact the other party and ask them to run their side now, naming the round that is outstanding. Do not call further keysetup verbs until their message has landed.`, nextActions: ['TELL THE USER to ask the other party to run their side for this round', 'download_keysetup_message (from=peer) once it has landed', 'then call next_step again'] });
         }
