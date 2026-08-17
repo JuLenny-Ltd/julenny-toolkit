@@ -66,11 +66,16 @@ endif()
 # install experience.
 #
 # They go in read-only under /usr/share. dpkg has no interactive flow and cannot
-# cleanly install a subset (it records every file it installs, so a postinst
+# cleanly install a SIDE subset (it records every file it installs, so a postinst
 # that deletes half of them leaves the manifest describing files that are not on
-# disk). Instead the package ships the full tree, and the julenny-toolkit-examples
-# helper asks which side of the collaboration this machine is and copies just
-# that side wherever the operator wants. The postinst only points at the helper.
+# disk). So both sides ship, and the julenny-toolkit-examples helper asks which
+# side this machine is and copies just that side wherever the operator wants.
+# The postinst only points at the helper.
+#
+# The PowerShell twins are a different matter and are excluded here: nothing on a
+# Debian host can run them, and choosing what goes INTO the package is a build-time
+# decision, so dpkg never records them and there is no manifest to keep honest.
+# The Windows installer excludes the .sh and .env side of the same tree.
 #
 # CPACK_STRIP_FILES is ON but affects binaries only; shell scripts are untouched.
 # ----------------------------------------------------------------------------
@@ -78,7 +83,8 @@ install(DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/examples/"
     DESTINATION share/julenny-toolkit/examples
     COMPONENT runtime
     USE_SOURCE_PERMISSIONS
-    PATTERN ".git" EXCLUDE)
+    PATTERN ".git" EXCLUDE
+    PATTERN "*.ps1" EXCLUDE)
 
 install(PROGRAMS "${CMAKE_CURRENT_SOURCE_DIR}/linux/julenny-toolkit-examples"
     DESTINATION bin COMPONENT runtime)

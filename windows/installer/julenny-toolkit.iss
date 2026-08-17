@@ -77,7 +77,10 @@ Source: "{#AppSourceDir}\*";                              DestDir: "{app}\app"; 
 ;     /usr/share/julenny-toolkit/examples. The helper below copies the operator's
 ;     chosen side out to a writable folder; it stays installed so they can re-run
 ;     it later to switch side or make another copy. ---
-Source: "..\..\examples\*";                               DestDir: "{app}\examples"; Components: examples; Flags: ignoreversion recursesubdirs createallsubdirs
+;     Excludes the bash half: nothing on Windows runs a .sh, and the .env side
+;     profiles are the bash twins of sides\*.ps1. The .deb excludes the .ps1 half
+;     of the same tree. ---
+Source: "..\..\examples\*";                               DestDir: "{app}\examples"; Components: examples; Flags: ignoreversion recursesubdirs createallsubdirs; Excludes: "*.sh,*.env"
 Source: "julenny-toolkit-examples.ps1";                   DestDir: "{app}"; Components: examples; Flags: ignoreversion
 
 [Icons]
