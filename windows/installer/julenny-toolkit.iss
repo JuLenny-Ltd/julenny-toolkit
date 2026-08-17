@@ -189,7 +189,7 @@ begin
     exit;        // the wizard page already warned; do not nag
 
   if MsgBox('Claude Desktop appears to be running.'#13#10#13#10 +
-            'It rewrites its configuration when it closes, which would erase the JuLenny '
+            'It rewrites its configuration when it closes, which would erase the JuLenny ' +
             'connector this installer is about to add.'#13#10#13#10 +
             'Ask Claude Desktop to close now?'#13#10#13#10 +
             'This does not affect Claude Code.',
