@@ -44,13 +44,24 @@ export function registerGuideTools(server: McpServer, api: JulennyApiClient) {
         const amViewer: boolean = perm.resultVisibility === role;
         const leadFlag: boolean = role === 'dataOwner'; // owner == keysetup lead
 
+        // An INTERNAL grant is a solo self-test: one company on both sides. It follows a
+        // different sequence (see SOLO SELF-TEST in the server instructions) and, critically,
+        // its keysetup is reported COMPLETE at creation while holding no keys. The stage
+        // machine below is built for the two-party flow, so flag the difference rather than
+        // silently routing a solo caller down it.
+        const isSolo = perm.grantType === 'internal';
+
         const base = {
           permissionId: p.permissionId,
           role,
           resultVisibility: perm.resultVisibility,
-          youAre: amViewer ? 'result viewer' : 'result releaser',
+          youAre: isSolo ? 'both parties (solo self-test)' : (amViewer ? 'result viewer' : 'result releaser'),
           function: perm.fheFunction,
           functionVersion: perm.functionVersion,
+          ...(isSolo ? {
+            grantType: 'internal',
+            soloWarning: 'SOLO SELF-TEST. Keysetup shows complete but this grant may hold NO KEYS - that is how internal grants are created. Before encrypting or running, confirm you have built and registered the joint public key and the final relinearization key yourself (SOLO SELF-TEST in the server instructions). Skipping that spends a credit and fails inside the engine. There is no release step and no peer to wait for; decrypt with TWO partial_decrypt calls (one per secret share) and decrypt_result.',
+          } : {}),
         };
 
         // ---- expiry / terminal ----

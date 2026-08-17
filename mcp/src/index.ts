@@ -109,9 +109,54 @@ STAGE 4 - DECRYPT (threshold; both parties contribute one partial)
     plaintext is written to a workdir file - read it from the filesystem; the
     verb returns only the path, never the values.
 
-SCRIPTS PARITY: the same flow ships as interactive shell scripts (the 00-06
-example scripts). The MCP path and the scripts are interchangeable and produce
-byte-identical keys and results; you never need the scripts to use the MCP.`;
+SOLO SELF-TEST (one company, no partner) - a DIFFERENT sequence
+  A trial account can only create an INTERNAL permission: its own company granting
+  to itself. Use create_self_test_permission. There is no counterparty, so there is
+  no keysetup exchange, no release step, and you decrypt your own result.
+
+  THE TRAP: the platform marks an internal permission's keysetup "complete" at
+  creation, but it holds NO KEYS. The maths still needs them: any function that
+  multiplies two ciphertexts requires a relinearization key, and that key only
+  exists after a 4-round protocol. If you skip this, estimate_execution succeeds,
+  trigger_execution consumes a credit, and the run fails inside the engine with
+  "Call EvalMultKeyGen()". Only federated-average needs no evaluation keys.
+
+  So YOU play both parties, locally:
+   1. signing_keygen, then register_signing_key for the crypto context.
+   2. keysetup_contribute role 'lead'  -> skA + pkA
+      keysetup_contribute role 'main' with peerShare=pkA -> skB + the JOINT public
+      key. KEEP BOTH SECRETS; losing either makes every result unreadable.
+   3. relin_contribute round 1 role 'lead'   (secretKey skA)
+      relin_contribute round 1 role 'main'   (secretKey skB, peerShare = the above)
+      relin_combine    round 1               -> combined round 1
+      relin_contribute round 2 for EACH secret (skA, skB), passing combinedR1 and
+      the joint public key
+      relin_combine    round 2               -> the FINAL relin key
+      Do NOT register a round-1 output as the final key. It is a partial; the
+      platform accepts it, the run succeeds, and the answer is garbage.
+      sum_/rotation_ verbs follow the same shape, only where requiredEvalKeys asks.
+   4. publish_final_keys with the JOINT public key and the FINAL relin key.
+      For an internal grant your single submission is compared against itself and
+      completes immediately.
+   5. encrypt under the JOINT public key (not the lead's contribution), upload,
+      declare_input_dataset. A two-input function needs BOTH inputs from you.
+      Use list_workdir_files and ASK THE USER which file is which input.
+   6. estimate_execution, trigger_execution. Internal runs go straight to
+      'succeeded' - there is no awaiting-release.
+   7. download_result, then partial_decrypt TWICE (once per secret share, with
+      lead:true on the one from the 'lead' keypair), then decrypt_result to
+      combine both partials.
+   8. For an -itemized function, resolve_matches to name the records, then TELL THE
+      USER the file path it returns. Do not try to read the file.
+
+  Input CSVs for the overlap functions need a HEADER ROW: the definition sets
+  skipHeader, so the first line is always discarded. Keep the sets small - records
+  are hashed into slots, so expected false matches are roughly
+  (rows_A x rows_B) / slots. There are never false negatives.
+
+SCRIPTS PARITY: the two-party flow also ships as interactive shell scripts (the
+00-06 example scripts) and the two paths produce byte-identical keys and results.
+The scripts CANNOT drive a solo self-test: they hardcode an external grant type.`;
 
 const server = new McpServer({
   name: 'JuLenny',
