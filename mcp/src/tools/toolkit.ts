@@ -26,6 +26,7 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import { readdirSync, statSync } from 'node:fs';
+import { readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { runCli } from './lib/cli.js';
 import { resolveInWorkdir, workdir } from './lib/paths.js';
@@ -567,6 +568,84 @@ export function registerToolkitTools(server: McpServer) {
         if (!r.ok) return fail(r.error || 'inspect failed', { exitCode: r.exitCode });
         const j = (r.json ?? {}) as Record<string, unknown>;
         return ok({ fileBytes: j.fileBytes, contextSpec: j.contextSpec, metadata: j.describe });
+      } catch (e) {
+        return fail(e instanceof Error ? e.message : 'invalid parameters');
+      }
+    },
+  );
+
+  // ---- resolve_matches (the last mile of an itemized run) ----
+  //
+  // An itemized result is a sparse vector over the context's slots. A non-zero slot
+  // is a HASH BUCKET, not a row number - there is no arithmetic from slot to line -
+  // so the only way to name the matching records is to re-hash the local CSV with
+  // the same schema and see which records land in those buckets.
+  //
+  // Deliberately ONE verb rather than "read the slots, then resolve them": the slot
+  // list IS the answer in encoded form, so handing it back to the model would leak
+  // the result. This reads the combine output itself, derives the slots, runs the
+  // resolution, writes the matched records to a workdir file, and returns only a
+  // path and a count. The model never sees a record or a slot index.
+  server.tool(
+    'resolve_matches',
+    "Turn an itemized result into the list of YOUR records that matched, writing them to a workdir file. Takes the plaintext file produced by decrypt_result plus the local CSV you encrypted for that input. Returns a file path and a match count only - never the records themselves, and never the slot positions (those are the answer in encoded form). Tell the user the file path so they can read it; do not attempt to read it yourself.",
+    {
+      plaintext: z.string().describe("Workdir-relative plaintext file from decrypt_result (the combine --out-file JSON)"),
+      csv: z.string().describe('Workdir-relative local CSV that was encrypted for this input; its records are re-hashed to find the matches'),
+      functionDef: z.string().describe('Workdir-relative signed function-definition file (supplies the schema and schemaParams, so resolution hashes exactly as encryption did)'),
+      inputName: z.string().describe("Which function input this CSV was encrypted as (e.g. 'dataset_a')"),
+      contextSpec: z.string().describe('Crypto context spec'),
+      output: z.string().describe('Workdir-relative file to write the matched records to'),
+    },
+    async (p) => {
+      try {
+        // The combine --out-file JSON carries nonZeroValues as an object keyed by
+        // slot index. Read it here so the slots never travel through the model.
+        let slots: string[];
+        try {
+          const parsed = JSON.parse(await readFile(resolveInWorkdir(p.plaintext), 'utf8')) as {
+            nonZeroValues?: Record<string, number>;
+          };
+          slots = Object.keys(parsed.nonZeroValues ?? {});
+        } catch (e) {
+          return fail(`could not read the plaintext file '${p.plaintext}': ${(e as Error).message}. It must be the file decrypt_result wrote.`);
+        }
+        if (slots.length === 0) {
+          return ok({
+            matchCount: 0,
+            outputPath: null,
+            summary: 'No non-zero slots in the result: the two sets have no records in common. Nothing to resolve.',
+          });
+        }
+
+        const args = [
+          'crypto', 'resolve-indicator',
+          '--slots', slots.join(','),
+          '--input', resolveInWorkdir(p.csv),
+          '--function-def', resolveInWorkdir(p.functionDef),
+          '--input-name', p.inputName,
+          '--context-spec', p.contextSpec,
+          '--json',
+        ];
+        const r = await runCli(args);
+        if (!r.ok) return fail(r.error || 'resolve-indicator failed', { exitCode: r.exitCode });
+
+        const j = (r.json ?? {}) as { matches?: string[]; matchCount?: number; linesRead?: number; linesSkipped?: number; nonZeroSlotCount?: number };
+        const matches = j.matches ?? [];
+        const outPath = resolveInWorkdir(p.output);
+        await writeFile(outPath, matches.join('\n') + (matches.length ? '\n' : ''), 'utf8');
+
+        return ok({
+          outputPath: p.output,
+          matchCount: j.matchCount ?? matches.length,
+          nonZeroSlotCount: j.nonZeroSlotCount ?? slots.length,
+          linesRead: j.linesRead,
+          linesSkipped: j.linesSkipped,
+          summary: `Wrote ${j.matchCount ?? matches.length} matched record(s) to '${p.output}'. TELL THE USER to open that file; its contents are not returned here by design.`,
+          note: (j.nonZeroSlotCount ?? slots.length) !== (j.matchCount ?? matches.length)
+            ? 'Match count differs from the non-zero slot count. Either two of your own records share a slot, or some non-zero slots belong to records only the other party holds. Both are expected with hash-bucket encoding.'
+            : undefined,
+        });
       } catch (e) {
         return fail(e instanceof Error ? e.message : 'invalid parameters');
       }
