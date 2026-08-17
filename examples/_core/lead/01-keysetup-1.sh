@@ -12,7 +12,7 @@ source "$SCRIPT_DIR/../sides/data-owner.env"
 source "$SCRIPT_DIR/../lib.sh"
 load_session
 
-step "Acme keysetup bundle 1: pk-share + relin-round1 + sum-round1"
+step "Acme keysetup bundle 1: pk-share + relin-round1 (+ sum, only if the function needs one)"
 
 FHE_SECRET="$JL_KEYS_DIR/fhe_secret_key.bin"
 FHE_PUBLIC="$JL_KEYS_DIR/fhe_public_key.bin"
@@ -62,8 +62,8 @@ fi
 
 echo
 success "Bundle 1 uploaded. 3 messages submitted (pk-share, relin-round1, sum-round1)."
-wait_msg "Tell Beta to run on their machine:
-    cd ~/julenny-demo/beta && ./01-keysetup-1.sh
+wait_msg "Tell Beta to run their side of keysetup bundle 1 on their own machine
+(their run.sh / run.ps1 handles it, or the equivalent MCP verbs).
 
 When Beta's bundle 1 is uploaded, come back here and run:
     $SCRIPT_DIR/02-keysetup-2.sh"

@@ -11,7 +11,7 @@ source "$SCRIPT_DIR/../sides/data-consumer.env"
 source "$SCRIPT_DIR/../lib.sh"
 load_session
 
-step "Beta keysetup bundle 1: joint-pk + relin-round1-continue + sum-round1-continue"
+step "Beta keysetup bundle 1: joint-pk + relin-round1-continue (+ sum, only if the function needs one)"
 
 MY_SHARE_SECRET="$JL_KEYS_DIR/my_share_secret.bin"
 JOINT_PK="$JL_KEYS_DIR/joint_public_key.bin"
@@ -82,8 +82,8 @@ fi
 
 echo
 success "Bundle 1 uploaded. 3 messages submitted."
-wait_msg "Tell Acme to run on their machine:
-    cd ~/julenny-demo/acme && ./02-keysetup-2.sh
+wait_msg "Tell Acme to run their side of keysetup bundle 2 on their own machine
+(their run.sh / run.ps1 handles it, or the equivalent MCP verbs).
 
 When Acme's bundle 2 is uploaded, come back here and run:
     $SCRIPT_DIR/02-keysetup-2.sh"

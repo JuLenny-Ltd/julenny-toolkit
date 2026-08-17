@@ -60,8 +60,8 @@ wrap_and_upload "$RELIN_R2" 4 "relin-round2"
 
 echo
 success "Bundle 2 uploaded. Acme's bundle-2 contribution is in."
-wait_msg "Tell Beta to run on their machine:
-    cd ~/julenny-demo/beta && ./02-keysetup-2.sh
+wait_msg "Tell Beta to run their side of keysetup bundle 2 on their own machine
+(their run.sh / run.ps1 handles it, or the equivalent MCP verbs).
 
 Once both sides have finished bundles 1 and 2, finalize the joint keys
 (this is a manual step on both machines, not auto):
