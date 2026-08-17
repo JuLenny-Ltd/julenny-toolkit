@@ -54,6 +54,16 @@ Name: "cli"; Description: "Command-line tool (julenny-toolkit)";              Ty
 Name: "mcp"; Description: "MCP server for Claude Desktop (julenny-mcp)";  Types: full
 Name: "examples"; Description: "Example scripts (integration reference)"; Types: full
 
+; Inno only overwrites files the new version ships; anything a previous version installed and
+; this one no longer does is left behind forever. That is how 27 bash scripts from June were
+; still sitting in {app}\examples after the release that deliberately stopped shipping them to
+; Windows. Stale scripts are worse than clutter here: a customer can run one and get behaviour
+; from a version we no longer support. Clear the read-only reference tree before copying, so
+; {app}\examples is always exactly what this build shipped. Only that folder: never {app}
+; itself, which holds the app, the CLI, the MCP and the uninstaller.
+[InstallDelete]
+Type: filesandordirs; Name: "{app}\examples"; Components: examples
+
 [Files]
 ; --- Installer-only helper: modern folder picker (x86, called during the wizard).
 ;     dontcopy = bundled inside setup.exe, extracted to {tmp} on demand, never

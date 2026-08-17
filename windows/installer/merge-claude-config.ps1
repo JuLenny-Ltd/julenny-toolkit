@@ -12,6 +12,11 @@
 param(
     [Parameter(Mandatory = $true)] [string] $ApiKey,
     [string] $McpExePath = "$env:LOCALAPPDATA\Programs\julenny-toolkit\julenny-mcp.exe",
+    # Absolute path to the crypto CLI the MCP shells out to. Pinned rather than left to
+    # PATH: Claude Desktop inherits whatever PATH existed when it launched, so a fresh
+    # install is invisible to an already-running client, and every crypto verb then fails
+    # with a bare "not found". The installer knows exactly where it put the binary.
+    [string] $ToolkitExePath = "$env:LOCALAPPDATA\Programs\julenny-toolkit\julenny-toolkit.exe",
     [string] $ApiUrl     = "https://julenny.net",
     # Optional. When non-empty, written as JULENNY_WORKDIR; blank = MCP default
     # (%LOCALAPPDATA%\julenny-toolkit\workdir, created on first run).
@@ -66,6 +71,7 @@ foreach ($cfgDir in $cfgDirs) {
     $envObj = [pscustomobject]@{
         JULENNY_API_KEY = $ApiKey
         JULENNY_API_URL = $ApiUrl
+        JULENNY_TOOLKIT_BIN = $ToolkitExePath
     }
     # Only pin a workdir if the user gave one; otherwise the MCP uses its default.
     if (-not [string]::IsNullOrWhiteSpace($Workdir)) {
