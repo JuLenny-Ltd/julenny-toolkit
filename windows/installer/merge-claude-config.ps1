@@ -77,7 +77,11 @@ foreach ($cfgDir in $cfgDirs) {
     }
     $cfg.mcpServers | Add-Member -NotePropertyName $ConnectorName -NotePropertyValue $entry -Force
 
-    $json = $cfg | ConvertTo-Json -Depth 12
+    # Depth must exceed anything Claude Desktop stores in this file, not just our
+    # own entry: the packaged build keeps its whole preferences tree here, and
+    # ConvertTo-Json silently truncates past -Depth, which would corrupt the
+    # user's settings as a side effect of installing a connector.
+    $json = $cfg | ConvertTo-Json -Depth 100
     [System.IO.File]::WriteAllText($cfgPath, $json, $utf8NoBom)
     Write-Host "Merged '$ConnectorName' MCP connector into $cfgPath"
 }
