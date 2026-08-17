@@ -15,7 +15,7 @@
 # Strictly mirrors the web UI's option-B finalization flow: the toolkit binary
 # is offline (combines + signing only); platform calls happen here in bash.
 #
-# Install location: ~/julenny-demo/beta/03-finalize-keysetup.sh
+# Installed wherever julenny-toolkit-examples copied this side's scripts.
 # Run after acme/02-keysetup-2.sh + beta/02-keysetup-2.sh have both finished.
 
 set -euo pipefail
@@ -237,7 +237,12 @@ RESP="$(curl_jl POST "/api/fhe-permissions/$JULENNY_PERMISSION_ID/keysetup/final
     --data-binary "@$SIGNED_OUT")"
 
 # -------- 8. Report --------
-STATE="$(echo "$RESP" | jq -r '.permissionState // .state // empty')"
+# The endpoint returns the state as `grantState`; .permissionState and .state are legacy names
+# it has never used. Reading only those left STATE empty on EVERY submission, so a perfectly
+# successful finalize fell through to the unknown-state branch: it printed "Unexpected response
+# state:" with nothing after it, never wrote the completion marker, and never showed the next
+# step. Legacy names kept as fallbacks.
+STATE="$(echo "$RESP" | jq -r '.grantState // .permissionState // .state // empty')"
 MSG="$(  echo "$RESP" | jq -r '.message    // empty')"
 ERR="$(  echo "$RESP" | jq -r '.error      // empty')"
 
@@ -256,8 +261,8 @@ case "$STATE" in
         info "  Server: $MSG"
         touch "$MARKER"
         echo
-        info "Tell Acme to run:"
-        echo "    cd ~/julenny-demo/acme && ./03-finalize-keysetup.sh"
+        info "Tell Acme to run their finalize step on their own machine"
+        info "(their run.sh / run.ps1 handles it, or the equivalent MCP verbs)."
         ;;
     *)
         if [[ -n "$ERR" ]]; then
