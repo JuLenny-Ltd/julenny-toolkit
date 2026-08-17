@@ -74,6 +74,41 @@ export function registerPermissionTools(server: McpServer, api: JulennyApiClient
     },
   );
 
+  // ---- create_self_test_permission (internal grant; no partner) ----
+  // A separate verb rather than a flag on create_permission, because the two have
+  // disjoint requirements: external needs a partner collaboration id and a result
+  // visibility choice, internal needs neither (one company holds both roles and
+  // decrypts its own result). The platform also takes them on different request
+  // shapes - internal MUST use the `grants` array form, and the legacy single-grant
+  // shape is external-only and rejects grantType 'internal' outright.
+  server.tool(
+    'create_self_test_permission',
+    "Create an INTERNAL (solo self-test) permission: your own company granting to itself, no partner, no counterparty. This is what a trial account uses. It skips the two-party keysetup handshake, which means YOU must build and register the evaluation keys yourself afterwards - follow SOLO SELF-TEST in the server instructions. Without them, any function that multiplies ciphertexts fails inside the engine AFTER consuming a credit. Ask the user which function(s) and how many executions before calling.",
+    {
+      functionSlugs: z.array(z.string()).min(1).describe('One or more function slugs. One permission is created per slug, so a single call can set up a whole self-test sweep. ASK THE USER which functions they want.'),
+      allowedExecutions: z.number().describe('Max executions per function. ASK THE USER; each execution costs credits.'),
+      expirationDate: z.string().optional().describe('ISO expiry date. Omit for none. Cannot be extended later.'),
+    },
+    async (params) => {
+      const data = await api.post('/api/fhe-permissions', {
+        grantType: 'internal',
+        grants: params.functionSlugs.map(slug => ({
+          fheFunction: slug,
+          allowedExecutions: params.allowedExecutions,
+          // Datasets are attached afterwards via declare_input_dataset, exactly as in
+          // the external flow. Binding them at creation is impossible anyway: the
+          // upload endpoint requires a permissionId, so no dataset can exist yet.
+          allowedDatasetIds: [],
+        })),
+        expirationDate: params.expirationDate || null,
+      }) as { permissionIds?: string[] };
+      return { content: [{ type: 'text' as const, text: JSON.stringify({
+        permissionIds: data.permissionIds ?? [],
+        note: 'Created. Keysetup reports COMPLETE but NO keys exist yet. Build and register them (SOLO SELF-TEST in the server instructions) before encrypting or running.',
+      }, null, 2) }] };
+    },
+  );
+
   server.tool(
     'add_executions',
     'Add more executions to an existing permission. Use this when a permission has run out rather than creating a new one: it tops up the existing grant, so the joint keys are kept and no new keysetup is needed. Only the data owner can do this.',
