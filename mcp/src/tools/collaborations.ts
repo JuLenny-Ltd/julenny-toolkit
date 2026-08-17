@@ -27,9 +27,9 @@ export function registerCollaborationTools(server: McpServer, api: JulennyApiCli
 
   server.tool(
     'create_collaboration',
-    'Create a new collaboration with a partner company. Requires their collaboration ID (XXXX-XXXX format).',
+    'Create a new collaboration with a partner company. Requires their collaboration ID (XXXX-XXXX format). ASK THE USER for the collaboration name and the partner collaboration ID before calling this; do not invent a name. The name is what BOTH companies see in their collaboration list, so a made-up one leaves the partner unable to recognise what they have been invited to.',
     {
-      name: z.string().describe('Name for the collaboration'),
+      name: z.string().describe('Name for the collaboration. Ask the user for this; never invent one.'),
       partnerCollaborationId: z.string().describe('Partner company collaboration ID (XXXX-XXXX)'),
       cryptoContextSpec: z.string().optional().describe('Crypto context (e.g. "bfv-default-v1", "ckks-default-v1")'),
     },
