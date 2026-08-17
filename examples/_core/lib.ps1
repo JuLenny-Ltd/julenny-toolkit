@@ -1302,7 +1302,26 @@ function Invoke-JlInitSession {
     }
     Write-Host ""
 
-    if ($mine.Count -eq 0) {
+    if ($mine.Count -eq 0 -and -not $CanCreatePermission) {
+        # Consumer side: do NOT default into creating one. The data owner creates
+        # the collaboration here, so "none found" nearly always means they have
+        # not created it yet, or this machine is pointed at the wrong account or
+        # host - not that a new collaboration is wanted. Auto-selecting 'n'
+        # silently created a duplicate the owner could not see, leaving the
+        # operator waiting on a peer with nothing to answer.
+        Write-JlWarn "No collaborations found where you're the $myRoleName."
+        Write-JlWarn "In the normal flow $($script:JL_PEER_LABEL) creates the collaboration and grants you a permission."
+        Write-JlWarn "If you expected one here, check that this API key belongs to the account"
+        Write-JlWarn "$($script:JL_PEER_LABEL) invited, and that the platform host printed above is right."
+        Write-Host ""
+        $createNew = Read-JlValue "Create a NEW collaboration anyway? (y/N)" 'N'
+        if ($createNew -match '^[Yy]') {
+            $projectChoice = 'n'
+        } else {
+            Write-JlInfo "Nothing to do until $($script:JL_PEER_LABEL) creates the collaboration. Exiting."
+            exit 0
+        }
+    } elseif ($mine.Count -eq 0) {
         $projectChoice = 'n'
         Write-JlInfo "No existing collaborations; defaulting to 'n' (create new)."
     } else {

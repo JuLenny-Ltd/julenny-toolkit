@@ -100,8 +100,25 @@ echo "     (uncommon for Beta - usually Acme initiates. Useful for single-machin
 echo
 
 if (( PROJECT_COUNT == 0 )); then
-    PROJECT_CHOICE="n"
-    info "No existing collaborations; defaulting to 'n' (create new)."
+    # Do NOT default into creating one. On this side the data owner creates the
+    # collaboration, so "none found" nearly always means they have not created it
+    # yet, or this machine is pointed at the wrong account or host - not that a
+    # new collaboration is wanted. Auto-selecting 'n' here silently created a
+    # duplicate collaboration the owner could not see, which is worse than
+    # stopping, because the operator then waits on a peer who has nothing to
+    # answer.
+    warn "No collaborations found where you're the data consumer."
+    warn "In the normal flow ${JL_PEER_LABEL} creates the collaboration and grants you a permission."
+    warn "If you expected one here, check that this API key belongs to the account"
+    warn "${JL_PEER_LABEL} invited, and that the platform host printed above is right."
+    echo
+    prompt_for CREATE_NEW "Create a NEW collaboration anyway? (y/N)" "N"
+    if [[ "${CREATE_NEW,,}" == "y" || "${CREATE_NEW,,}" == "yes" ]]; then
+        PROJECT_CHOICE="n"
+    else
+        info "Nothing to do until ${JL_PEER_LABEL} creates the collaboration. Exiting."
+        exit 0
+    fi
 else
     prompt_for PROJECT_CHOICE "Pick a collaboration (1-$PROJECT_COUNT, or n)" "1"
 fi
