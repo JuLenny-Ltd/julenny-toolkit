@@ -443,17 +443,26 @@ wrap_and_upload() {
     fi
 }
 
+# Where the interactive prompts read from. The controlling terminal when there
+# is one, otherwise stdin so a piped run still works. The numbered phase scripts
+# are subprocesses of run.sh and inherit whatever stdin the driver had; when
+# that is not the keyboard, a plain `read` returns nothing and, under
+# `set -euo pipefail`, takes the whole run down with no message on screen.
+if [[ -r /dev/tty ]]; then JL_TTY="/dev/tty"; else JL_TTY="/dev/stdin"; fi
+
 prompt_for() {
     local var_name="$1"
     local prompt_text="$2"
     local default_val="${3:-}"
-    local value
+    local value=""
 
+    # `|| true`: end-of-input must surface as an empty answer we can report on,
+    # never as a silent set -e exit.
     if [[ -n "$default_val" ]]; then
-        read -r -p "$prompt_text [$default_val]: " value
+        read -r -p "$prompt_text [$default_val]: " value < "$JL_TTY" || true
         value="${value:-$default_val}"
     else
-        read -r -p "$prompt_text: " value
+        read -r -p "$prompt_text: " value < "$JL_TTY" || true
     fi
     eval "$var_name=\"\$value\""
 }
@@ -461,9 +470,28 @@ prompt_for() {
 prompt_secret() {
     local var_name="$1"
     local prompt_text="$2"
-    local value
-    read -r -s -p "$prompt_text: " value
+    local value=""
+    # Say up front that nothing will appear. A silent prompt with no echo and no
+    # confirmation looks like a frozen terminal, and the operator cannot tell
+    # whether a paste registered.
+    echo "  (input is hidden - paste or type, then press Enter)" >&2
+    read -r -s -p "$prompt_text: " value < "$JL_TTY" || true
     echo
+    # Terminals differ in what they append to a paste. A trailing carriage
+    # return or space would leave the value looking correct while failing the
+    # sk_live_ prefix check, so trim before reporting or validating.
+    value="${value//$'\r'/}"
+    value="${value#"${value%%[![:space:]]*}"}"
+    value="${value%"${value##*[![:space:]]}"}"
+    # Confirm receipt without revealing the value: length, plus the first few
+    # characters when it looks like an API key, so a mis-paste is obvious.
+    if [[ -z "$value" ]]; then
+        warn "Nothing received. If you pasted, the terminal may not have accepted it - try again."
+    elif [[ "$value" == sk_live_* ]]; then
+        success "Received ${#value} characters, starting 'sk_live_'."
+    else
+        info "Received ${#value} characters."
+    fi
     eval "$var_name=\"\$value\""
 }
 

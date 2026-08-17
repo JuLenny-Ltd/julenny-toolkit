@@ -41,9 +41,27 @@ migrate_legacy_workdir_if_needed
 step "JuLenny collaboration setup ($JL_OUR_LABEL: $JL_ROLE_LABEL)"
 
 # -------- API connection --------
+# An inherited JULENNY_API_BASE is honoured so a run can be pointed at a staging
+# host, but it is announced rather than applied silently: a stale value sends
+# every call to the wrong host, and the only symptom is an empty collaboration
+# list, which reads as "you have no collaborations".
 JULENNY_API_BASE="${JULENNY_API_BASE:-https://julenny.net}"
+if [[ "$JULENNY_API_BASE" != "https://julenny.net" ]]; then
+    warn "Using a non-default platform host from JULENNY_API_BASE:"
+    warn "    $JULENNY_API_BASE"
+    warn "Unset JULENNY_API_BASE to use https://julenny.net."
+fi
 
-prompt_secret JULENNY_API_KEY "Beta's API key (starts with sk_live_)"
+# A key already exported in the environment wins, so the operator can supply it
+# without an interactive paste:
+#     export JULENNY_API_KEY="$(cat ~/my-key)"
+# Terminals vary in how they treat a pasted secret at a hidden prompt, and this
+# is also the route a scripted or CI run would take.
+if [[ -n "${JULENNY_API_KEY:-}" ]]; then
+    info "Using JULENNY_API_KEY from the environment (${#JULENNY_API_KEY} characters)."
+else
+    prompt_secret JULENNY_API_KEY "Beta's API key (starts with sk_live_)"
+fi
 [[ "$JULENNY_API_KEY" == sk_live_* ]] || die "API key must start with sk_live_"
 
 export JULENNY_API_BASE JULENNY_API_KEY

@@ -180,13 +180,30 @@ function Read-JlValue {
 # config.env and an API header, so a SecureString would only be theatre.
 function Read-JlSecret {
     param([Parameter(Mandatory = $true)][string] $Prompt)
+
+    # Say up front that nothing will appear. A silent prompt with no echo and no
+    # confirmation looks like a frozen terminal, and the operator cannot tell
+    # whether a paste registered.
+    Write-Host "  (input is hidden - paste or type, then press Enter)" -ForegroundColor DarkGray
+
     $secure = Read-Host $Prompt -AsSecureString
     $bstr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($secure)
     try {
-        return [Runtime.InteropServices.Marshal]::PtrToStringBSTR($bstr)
+        $value = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($bstr)
     } finally {
         [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr)
     }
+
+    # Confirm receipt without revealing the value.
+    if ([string]::IsNullOrEmpty($value)) {
+        Write-JlWarn "Nothing received. If you pasted, the terminal may not have accepted it - try again."
+    } elseif ($value.StartsWith('sk_live_')) {
+        Write-JlSuccess "Received $($value.Length) characters, starting 'sk_live_'."
+    } else {
+        Write-JlInfo "Received $($value.Length) characters."
+    }
+
+    return $value
 }
 
 # Offers the scenario's data files ($JL_DATA_DIR) for one-key selection, with
@@ -1217,15 +1234,34 @@ function Invoke-JlInitSession {
     Write-JlStep "JuLenny collaboration setup ($($script:JL_OUR_LABEL): $($script:JL_ROLE_LABEL))"
 
     # -------- API connection --------
+    # An inherited JULENNY_API_BASE is honoured so a run can be pointed at a
+    # staging host, but it is announced rather than applied silently: a stale
+    # value sends every call to the wrong host, and the only symptom is an empty
+    # collaboration list, which reads as "you have no collaborations".
     if ($env:JULENNY_API_BASE) {
         $script:JULENNY_API_BASE = $env:JULENNY_API_BASE
     } else {
         $script:JULENNY_API_BASE = 'https://julenny.net'
     }
-    $script:JULENNY_API_KEY = Read-JlSecret "$($script:JL_OUR_LABEL)'s API key (starts with sk_live_)"
+    if ($script:JULENNY_API_BASE -ne 'https://julenny.net') {
+        Write-JlWarn "Using a non-default platform host from JULENNY_API_BASE:"
+        Write-JlWarn "    $($script:JULENNY_API_BASE)"
+        Write-JlWarn "Clear JULENNY_API_BASE to use https://julenny.net."
+    }
+
+    # A key already in the environment wins, so the operator can supply it
+    # without an interactive paste. Terminals vary in how they treat a pasted
+    # secret at a hidden prompt, and this is the route a scripted run would use.
+    if ($env:JULENNY_API_KEY) {
+        $script:JULENNY_API_KEY = $env:JULENNY_API_KEY
+        Write-JlInfo "Using JULENNY_API_KEY from the environment ($($script:JULENNY_API_KEY.Length) characters)."
+    } else {
+        $script:JULENNY_API_KEY = Read-JlSecret "$($script:JL_OUR_LABEL)'s API key (starts with sk_live_)"
+    }
     if (-not $script:JULENNY_API_KEY.StartsWith('sk_live_')) {
         Stop-JlWithError "API key must start with sk_live_"
     }
+    Write-JlInfo "Platform: $($script:JULENNY_API_BASE)"
 
     if ($script:JULENNY_OUR_SIDE -eq 'data-owner') { $myRoleName = 'dataOwner' } else { $myRoleName = 'dataConsumer' }
 
