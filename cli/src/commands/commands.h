@@ -28,7 +28,12 @@ void register_keys(CLI::App& app,
                    int* exit_code);
 
 struct CryptoSelftestArgs   {
-    std::string context_spec;          // no default; callers must pass --context-spec (or --function-def for encrypt)
+    // Defaulted, unlike the other arg structs. self-test is an INSTALLATION CHECK, so the whole
+    // point is that `julenny-toolkit crypto self-test` works with no arguments at all. Its --help
+    // has always advertised this default, but the member was left empty, so the bare command died
+    // with "error: unknown context spec: " - on the one feature a trial account can run with no
+    // account, no partner and no data of its own.
+    std::string context_spec = "bfv-default-v1";
     bool multi_party = false;   // 2-party in-process: full keysetup + EvalMult + Rotate + threshold decrypt
     bool emit_json = false;
 };
