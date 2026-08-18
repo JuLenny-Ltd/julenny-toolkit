@@ -1007,7 +1007,12 @@ int run_crypto_encrypt(const CryptoEncryptArgs& args) {
         auto slot = static_cast<std::size_t>(
             fnv1a_64(composed) % static_cast<std::uint64_t>(slot_count));
         if (indicator[slot] != 0) ++collisions;
-        indicator[slot] += 1;
+        // SET semantics, deliberately not += 1. Record overlap asks "is this record
+        // present", not "how many rows mention it", so a slot is a membership flag.
+        // Accumulating instead made a person listed twice count twice, which inflated
+        // the overlap total (5 shared people reported as 6) - a wrong answer, not just
+        // a cosmetic one, and duplicates are routine in real customer lists.
+        indicator[slot] = 1;
         ++records_read;
     }
 
