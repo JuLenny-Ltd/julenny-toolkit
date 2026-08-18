@@ -930,6 +930,9 @@ int run_crypto_encrypt(const CryptoEncryptArgs& args) {
     std::size_t lines_seen = 0;
     std::size_t lines_skipped = 0;
     std::size_t collisions = 0;
+    std::size_t duplicate_rows = 0;      // same record listed more than once
+    std::size_t colliding_records = 0;   // genuinely different records sharing a slot
+    std::unordered_map<std::size_t, std::set<std::uint64_t>> slot_full_hashes;
     std::string line;
 
     if (is_weight_vector) {
@@ -1004,9 +1007,22 @@ int run_crypto_encrypt(const CryptoEncryptArgs& args) {
         }
         auto composed = compose_record(trimmed, sep_char, cols);
         if (composed.empty()) { ++lines_skipped; continue; }
+        const auto full_hash = fnv1a_64(composed);
         auto slot = static_cast<std::size_t>(
-            fnv1a_64(composed) % static_cast<std::uint64_t>(slot_count));
+            full_hash % static_cast<std::uint64_t>(slot_count));
         if (indicator[slot] != 0) ++collisions;
+        // Separate the two reasons a slot fills twice. Storing the FULL 64-bit hash
+        // (not the slot) identifies the record: same hash = same composed record, so
+        // a repeat is a duplicate ROW in the input, while a different hash in the same
+        // slot is a genuine collision. Eight bytes per distinct record keeps this cheap
+        // on large inputs. Reporting a single blended "collisions" number, as this used
+        // to, leaves the user unable to tell a harmless duplicate from a false positive.
+        auto& seen_here = slot_full_hashes[slot];
+        if (!seen_here.insert(full_hash).second) {
+            ++duplicate_rows;
+        } else if (seen_here.size() > 1) {
+            ++colliding_records;
+        }
         // SET semantics, deliberately not += 1. Record overlap asks "is this record
         // present", not "how many rows mention it", so a slot is a membership flag.
         // Accumulating instead made a person listed twice count twice, which inflated
@@ -1072,7 +1088,9 @@ int run_crypto_encrypt(const CryptoEncryptArgs& args) {
         out["recordsRead"]       = records_read;
         if (!is_weight_vector) {
             out["uniqueSlotsSet"] = unique_slots;
-            out["hashCollisions"] = collisions;
+            out["hashCollisions"]   = collisions;
+            out["duplicateRows"]    = duplicate_rows;
+            out["collidingRecords"] = colliding_records;
         }
         out["linesSkipped"]      = lines_skipped;
         out["slotCount"]         = slot_count;
@@ -1101,8 +1119,14 @@ int run_crypto_encrypt(const CryptoEncryptArgs& args) {
         std::cout << ")\n";
         if (!is_weight_vector) {
             std::cout << "  Unique slots:    " << unique_slots << "\n";
-            std::cout << "  Collisions:      " << collisions
-                      << " (records hashing to a slot already in use)\n";
+            std::cout << "  Duplicate rows:  " << duplicate_rows
+                      << " (the same record listed more than once)\n";
+            std::cout << "  Collisions:      " << colliding_records
+                      << " (genuinely different records sharing a slot)\n";
+            if (duplicate_rows > 0) {
+                std::cout << "    (duplicates are encoded once, so they do not inflate the\n";
+                std::cout << "     result; no need to de-duplicate the file.)\n";
+            }
         }
         std::cout << "  Skipped lines:   " << lines_skipped
                   << " (blank, comment, or header)\n";
@@ -2113,6 +2137,20 @@ int run_crypto_resolve_indicator(const CryptoResolveIndicatorArgs& args) {
     }
 
     std::vector<std::string> matches;
+    // Two DIFFERENT things make a slot hold more than one of your rows, and users
+    // cannot be expected to tell them apart from a count alone:
+    //
+    //   1. The same record listed twice in your file. compose_record trims every
+    //      field, so "Susan Mitchell ,2002-12-13" and "Susan Mitchell,2002-12-13"
+    //      compose identically. Both rows are the same person, both genuinely match,
+    //      and nothing is wrong. This is by far the common case.
+    //   2. A real hash collision: two GENUINELY DIFFERENT records landing in one slot.
+    //      Here one of them really is a false positive.
+    //
+    // We hold the composed value - the exact bytes that were hashed - so we can tell
+    // these apart exactly rather than leaving a caller to guess. Reporting only the
+    // raw count invites a wrong and alarming explanation.
+    std::unordered_map<std::uint64_t, std::vector<std::string>> matched_by_slot;
     std::size_t lines_seen = 0, lines_skipped = 0;
     bool header_consumed = false;
     std::string line;
@@ -2126,13 +2164,27 @@ int run_crypto_resolve_indicator(const CryptoResolveIndicatorArgs& args) {
         auto slot = fnv1a_64(composed) % static_cast<std::uint64_t>(slot_count);
         if (non_zero_set.contains(slot)) {
             matches.push_back(std::string(trimmed));
+            matched_by_slot[slot].push_back(composed);
         }
     }
+
+    // Classify every slot that matched more than one of our rows.
+    std::size_t duplicate_rows = 0;    // extra rows that are the SAME record
+    std::size_t colliding_slots = 0;   // slots holding genuinely different records
+    for (const auto& [slot, composed_list] : matched_by_slot) {
+        std::set<std::string> distinct(composed_list.begin(), composed_list.end());
+        duplicate_rows += composed_list.size() - distinct.size();
+        if (distinct.size() > 1) ++colliding_slots;
+    }
+    const std::size_t distinct_matches = matches.size() - duplicate_rows;
 
     if (args.emit_json) {
         json out;
         out["status"]            = "ok";
-        out["matchCount"]        = matches.size();
+        out["matchCount"]          = matches.size();
+        out["distinctMatchCount"]  = distinct_matches;
+        out["duplicateRowCount"]   = duplicate_rows;
+        out["collidingSlotCount"]  = colliding_slots;
         out["nonZeroSlotCount"]  = non_zero_set.size();
         out["linesRead"]         = lines_seen;
         out["linesSkipped"]      = lines_skipped;
@@ -2143,6 +2195,16 @@ int run_crypto_resolve_indicator(const CryptoResolveIndicatorArgs& args) {
         std::cout << "  Non-zero slots:   " << non_zero_set.size() << "\n";
         std::cout << "  Lines read:       " << lines_seen << "\n";
         std::cout << "  Lines matched:    " << matches.size() << "\n";
+        if (duplicate_rows > 0) {
+            std::cout << "  Distinct records: " << distinct_matches << "\n";
+            std::cout << "    (" << duplicate_rows << " matched row(s) are the same record listed more\n";
+            std::cout << "     than once in your file - e.g. rows differing only by spacing. They\n";
+            std::cout << "     are genuine matches, not false positives.)\n";
+        }
+        if (colliding_slots > 0) {
+            std::cout << "  Hash collisions:  " << colliding_slots << " slot(s) hold genuinely different\n";
+            std::cout << "     records of yours; one record per affected slot is a false positive.\n";
+        }
         std::cout << "  Matched records:\n";
         for (const auto& m : matches) std::cout << "    " << m << "\n";
         if (matches.empty()) {
