@@ -21,7 +21,7 @@
 ; self-contained build: the Windows App SDK runtime ships inside it and the
 ; customer installs no prerequisites.
 
-#define AppVersion "0.7.0"
+#define AppVersion "0.7.1"
 ; Unpackaged (WindowsPackageType=None, self-contained) WinUI 3 build output (#23).
 #define AppSourceDir "..\..\windows\JuLennyFHE\x64\Release\JuLennyFHE"
 
@@ -106,6 +106,12 @@ Name: "desktopicon"; Description: "Create a desktop shortcut"; Components: app; 
 Root: HKCU; Subkey: "Environment"; ValueType: expandsz; ValueName: "Path"; \
   ValueData: "{app};{olddata}"; Check: NeedsAddPath('{app}'); Components: cli or mcp
 
+; Remember the working folder. Without this an upgrade silently reverted it to the default,
+; and since the [Run] step rewrites JULENNY_WORKDIR in the Claude Desktop config, the user's
+; existing keys and datasets became invisible to the MCP with nothing to indicate why.
+Root: HKCU; Subkey: "Software\JuLenny\Toolkit"; ValueType: string; ValueName: "WorkDir"; \
+  ValueData: "{code:GetWorkdir}"; Flags: uninsdeletevalue; Components: mcp
+
 [Run]
 ; Wire the MCP into Claude Desktop (merge, don't clobber other servers). MCP only.
 Filename: "powershell.exe"; \
@@ -126,6 +132,7 @@ var
   WorkdirPage:      TInputDirWizardPage;
   ExamplesRolePage: TInputOptionWizardPage;
   ExamplesDirPage:  TInputDirWizardPage;
+  PrevWorkdir:      String;
 
 // ---------------------------------------------------------------------------
 // Claude Desktop detection.
@@ -288,7 +295,14 @@ begin
     '(Only used if you install the MCP server.)',
     False, '');
   WorkdirPage.Add('');
-  WorkdirPage.Values[0] := ExpandConstant('{localappdata}\julenny-toolkit\workdir');
+  // Prefer the folder chosen by a previous install; fall back to the default only on a first
+  // install. An upgrade that silently moves the working folder orphans the user's keys.
+  if not RegQueryStringValue(HKCU, 'Software\JuLenny\Toolkit', 'WorkDir', PrevWorkdir) then
+    PrevWorkdir := '';
+  if PrevWorkdir <> '' then
+    WorkdirPage.Values[0] := PrevWorkdir
+  else
+    WorkdirPage.Values[0] := ExpandConstant('{localappdata}\julenny-toolkit\workdir');
   // Swap the legacy folder-tree Browse for the modern IFileDialog picker.
   WorkdirPage.Buttons[0].OnClick := @BrowseClick;
 
