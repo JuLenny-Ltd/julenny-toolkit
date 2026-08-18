@@ -180,7 +180,11 @@ Signing-key registration is the one step `00-init` cannot fully automate. It
 generates the keypair and keeps the secret half locally, then waits while you
 upload the public half through the UI. Everything after that is scripted.
 
-## Single-machine self-test
+## Running both sides on one machine
+
+This is a **two-party** collaboration with both organizations driven from one host, which
+needs two accounts. It is not the platform's solo self-test (an internal permission for a
+single organization); see the main README for that.
 
 To drive both sides on one host, give each shell its own state root. Override
 `JL_ROOT`, not `JL_WORKDIR`: `JL_WORKDIR` is derived per collaboration and gets

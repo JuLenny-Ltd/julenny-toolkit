@@ -81,7 +81,8 @@ Only Claude Desktop is configured for you, by the Windows installer. Every other
       "command": "C:\\Users\\<you>\\AppData\\Local\\Programs\\julenny-toolkit\\julenny-mcp.exe",
       "env": {
         "JULENNY_API_KEY": "sk_live_...",
-        "JULENNY_API_URL": "https://julenny.net"
+        "JULENNY_API_URL": "https://julenny.net",
+        "JULENNY_WORKDIR": "C:\\Users\\<you>\\julenny-workdir"
       }
     }
   }
@@ -98,11 +99,15 @@ On Linux the command is simply `julenny-mcp`, since the `.deb` puts it on your `
 | VS Code | `.vscode/mcp.json`, which uses a `servers` key rather than `mcpServers` |
 | Windsurf, Zed, Continue | their own MCP config; the `mcpServers` shape above applies |
 
+`JULENNY_WORKDIR` is the folder the server reads and writes. It is confined to that folder by design: absolute paths, `..` segments and symlinks pointing outside are all rejected, so the server cannot read anything else on your machine. Put the files you want encrypted inside it and refer to them by name. If the variable is omitted, the default is `%LOCALAPPDATA%\julenny-toolkit\workdir` on Windows and `$XDG_DATA_HOME/julenny-toolkit/workdir` on Linux.
+
 The MCP server never performs cryptography itself. It shells out to the `julenny-toolkit` CLI for every key operation and only ever transports ciphertext, so your keys and plaintext stay on your machine regardless of which client drives it.
 
 ## Quick start
 
 The fastest way to see the toolkit in action is to run the end-to-end example. Each example folder represents one organization in a two-party collaboration; you can run them on two machines (one the data owner, one the data consumer) or as two shells on the same machine for local testing.
+
+These scripts drive a **two-party collaboration**: two organizations, each with its own account. They cannot set up a solo run against your own data alone. For that, see [Running a solo self-test](#running-a-solo-self-test) below.
 
 One menu-driven driver runs the whole lifecycle and picks up wherever you left off:
 
@@ -129,6 +134,16 @@ The driver chains the numbered phase scripts (`00-init` through `06-decrypt`), w
 Windows needs nothing beyond the toolkit itself: the PowerShell scripts use built-in cmdlets, so there is no `jq` or `curl` to install and no WSL.
 
 See [`examples/README.md`](examples/README.md) for the full phase breakdown, the scenarios available, and the single-machine self-test setup.
+
+## Running a solo self-test
+
+A solo self-test is one organization running a function against its own data, with no partner. The platform calls this an **internal permission**, and it is what a trial account uses. You play both sides: the toolkit generates two key shares locally, you encrypt two of your own files, the platform computes on the ciphertext, and you decrypt the answer yourself.
+
+The quickest route is the MCP server, which can drive the whole sequence and ask you which files to use. Ask your assistant for a self-test and it will create the permission, generate the keys, encrypt, upload, run, decrypt, and hand you the path to the matched records. It gives you a **file path** rather than reading the answer out, because the connector never receives your plaintext or the raw result.
+
+For the full command sequence on Windows and Linux, see the self-test section of the [JuLenny FAQ](https://julenny.net/faq).
+
+Note that a solo run still needs real evaluation keys, since the mathematics is unchanged: any function that multiplies two ciphertexts requires a relinearization key. The toolkit generates these locally and the sequence is scripted in the FAQ.
 
 ## What's in this repository
 
