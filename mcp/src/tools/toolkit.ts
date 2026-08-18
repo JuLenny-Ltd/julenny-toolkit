@@ -630,21 +630,51 @@ export function registerToolkitTools(server: McpServer) {
         const r = await runCli(args);
         if (!r.ok) return fail(r.error || 'resolve-indicator failed', { exitCode: r.exitCode });
 
-        const j = (r.json ?? {}) as { matches?: string[]; matchCount?: number; linesRead?: number; linesSkipped?: number; nonZeroSlotCount?: number };
+        const j = (r.json ?? {}) as { matches?: string[]; matchCount?: number; distinctMatchCount?: number; duplicateRowCount?: number; collidingSlotCount?: number; linesRead?: number; linesSkipped?: number; nonZeroSlotCount?: number };
         const matches = j.matches ?? [];
         const outPath = resolveInWorkdir(p.output);
         await writeFile(outPath, matches.join('\n') + (matches.length ? '\n' : ''), 'utf8');
 
+        const matchCount = j.matchCount ?? matches.length;
+        const duplicateRows = j.duplicateRowCount ?? 0;
+        const collidingSlots = j.collidingSlotCount ?? 0;
+        const distinctMatches = j.distinctMatchCount ?? matchCount;
+
+        // Explain a count difference EXACTLY, or say nothing. The CLI has already
+        // classified it by comparing the composed values that were actually hashed,
+        // so there is no need to speculate - and speculating here is harmful: an
+        // earlier version offered "two of your records share a slot" as a guess,
+        // and an assistant relayed it to the user as a false-positive warning with
+        // advice to widen the slot count, when the real cause was simply the same
+        // person listed twice. Never hand the model an ambiguity it will resolve
+        // by picking the scarier branch.
+        const notes: string[] = [];
+        if (duplicateRows > 0) {
+          notes.push(
+            `Your CSV lists ${duplicateRows} matched record(s) more than once (rows that are identical once surrounding spaces are trimmed, which is how they were encrypted). That is why this side shows ${matchCount} matched rows but only ${distinctMatches} distinct records. All of them are genuine matches - none is a false positive, and nothing about the setup needs changing. If the other side reports ${distinctMatches}, the two agree.`,
+          );
+        }
+        if (collidingSlots > 0) {
+          notes.push(
+            `${collidingSlots} slot(s) hold genuinely different records of yours - a real hash collision, so one record per affected slot is a false positive. This is inherent to indicator-hash encoding at roughly (yourRecords x theirRecords / slots). Re-running will not change it.`,
+          );
+        }
+        if (duplicateRows === 0 && collidingSlots === 0 && (j.nonZeroSlotCount ?? slots.length) !== matchCount) {
+          notes.push(
+            'Some non-zero slots correspond to records only the other party holds, so their count can exceed yours. Expected, and not an error.',
+          );
+        }
+
         return ok({
           outputPath: p.output,
-          matchCount: j.matchCount ?? matches.length,
+          matchCount,
+          distinctMatchCount: distinctMatches,
+          duplicateRowCount: duplicateRows,
           nonZeroSlotCount: j.nonZeroSlotCount ?? slots.length,
           linesRead: j.linesRead,
           linesSkipped: j.linesSkipped,
-          summary: `Wrote ${j.matchCount ?? matches.length} matched record(s) to '${p.output}'. TELL THE USER to open that file; its contents are not returned here by design.`,
-          note: (j.nonZeroSlotCount ?? slots.length) !== (j.matchCount ?? matches.length)
-            ? 'Match count differs from the non-zero slot count. Either two of your own records share a slot, or some non-zero slots belong to records only the other party holds. Both are expected with hash-bucket encoding.'
-            : undefined,
+          summary: `Wrote ${matchCount} matched record(s) to '${p.output}'. TELL THE USER to open that file; its contents are not returned here by design.`,
+          note: notes.length ? notes.join(' ') : undefined,
         });
       } catch (e) {
         return fail(e instanceof Error ? e.message : 'invalid parameters');
