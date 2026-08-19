@@ -1749,7 +1749,15 @@ int run_crypto_partial_decrypt(const CryptoPartialDecryptArgs& args) {
         : ctx.partial_decrypt_main(sk, ct);
     auto partial_bytes = partial.serialize();
 
-    std::filesystem::create_directories(std::filesystem::path(args.output_path).parent_path());
+    // Guard has_parent_path() as every other output path in this file does. A bare
+    // filename (--output partial.bin) has an EMPTY parent, and create_directories("")
+    // throws; nothing here catches it, so the process died via abort() with exit code
+    // 0xC0000409 and not one byte on stdout or stderr. The crypto had already succeeded -
+    // only the directory bookkeeping failed - but from outside it looked like threshold
+    // decryption was broken. The MCP always passes absolute paths, so this only ever hit
+    // people driving the CLI directly, which is exactly what the docs tell them to do.
+    const std::filesystem::path out_path(args.output_path);
+    if (out_path.has_parent_path()) std::filesystem::create_directories(out_path.parent_path());
     write_bytes(args.output_path, partial_bytes);
 
     if (args.emit_json) {
