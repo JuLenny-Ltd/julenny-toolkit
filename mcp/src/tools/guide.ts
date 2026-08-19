@@ -134,6 +134,34 @@ export function registerGuideTools(server: McpServer, api: JulennyApiClient) {
           return ok({ ...base, stage: 'keysetup-wait', keysetup: ksInfo, summary: `BLOCKED on the ${entry ? entry.expectedParty : 'other'} party for keysetup round ${ks.currentRound}/${ks.totalRounds}. Nothing on this side can progress until they act, and polling alone will never unblock it. TELL THE USER to contact the other party and ask them to run their side now, naming the round that is outstanding. Do not call further keysetup verbs until their message has landed.`, nextActions: ['TELL THE USER to ask the other party to run their side for this round', 'download_keysetup_message (from=peer) once it has landed', 'then call next_step again'] });
         }
 
+        // A solo (internal) grant is created with keysetupState already 'complete' while
+        // holding NO keys, so the two-party gate above never fires and the caller was routed
+        // straight to 'provide-inputs' - told to encrypt under a joint key that does not
+        // exist. The soloWarning said the opposite in the same response, leaving the agent to
+        // reconcile a contradiction against its own tool. Settle it from live state instead:
+        // if no final keys are registered, this IS the keysetup stage, whatever state claims.
+        if (isSolo) {
+          let soloKs: any = null;
+          try {
+            soloKs = await api.get('/api/fhe-permissions/' + p.permissionId + '/keysetup');
+          } catch { soloKs = null; }
+          const finalSubs = (soloKs && soloKs.finalKeySubmissions) || {};
+          if (Object.keys(finalSubs).length === 0) {
+            return ok({
+              ...base,
+              stage: 'keysetup',
+              summary: 'SOLO SELF-TEST: no final keys are registered for this permission yet, even though keysetup reports complete. You hold BOTH sides, so nothing is blocked on anyone else - build and register the keys yourself before encrypting. Follow SOLO SELF-TEST in the server instructions.',
+              nextActions: [
+                'signing_keygen, then register_signing_key for the crypto context',
+                "keysetup_contribute role 'lead', then role 'main' with peerShare - keep BOTH secrets",
+                'relin_contribute / relin_combine rounds 1 and 2 (plus sum_/rotation_ verbs only if requiredEvalKeys lists them)',
+                'publish_final_keys with the JOINT public key and the FINAL relin key',
+                'then call next_step again',
+              ],
+            });
+          }
+        }
+
         // ---- permission is active: fetch def inputs + declared datasets ----
         const v = perm.functionVersion || '1.0.0';
         let def: any;
@@ -146,7 +174,10 @@ export function registerGuideTools(server: McpServer, api: JulennyApiClient) {
         catch { declared = {}; }
         const isDeclared = (name: string) => !!declared?.[name]?.datasetId;
 
-        const myInputs = inputs.filter(i => i.role === fnRole);
+        // Solo means one company holds BOTH roles, so every input is yours. Filtering by
+        // fnRole listed only dataset_a and silently hid dataset_b, which the caller must also
+        // provide - the run then blocks on an input nothing ever asked them for.
+        const myInputs = isSolo ? inputs : inputs.filter(i => i.role === fnRole);
         const missingMine = myInputs.filter(i => !isDeclared(i.name));
         const allDeclared = inputs.every(i => isDeclared(i.name));
 
@@ -189,7 +220,9 @@ export function registerGuideTools(server: McpServer, api: JulennyApiClient) {
         }
 
         // ---- STAGE 3: ready to run (no pending execution) ----
-        if (!allDeclared) {
+        // Solo callers never reach here with undeclared inputs (myInputs covers both roles
+        // above), and there is no peer to be blocked on regardless.
+        if (!allDeclared && !isSolo) {
           return ok({ ...base, stage: 'await-peer-inputs', summary: 'Your inputs are declared. BLOCKED on the other party to declare theirs before an execution can run. TELL THE USER to ask them to upload and declare their input; polling alone will not unblock it.', nextActions: ['TELL THE USER to ask the other party to declare their inputs', 'then call next_step again'] });
         }
         if (role === 'dataConsumer') {
@@ -197,6 +230,11 @@ export function registerGuideTools(server: McpServer, api: JulennyApiClient) {
             return ok({ ...base, stage: 'exhausted', summary: 'All inputs are declared but this permission has no remaining executions.', nextActions: ['request more executions from the data owner (add_executions on their side)'] });
           }
           return ok({ ...base, stage: 'run', remainingExecutions: perm.remainingExecutions, summary: 'All inputs are declared. You are the consumer; trigger the execution.', nextActions: ['estimate_execution (optional cost preview)', 'trigger_execution'] });
+        }
+        if (isSolo) {
+          // There is no consumer to ask: the caller holds both roles. Telling a solo tester to
+          // go and chase a counterparty is advice for a person who does not exist.
+          return ok({ ...base, stage: 'run', remainingExecutions: perm.remainingExecutions, summary: 'All inputs are declared. This is a solo self-test, so you are the consumer as well - trigger the execution yourself. There is nobody to wait for.', nextActions: ['estimate_execution (optional cost preview)', 'trigger_execution'] });
         }
         return ok({ ...base, stage: 'await-trigger', summary: 'All inputs are declared. You are the data owner. BLOCKED on the consumer to trigger the execution; you then release or they view, per resultVisibility. TELL THE USER to ask the consumer to run it; polling alone will not unblock it.', nextActions: ['TELL THE USER to ask the consumer to trigger the execution', 'then call next_step again'] });
       } catch (e) {
