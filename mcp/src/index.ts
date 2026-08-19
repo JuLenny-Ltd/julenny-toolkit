@@ -149,6 +149,22 @@ SOLO SELF-TEST (one company, no partner) - a DIFFERENT sequence
    8. For an -itemized function, resolve_matches to name the records, then TELL THE
       USER the file path it returns. Do not try to read the file.
 
+  EVERY function supports a self-test, not just record overlap, and the work varies with
+  requiredEvalKeys. Read it off the function-def and build exactly those keys - building
+  one it does not list is as wrong as skipping one it does. In rough order of effort:
+  federated-average (no evaluation keys at all - the easiest first test), then the
+  relinearization-only functions (joint-record-overlap-itemized, negotiation-matrix-itemized,
+  decision-tree-inference), then the ones that add sum (joint-record-overlap-count,
+  negotiation-matrix-count), then rule-based-cross-match (relin + sum + rotation, and its
+  rotation indices must be derived from the rule_pairs file first).
+
+  ALWAYS CHECK THE ANSWER. Every function ships sample data with a documented expected
+  result in examples/SELF-TEST.md. A run that merely completes proves the pipeline works;
+  only a run that MATCHES the expected value proves the encoding, keys, circuit and
+  decryption are all correct. Partial data corruption produces a successful run with a
+  plausible wrong answer, and without a reference there is no way to tell them apart. If
+  the user supplied their own data instead, say plainly that the result cannot be verified.
+
   Input CSVs for the overlap functions need a HEADER ROW: the definition sets
   skipHeader, so the first line is always discarded. Keep the sets small - records
   are hashed into slots, so expected false matches are roughly

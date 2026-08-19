@@ -139,7 +139,11 @@ See [`examples/README.md`](examples/README.md) for the full phase breakdown, the
 
 A solo self-test is one organization running a function against its own data, with no partner. The platform calls this an **internal permission**, and it is what a trial account uses. You play both sides: the toolkit generates two key shares locally, you encrypt two of your own files, the platform computes on the ciphertext, and you decrypt the answer yourself.
 
-The quickest route is the MCP server, which can drive the whole sequence and ask you which files to use. Ask your assistant for a self-test and it will create the permission, generate the keys, encrypt, upload, run, decrypt, and hand you the path to the matched records. It gives you a **file path** rather than reading the answer out, because the connector never receives your plaintext or the raw result.
+Every function supports it, not just record overlap. The amount of work varies with the evaluation keys a function needs, because a self-test has to build all of them itself: `federated-average` needs none and is the easiest place to start, while `rule-based-cross-match` needs three key protocols plus rotation indices.
+
+The quickest route is the MCP server, which can drive the whole sequence and ask you which files to use. Ask your assistant for a self-test and it will create the permission, generate the keys, encrypt, upload, run, decrypt, and hand you the path to the result. It gives you a **file path** rather than reading the answer out, because the connector never receives your plaintext or the raw result.
+
+Every function ships sample data with a **documented expected answer**. Check your result against it: a run that completes only proves the pipeline works, while a run that matches the expected value proves the encoding, keys, circuit and decryption are all correct. See [`examples/SELF-TEST.md`](examples/SELF-TEST.md) for the per-function inputs and expected results.
 
 For the full command sequence on Windows and Linux, see the self-test section of the [JuLenny FAQ](https://julenny.net/faq).
 
