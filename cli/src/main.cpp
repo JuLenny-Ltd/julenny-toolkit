@@ -67,10 +67,23 @@ int main(int argc, char** argv) {
                                        crypto_derive_rotation_indices_args,
                                        crypto_inspect_args, &exit_code);
 
-    CLI11_PARSE(app, argc, argv);
+    // Nothing used to catch an escaping exception, so any throw inside a subcommand
+    // reached std::terminate and the process died via abort() - exit code 0xC0000409 on
+    // Windows, with the what() string lost and NOTHING on stdout or stderr. A one-line
+    // filesystem error in partial-decrypt was indistinguishable from broken threshold
+    // decryption. Whatever fails next, the user gets to read why.
+    try {
+        CLI11_PARSE(app, argc, argv);
 
-    if (app.get_subcommands().empty()) {
-        std::cout << app.help() << std::endl;
+        if (app.get_subcommands().empty()) {
+            std::cout << app.help() << std::endl;
+        }
+        return exit_code;
+    } catch (const std::exception& e) {
+        std::cerr << "error: " << e.what() << "\n";
+        return 1;
+    } catch (...) {
+        std::cerr << "error: unknown fatal error\n";
+        return 1;
     }
-    return exit_code;
 }
