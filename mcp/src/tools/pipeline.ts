@@ -343,6 +343,49 @@ export function registerPipelineTools(server: McpServer, api: JulennyApiClient) 
   // request-body limit. The verb owns the reference-mode wrap because the objectKey
   // only exists after the upload-url step (a pre-wrapped envelope can't reference it).
   const INLINE_THRESHOLD_BYTES = 15 * 1024 * 1024;
+
+  // One keysetup message: wrap (inline or by reference), upload if large, register.
+  // Shared by publish_keysetup_message and publish_rotation_key so the two cannot drift.
+  async function publishMessage(
+    permissionId: string, round: number, messageType: string,
+    payloadPath: string, signingPath: string,
+  ): Promise<{ ok: true; objectKey: string; mode: string; message?: unknown } | { ok: false; error: string }> {
+    const envPath = resolveInWorkdir(`ks-msg-${messageType}-${round}.envelope.json`);
+    const size = (await stat(payloadPath)).size;
+    const common = [
+      '--secret-key', signingPath,
+      '--output', envPath,
+      '--permission-id', permissionId,
+      '--round', String(round),
+      '--message-type', messageType,
+    ];
+    let objectKey = 'inline';
+    let mode = 'inline';
+    if (size < INLINE_THRESHOLD_BYTES) {
+      const r = await runCli(['crypto', 'wrap-envelope', '--payload', payloadPath, ...common]);
+      if (!r.ok) return { ok: false, error: `wrap-envelope (inline) failed: ${r.error ?? 'unknown error'}` };
+    } else {
+      mode = 'objectStorage';
+      const urlResp = await api.post(
+        `/api/fhe-permissions/${permissionId}/keysetup/messages/upload-url`,
+        { round },
+      ) as Record<string, unknown>;
+      const uploadUrl = urlResp.uploadUrl as string | undefined;
+      const key = urlResp.objectKey as string | undefined;
+      if (!uploadUrl || !key) return { ok: false, error: 'upload-url did not return uploadUrl + objectKey' };
+      objectKey = key;
+      await api.putSignedUrl(uploadUrl, await readFile(payloadPath));
+      const r = await runCli(['crypto', 'wrap-envelope', '--object-key', objectKey, '--size-bytes', String(size), ...common]);
+      if (!r.ok) return { ok: false, error: `wrap-envelope (reference) failed: ${r.error ?? 'unknown error'}` };
+    }
+    const envelope = JSON.parse(await readFile(envPath, 'utf8'));
+    const regResp = await api.post(
+      `/api/fhe-permissions/${permissionId}/keysetup/messages`,
+      envelope,
+    ) as Record<string, unknown>;
+    return { ok: true, objectKey, mode, message: regResp.message };
+  }
+
   server.tool(
     'publish_keysetup_message',
     'Publish a signed keysetup key-exchange message. Size-aware: small payloads are signed inline; large payloads are uploaded to object storage and signed BY REFERENCE so the registered envelope stays small (mirrors the scripts wrap_and_upload). Encrypted key material only; returns the objectKey/status, no secrets.',
@@ -355,45 +398,12 @@ export function registerPipelineTools(server: McpServer, api: JulennyApiClient) 
     },
     async (p) => {
       try {
-        const payloadPath = resolveInWorkdir(p.payload);
-        const signingPath = resolveInWorkdir(p.signingKey);
-        const envPath = resolveInWorkdir(`ks-msg-${p.messageType}-${p.round}.envelope.json`);
-        const size = (await stat(payloadPath)).size;
-        // Flags common to both wrap modes (matches lib.sh wrap_and_upload).
-        const common = [
-          '--secret-key', signingPath,
-          '--output', envPath,
-          '--permission-id', p.permissionId,
-          '--round', String(p.round),
-          '--message-type', p.messageType,
-        ];
-        let objectKey: string | undefined;
-        let mode: string;
-        if (size < INLINE_THRESHOLD_BYTES) {
-          mode = 'inline';
-          const r = await runCli(['crypto', 'wrap-envelope', '--payload', payloadPath, ...common]);
-          if (!r.ok) return fail(`wrap-envelope (inline) failed: ${r.error ?? 'unknown error'}`);
-        } else {
-          mode = 'objectStorage';
-          // 1. upload-url  2. PUT the raw bytes (no api key)  3. wrap by reference
-          const urlResp = await api.post(
-            `/api/fhe-permissions/${p.permissionId}/keysetup/messages/upload-url`,
-            { round: p.round },
-          ) as Record<string, unknown>;
-          const uploadUrl = urlResp.uploadUrl as string | undefined;
-          objectKey = urlResp.objectKey as string | undefined;
-          if (!uploadUrl || !objectKey) return fail('upload-url did not return uploadUrl + objectKey');
-          await api.putSignedUrl(uploadUrl, await readFile(payloadPath));
-          const r = await runCli(['crypto', 'wrap-envelope', '--object-key', objectKey, '--size-bytes', String(size), ...common]);
-          if (!r.ok) return fail(`wrap-envelope (reference) failed: ${r.error ?? 'unknown error'}`);
-        }
-        // Register the (small) signed envelope the CLI just wrote.
-        const envelope = JSON.parse(await readFile(envPath, 'utf8'));
-        const regResp = await api.post(
-          `/api/fhe-permissions/${p.permissionId}/keysetup/messages`,
-          envelope,
-        ) as Record<string, unknown>;
-        return ok({ objectKey: objectKey ?? 'inline', mode, messageType: p.messageType, message: regResp.message });
+        const r = await publishMessage(
+          p.permissionId, p.round, p.messageType,
+          resolveInWorkdir(p.payload), resolveInWorkdir(p.signingKey),
+        );
+        if (!r.ok) return fail(r.error);
+        return ok({ objectKey: r.objectKey, mode: r.mode, messageType: p.messageType, message: r.message });
       } catch (e) {
         return fail(e instanceof Error ? e.message : 'publish_keysetup_message failed');
       }
@@ -506,6 +516,109 @@ export function registerPipelineTools(server: McpServer, api: JulennyApiClient) 
         return ok({ objectKeys: uploaded.map((u) => ({ keyType: u.keyType, objectKey: u.objectKey })), state, message: regResp.message });
       } catch (e) {
         return fail(e instanceof Error ? e.message : 'publish_final_keys failed');
+      }
+    },
+  );
+
+  // ---- publish_rotation_key ----
+  // Rotation keys do NOT go through publish_final_keys (its keyType enum has no slot for
+  // them, by design). They are three keysetup messages instead. Getting that sequence
+  // right means knowing the message types AND the round numbers, which only appear in the
+  // manifest after rule_pairs is declared - so an agent could not discover it, and the
+  // only alternative on offer was to register the rotation key in the eval_sum_key slot,
+  // which the platform accepts and which silently produces a wrong answer. One verb.
+  server.tool(
+    'publish_rotation_key',
+    "Submit a joint rotation key: publishes the two contributions and the combined key as the three rotation keysetup rounds, then reports whether the platform completed the rotation setup. Use this INSTEAD of publish_final_keys for rotation keys - publish_final_keys has no rotation slot and putting a rotation key in another slot is accepted by the platform but produces a wrong answer. Round numbers are read from the permission's own manifest.",
+    {
+      permissionId: z.string().describe('Permission id'),
+      leadContribution: z.string().describe("Workdir-relative rotation-contribute output for role 'lead'"),
+      mainContribution: z.string().describe("Workdir-relative rotation-contribute output for role 'main'"),
+      combined: z.string().describe('Workdir-relative rotation-combine output (the final joint rotation key)'),
+      signingKey: z.string().describe('Workdir-relative Ed25519 signing-secret file name'),
+    },
+    async (p) => {
+      try {
+        const ks = await api.get(`/api/fhe-permissions/${p.permissionId}/keysetup`) as Record<string, unknown>;
+        const manifest = (ks.roundManifest as Array<{ round: number; messageType: string }>) || [];
+        const roundFor = (mt: string) => manifest.find((e) => e.messageType === mt)?.round;
+
+        const steps: Array<[string, string]> = [
+          ['rotation-round1', p.leadContribution],
+          ['rotation-round1-continue', p.mainContribution],
+          ['rotation-combine', p.combined],
+        ];
+        const missing = steps.map(([mt]) => mt).filter((mt) => roundFor(mt) === undefined);
+        if (missing.length) {
+          return fail(
+            `this permission's manifest has no rotation rounds (${missing.join(', ')}). Rotation rounds only appear AFTER the rule-list input is declared, because the platform derives the index set from it. Declare that input first, then call this again.`,
+          );
+        }
+
+        const signingPath = resolveInWorkdir(p.signingKey);
+        const published: Array<Record<string, unknown>> = [];
+        for (const [messageType, file] of steps) {
+          const round = roundFor(messageType)!;
+          const r = await publishMessage(
+            p.permissionId, round, messageType, resolveInWorkdir(file), signingPath,
+          );
+          if (!r.ok) return fail(`${messageType} (round ${round}): ${r.error}`);
+          published.push({ round, messageType, mode: r.mode });
+        }
+
+        // Report the gate rather than leaving the caller to guess: keysetupState reads
+        // "complete" on an internal grant from the moment it is created, so it is not
+        // evidence of anything here.
+        const after = await api.get(`/api/fhe-permissions/${p.permissionId}/keysetup`) as Record<string, unknown>;
+        const rot = (after.pendingRotationKeySetup as Record<string, unknown>) || {};
+        const status = (rot.status as string) ?? 'unknown';
+        return ok({
+          published,
+          rotationStatus: status,
+          completedAt: rot.completedAt ?? null,
+          ready: status === 'complete',
+          summary: status === 'complete'
+            ? 'Rotation key setup is COMPLETE. The permission can now run.'
+            : `Rotation key setup reports '${status}', not 'complete'. Do NOT trigger an execution yet: it would spend a credit and fail inside the engine. Call get_rotation_status again, and if it does not reach 'complete', report that rather than retrying.`,
+        });
+      } catch (e) {
+        return fail(e instanceof Error ? e.message : 'publish_rotation_key failed');
+      }
+    },
+  );
+
+  // ---- get_rotation_status ----
+  // Read-only view of the one gate nothing else exposed. Without it an agent that had
+  // correctly submitted all three rounds had no way to confirm the platform accepted
+  // them, and had to ask a human to read the database.
+  server.tool(
+    'get_rotation_status',
+    "Report whether rotation key setup is complete for a permission, for functions whose requiredEvalKeys include 'rotation'. Returns the status, the derived rotation indices count, and whether it is safe to trigger. Note that keysetupState is NOT a substitute: on an internal (solo) grant it reads 'complete' from creation, before any key exists.",
+    { permissionId: z.string().describe('Permission id') },
+    async (p) => {
+      try {
+        const ks = await api.get(`/api/fhe-permissions/${p.permissionId}/keysetup`) as Record<string, unknown>;
+        const rot = ks.pendingRotationKeySetup as Record<string, unknown> | null | undefined;
+        if (!rot) {
+          return ok({
+            rotationRequired: false,
+            summary: 'No rotation key setup is pending for this permission. Either the function does not need rotation keys, or the input the indices are derived from has not been declared yet.',
+          });
+        }
+        const status = (rot.status as string) ?? 'unknown';
+        const indices = (rot.indices as unknown[]) || [];
+        return ok({
+          rotationRequired: true,
+          status,
+          indexCount: indices.length,
+          completedAt: rot.completedAt ?? null,
+          ready: status === 'complete',
+          summary: status === 'complete'
+            ? 'Rotation key setup is complete; it is safe to trigger.'
+            : `Rotation key setup is '${status}'. Triggering now would spend a credit and fail inside the engine.`,
+        });
+      } catch (e) {
+        return fail(e instanceof Error ? e.message : 'get_rotation_status failed');
       }
     },
   );

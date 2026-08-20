@@ -370,6 +370,40 @@ export function registerToolkitTools(server: McpServer) {
   );
 
   // ---- rotation_contribute (auto) ----
+  // ---- derive_rotation_indices ----
+  // rotation_contribute needs an `indices` string and nothing could produce one, so the
+  // only ways forward were to read the rule list into the model's context or to grant
+  // filesystem access - both of which defeat the blind design for a list the model never
+  // needs. The toolkit derives them locally and returns only the numbers.
+  server.tool(
+    'derive_rotation_indices',
+    'Derive the rotation slot indices from a rule-list file, for functions whose requiredEvalKeys include rotation. Reads the file locally and returns ONLY the resulting index numbers, never the rule rows. Feed the result to rotation_contribute. Do not ask the user to paste the rule list and do not request filesystem access; this verb is why neither is necessary.',
+    {
+      rulePairs: z.string().describe('Workdir-relative rule-list file (the same file declared as the plaintext rule input)'),
+      contextSpec: z.string().describe('Crypto context spec (e.g. ckks-default-v1)'),
+    },
+    async (p) => {
+      try {
+        const r = await runCli([
+          'crypto', 'derive-rotation-indices',
+          '--rule-pairs', resolveInWorkdir(p.rulePairs),
+          '--context-spec', p.contextSpec,
+          '--json',
+        ]);
+        if (!r.ok) return fail(r.error || 'derive-rotation-indices failed', { exitCode: r.exitCode });
+        const j = (r.json ?? {}) as { indices?: number[]; indexCount?: number };
+        const indices = j.indices ?? [];
+        return ok({
+          indexCount: j.indexCount ?? indices.length,
+          indices: indices.join(','),
+          note: 'Pass the indices string straight to rotation_contribute. The platform derives the same set independently once the rule input is declared, so the two can be cross-checked with get_rotation_status.',
+        });
+      } catch (e) {
+        return fail(e instanceof Error ? e.message : 'derive_rotation_indices failed');
+      }
+    },
+  );
+
   server.tool(
     'rotation_contribute',
     'Produce a rotation-key contribution for the given slot indices. Returns the output path; the secret share stays local.',
