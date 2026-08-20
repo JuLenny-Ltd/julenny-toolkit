@@ -85,6 +85,11 @@ in the examples folder for the expected answer of each function.
 prompt: name the function, say which files, and let it ask you the rest. They are listed
 easiest first, so start at the top if you have not run one before.</p>
 
+<p>Most functions come in two variants. <strong>Itemized</strong> tells you which records,
+positions or rules matched; <strong>count</strong> tells you only how many. The examples below
+use itemized because it shows what the encryption is really doing. Choose count when the point
+is to let a partner learn as little as possible.</p>
+
 <p><strong>Federated average</strong> &mdash; averages two models without either side revealing
 its own. The simplest one to run: it needs no evaluation keys at all, and you can check the
 answer with a calculator.</p>
@@ -93,17 +98,21 @@ beta_model_weights.txt, scale_a.txt and scale_b.txt in the working folder.</code
 
 <p><strong>Joint record overlap</strong> &mdash; how many records two parties share, without
 either revealing their list.</p>
-<pre><code>Run a self-test of joint-record-overlap-count. I've put acme-customers.csv
+<pre><code>Run a self-test of joint-record-overlap-itemized. I've put acme-customers.csv
 and beta-2match.csv in the working folder.</code></pre>
-<p>Expect <code>2</code>. Ask for <code>joint-record-overlap-itemized</code> instead and you get
-which of your own records matched, written to a file.</p>
+<p>You get the 2 matching records written to a file, resolved from your own side. Ask for
+<code>joint-record-overlap-count</code> instead and you get just the number, <code>2</code>,
+which is what you want when neither side should learn <em>which</em> records overlap.</p>
 
 <p><strong>Negotiation matrix</strong> &mdash; finds terms both sides accept, without either
 revealing its limits.</p>
-<pre><code>Run a self-test of negotiation-matrix-count. I've put acceptance_matrix.txt
+<pre><code>Run a self-test of negotiation-matrix-itemized. I've put acceptance_matrix.txt
 and offer_vector.txt in the working folder.</code></pre>
-<p>Expect <code>1</code>. Swap in <code>offer_vector_nomatch.txt</code> and expect <code>0</code>:
-worth running, because a function that cannot return a clean zero is not working.</p>
+<p>You get position <code>16</code>, the one set of terms both sides accept. Swap in
+<code>offer_vector_nomatch.txt</code> and you get nothing back: worth running, because a
+function that cannot return a clean zero is not working. Use
+<code>negotiation-matrix-count</code> when you want to know only <em>whether</em> a deal
+exists, not which one.</p>
 
 <p><strong>Decision tree inference</strong> &mdash; scores a record against someone else's model,
 where neither the model nor the record is revealed.</p>
@@ -114,10 +123,12 @@ features.json in the working folder.</code></pre>
 <p><strong>Rule-based cross-match</strong> &mdash; checks a shared rule list against two private
 sets, such as drug interactions against a patient's medications. The heaviest one: it needs
 rotation keys, so expect several minutes of key building.</p>
-<pre><code>Run a self-test of rule-based-cross-match-count. I've put
+<pre><code>Run a self-test of rule-based-cross-match-itemized. I've put
 restriction_ingredient_pairs.txt, beta_restrictions.txt and
 acme_ingredients.txt in the working folder.</code></pre>
-<p>Expect <code>1</code>.</p>
+<p>You get rule row <code>0</code>, the one pair that fired. Use
+<code>rule-based-cross-match-count</code> when the other side should learn only how many
+rules matched, not which.</p>
 
 <div class="note">
 Your assistant never sees the contents of these files, or your results. It is given file
