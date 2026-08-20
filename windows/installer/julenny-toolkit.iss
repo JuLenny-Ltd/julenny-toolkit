@@ -43,6 +43,10 @@ WizardStyle=modern
 ; Branding: setup.exe's own icon, and the icon shown in Add/Remove Programs.
 SetupIconFile=..\..\windows\JuLennyFHE\Assets\app.ico
 UninstallDisplayIcon={app}\app\JuLennyFHE.exe
+; The toolkit is source-available under BSL 1.1, whose section 19 requires the license to
+; be conspicuously displayed on every copy of the Licensed Work. Installers through v0.7.2
+; distributed the binaries without ever showing it. This adds the standard accept page.
+LicenseFile=..\..\LICENSE
 
 [Types]
 Name: "full";   Description: "Everything (app, CLI, MCP server, and example scripts)"
@@ -76,6 +80,7 @@ Source: "..\..\build\cli\Release\libomp.dll";             DestDir: "{app}"; Comp
 Source: "..\..\build\cli\Release\libcrypto-4-x64.dll";    DestDir: "{app}"; Components: cli or mcp; Flags: ignoreversion
 ; --- MCP single self-contained exe (SEA, #22) + the config-merge helper ---
 Source: "..\..\mcp\sea\julenny-mcp.exe";                  DestDir: "{app}"; Components: mcp; Flags: ignoreversion
+Source: "..\..\LICENSE";                                DestDir: "{app}"; DestName: "LICENSE.txt"; Flags: ignoreversion
 Source: "merge-claude-config.ps1";                        DestDir: "{app}"; Components: mcp; Flags: ignoreversion
 ; --- UI app (D2: unpackaged, self-contained win32 payload). ---
 ;     Excludes *.pdb: those are debug symbols, ~85MB of the ~188MB payload. They

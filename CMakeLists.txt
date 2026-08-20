@@ -89,6 +89,15 @@ install(DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/examples/"
 install(PROGRAMS "${CMAKE_CURRENT_SOURCE_DIR}/linux/julenny-toolkit-examples"
     DESTINATION bin COMPONENT runtime)
 
+# BSL 1.1 section 19 requires the license to be conspicuously displayed on every copy of
+# the Licensed Work. CPACK_RESOURCE_FILE_LICENSE below does NOT satisfy this for the DEB
+# generator, which ignores it: Debian expects the text at share/doc/<pkg>/copyright, and
+# packages through v0.7.2 shipped without it. Install it explicitly.
+install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/LICENSE"
+    DESTINATION share/doc/julenny-toolkit
+    RENAME copyright
+    COMPONENT runtime)
+
 # ============================================================================
 # Packaging (CPack) - component-restricted so deps' install rules don't leak
 # ============================================================================
