@@ -1830,11 +1830,42 @@ int run_crypto_combine(const CryptoCombineArgs& args) {
             // Blind-by-design: write the plaintext result to a local file; stdout
             // returns references only (no values), so an agent never sees the
             // decrypted result. Viewing the file is the user's local choice.
+            // Separate signal from CKKS noise. Noise sits ~1e-14 while any real value is
+            // O(1), so a threshold relative to the largest magnitude splits them with an
+            // enormous margin. Without this a one-value result arrived as 8,192 raw
+            // doubles and was unreadable.
+            double max_abs = 0.0;
+            for (double v : reals) max_abs = std::max(max_abs, std::abs(v));
+            const double threshold = std::max(1e-9, max_abs * 1e-6);
+
+            json significant = json::object();
+            std::size_t significant_count = 0;
+            double sum_significant = 0.0;
+            for (std::size_t i = 0; i < reals.size(); ++i) {
+                if (std::abs(reals[i]) > threshold) {
+                    if (significant_count < 4096) {
+                        significant[std::to_string(i)] = reals[i];
+                    }
+                    ++significant_count;
+                    sum_significant += reals[i];
+                }
+            }
+
             json result;
-            result["valueType"]   = "real";
-            result["totalSlots"]  = reals.size();
-            result["contextSpec"] = spec->id;
-            result["values"]      = std::vector<double>(reals.begin(), reals.end());
+            result["valueType"]         = "real";
+            result["totalSlots"]        = reals.size();
+            result["contextSpec"]       = spec->id;
+            result["significantSlots"]  = significant_count;
+            result["significantValues"] = significant;
+            result["sumOfSignificant"]  = sum_significant;
+            result["maxAbsValue"]       = max_abs;
+            result["noiseThreshold"]    = threshold;
+            result["note"]              = "significantValues holds the slots above the noise "
+                                          "threshold, keyed by slot index. CKKS leaves every "
+                                          "other slot at a tiny non-zero value (~1e-14) which "
+                                          "carries no meaning. allValues has the full vector if "
+                                          "you need it.";
+            result["allValues"]         = std::vector<double>(reals.begin(), reals.end());
             std::filesystem::path op(args.out_file_path);
             if (op.has_parent_path()) std::filesystem::create_directories(op.parent_path());
             std::ofstream of(op, std::ios::trunc);
@@ -1846,12 +1877,14 @@ int run_crypto_combine(const CryptoCombineArgs& args) {
                 ref["status"]           = "ok";
                 ref["partialsCombined"] = args.partial_paths.size();
                 ref["totalSlots"]       = reals.size();
+                ref["significantSlots"] = significant_count;
                 ref["valueType"]        = "real";
                 ref["contextSpec"]      = spec->id;
                 ref["outputPath"]       = op.string();
                 std::cout << ref.dump(2) << "\n";
             } else {
-                std::cout << "ok: wrote real-valued plaintext result (" << reals.size()
+                std::cout << "ok: wrote real-valued plaintext result ("
+                          << significant_count << " meaningful of " << reals.size()
                           << " slots) to " << op.string() << "\n";
             }
             return 0;
