@@ -118,6 +118,13 @@ Root: HKCU; Subkey: "Environment"; ValueType: expandsz; ValueName: "Path"; \
 Root: HKCU; Subkey: "Software\JuLenny\Toolkit"; ValueType: string; ValueName: "WorkDir"; \
   ValueData: "{code:GetWorkdir}"; Flags: uninsdeletevalue; Components: mcp
 
+; Same for the examples page. An upgrade used to reset the side back to "Data owner" and
+; the folder back to Documents, quietly copying a different layout over an existing setup.
+Root: HKCU; Subkey: "Software\JuLenny\Toolkit"; ValueType: string; ValueName: "ExamplesRole"; \
+  ValueData: "{code:GetExamplesRole}"; Flags: uninsdeletevalue; Components: examples
+Root: HKCU; Subkey: "Software\JuLenny\Toolkit"; ValueType: string; ValueName: "ExamplesDir"; \
+  ValueData: "{code:GetExamplesDest}"; Flags: uninsdeletevalue; Components: examples
+
 [Run]
 ; Postinstall checkbox on the last page. HTML rather than Markdown deliberately:
 ; .md has no default handler on Windows, so the checkbox would open Notepad or a
@@ -145,6 +152,8 @@ var
   ExamplesRolePage: TInputOptionWizardPage;
   ExamplesDirPage:  TInputDirWizardPage;
   PrevWorkdir:      String;
+  PrevExamplesRole: String;
+  PrevExamplesDir:  String;
 
 // ---------------------------------------------------------------------------
 // Claude Desktop detection.
@@ -331,7 +340,20 @@ begin
   ExamplesRolePage.Add('Data consumer - triggers the run, sees the result (beta)');
   ExamplesRolePage.Add('Both - for single-machine testing');
   ExamplesRolePage.Add('Don''t copy them now (you can run the helper later)');
-  ExamplesRolePage.SelectedValueIndex := 0;
+  // Preselect whatever they chose last time. Falls back to the first option on a first
+  // install, or if the stored value is not one we recognise.
+  if not RegQueryStringValue(HKCU, 'Software\JuLenny\Toolkit', 'ExamplesRole', PrevExamplesRole) then
+    PrevExamplesRole := '';
+  if PrevExamplesRole = 'owner' then
+    ExamplesRolePage.SelectedValueIndex := 0
+  else if PrevExamplesRole = 'consumer' then
+    ExamplesRolePage.SelectedValueIndex := 1
+  else if PrevExamplesRole = 'both' then
+    ExamplesRolePage.SelectedValueIndex := 2
+  else if PrevExamplesRole = 'none' then
+    ExamplesRolePage.SelectedValueIndex := 3
+  else
+    ExamplesRolePage.SelectedValueIndex := 0;
 
   ExamplesDirPage := CreateInputDirPage(ExamplesRolePage.ID,
     'Example scripts folder',
@@ -340,7 +362,12 @@ begin
     'editable working copy.',
     False, '');
   ExamplesDirPage.Add('');
-  ExamplesDirPage.Values[0] := ExpandConstant('{userdocs}\julenny-examples');
+  if not RegQueryStringValue(HKCU, 'Software\JuLenny\Toolkit', 'ExamplesDir', PrevExamplesDir) then
+    PrevExamplesDir := '';
+  if PrevExamplesDir <> '' then
+    ExamplesDirPage.Values[0] := PrevExamplesDir
+  else
+    ExamplesDirPage.Values[0] := ExpandConstant('{userdocs}\julenny-examples');
   ExamplesDirPage.Buttons[0].OnClick := @ExamplesBrowseClick;
 end;
 
@@ -352,6 +379,7 @@ begin
     0: Result := 'owner';
     1: Result := 'consumer';
     2: Result := 'both';
+    3: Result := 'none';
   else
     Result := '';
   end;
@@ -365,7 +393,9 @@ end;
 // Run the copy only when the component is installed AND a side was chosen.
 function ShouldCopyExamples: Boolean;
 begin
-  Result := WizardIsComponentSelected('examples') and (GetExamplesRole('') <> '');
+  // 'none' is a deliberate choice ('don't copy them now'), so it must NOT trigger a copy.
+  Result := WizardIsComponentSelected('examples')
+            and (GetExamplesRole('') <> '') and (GetExamplesRole('') <> 'none');
 end;
 
 // Hide both example pages unless the component is selected, and hide the
