@@ -1,0 +1,179 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>JuLenny Toolkit - Getting Started</title>
+<style>
+  :root { color-scheme: light dark; }
+  body {
+    font-family: -apple-system, "Segoe UI", system-ui, sans-serif;
+    line-height: 1.6; max-width: 46rem; margin: 0 auto; padding: 2.5rem 1.5rem 4rem;
+    background: #fff; color: #1a1a1a;
+  }
+  @media (prefers-color-scheme: dark) { body { background: #16181d; color: #e6e6e6; } }
+  h1 { font-size: 1.7rem; margin-bottom: .2rem; }
+  h2 { font-size: 1.15rem; margin-top: 2.2rem; border-bottom: 1px solid #8883; padding-bottom: .3rem; }
+  .lede { color: #6b7280; margin-top: 0; }
+  @media (prefers-color-scheme: dark) { .lede { color: #9aa3af; } }
+  code, pre { font-family: ui-monospace, Consolas, monospace; font-size: .88em; }
+  code { background: #8881; padding: .12em .35em; border-radius: 3px; }
+  pre { background: #8881; padding: .8rem 1rem; border-radius: 6px; overflow-x: auto; }
+  pre code { background: none; padding: 0; }
+  .note { border-left: 3px solid #14b8a6; padding: .1rem 0 .1rem 1rem; margin: 1.2rem 0; }
+  .warn { border-left: 3px solid #f59e0b; padding: .1rem 0 .1rem 1rem; margin: 1.2rem 0; }
+  table { border-collapse: collapse; width: 100%; margin: 1rem 0; }
+  th, td { text-align: left; padding: .45rem .6rem; border-bottom: 1px solid #8883; vertical-align: top; }
+  th { font-weight: 600; }
+  a { color: #0d9488; }
+  @media (prefers-color-scheme: dark) { a { color: #2dd4bf; } }
+  footer { margin-top: 3rem; font-size: .85em; color: #6b7280; }
+</style>
+</head>
+<body>
+
+<h1>JuLenny Toolkit</h1>
+<p class="lede">Everything here runs on your machine. Your data is encrypted before it goes
+anywhere, and the keys never leave.</p>
+
+<h2>What just got installed</h2>
+
+<table>
+  <tr><th>Desktop app</th><td>A window for the whole workflow: keys, encryption, uploads, results.</td></tr>
+  <tr><th>Command line</th><td><code>julenny-toolkit</code>, on your PATH. Everything the app does, scriptable.</td></tr>
+  <tr><th>MCP server</th><td>The <em>connector</em>. MCP is the Model Context Protocol, the open
+      standard for letting AI assistants use external tools, so an assistant such as Claude
+      Desktop can drive the toolkit for you.</td></tr>
+  <tr><th>Examples</th><td>Sample data and scripts for each function, with the answer each one should produce.</td></tr>
+</table>
+
+<p>You chose which of these to install, so you may not have all four.</p>
+
+<h2>Your working folder</h2>
+
+<p>You picked a working folder during setup. Everything lives there: your keys, the files
+you encrypt, and the results you decrypt. Two things follow from that.</p>
+
+<div class="warn">
+<strong>Back it up, and keep it private.</strong> Your secret key shares are in that folder.
+Lose them and results encrypted under those keys can never be read again, by anyone,
+including us. There is no recovery, and that is the point.
+</div>
+
+<p>If you use the connector, files are referred to by name alone. Copy a file into the
+working folder and refer to it as <code>customers.csv</code>, never as a full path.</p>
+
+<h2>Starting out</h2>
+
+<p>The quickest way to see the whole thing work is a <strong>self-test</strong>: your own
+company running a function against your own data, with no partner involved. You play both
+sides, and you decrypt your own result.</p>
+
+<p>If you installed the connector, just ask your assistant for a self-test and it will walk
+the sequence. Otherwise the example scripts do the same thing step by step.</p>
+
+<div class="note">
+<strong>Check the answer, not just that it finished.</strong> Every example ships with the
+result it should produce. A run that completes tells you the pipeline works; a run that
+matches the expected number tells you it is <em>correct</em>. See <code>SELF-TEST.md</code>
+in the examples folder for the expected answer of each function.
+</div>
+
+<h3>Something to say to your assistant</h3>
+
+<p>Copy the files named below into your working folder, then say the line. That is the whole
+prompt: name the function, say which files, and let it ask you the rest. They are listed
+easiest first, so start at the top if you have not run one before.</p>
+
+<p><strong>Federated average</strong> &mdash; averages two models without either side revealing
+its own. The simplest one to run: it needs no evaluation keys at all, and you can check the
+answer with a calculator.</p>
+<pre><code>Run a self-test of federated-average. I've put acme_model_weights.txt,
+beta_model_weights.txt, scale_a.txt and scale_b.txt in the working folder.</code></pre>
+
+<p><strong>Joint record overlap</strong> &mdash; how many records two parties share, without
+either revealing their list.</p>
+<pre><code>Run a self-test of joint-record-overlap-count. I've put acme-customers.csv
+and beta-2match.csv in the working folder.</code></pre>
+<p>Expect <code>2</code>. Ask for <code>joint-record-overlap-itemized</code> instead and you get
+which of your own records matched, written to a file.</p>
+
+<p><strong>Negotiation matrix</strong> &mdash; finds terms both sides accept, without either
+revealing its limits.</p>
+<pre><code>Run a self-test of negotiation-matrix-count. I've put acceptance_matrix.txt
+and offer_vector.txt in the working folder.</code></pre>
+<p>Expect <code>1</code>. Swap in <code>offer_vector_nomatch.txt</code> and expect <code>0</code>:
+worth running, because a function that cannot return a clean zero is not working.</p>
+
+<p><strong>Decision tree inference</strong> &mdash; scores a record against someone else's model,
+where neither the model nor the record is revealed.</p>
+<pre><code>Run a self-test of decision-tree-inference. I've put tree.json and
+features.json in the working folder.</code></pre>
+<p>Expect <code>[0.167801, 0.832199]</code>, so class 1.</p>
+
+<p><strong>Rule-based cross-match</strong> &mdash; checks a shared rule list against two private
+sets, such as drug interactions against a patient's medications. The heaviest one: it needs
+rotation keys, so expect several minutes of key building.</p>
+<pre><code>Run a self-test of rule-based-cross-match-count. I've put
+restriction_ingredient_pairs.txt, beta_restrictions.txt and
+acme_ingredients.txt in the working folder.</code></pre>
+<p>Expect <code>1</code>.</p>
+
+<div class="note">
+Your assistant never sees the contents of these files, or your results. It is given file
+names, counts and status only. If it asks for access to your working folder, say no: it does
+not need it, and the answer will still come back.
+</div>
+
+<h2>How a real collaboration works</h2>
+
+<ol>
+  <li><strong>Agree a collaboration</strong> with your partner on the platform, and pick the function.</li>
+  <li><strong>Build the joint key together.</strong> Each side generates a share; neither side
+      ever holds the whole key. This takes a few rounds of exchanging files.</li>
+  <li><strong>Encrypt your data</strong> here, on your machine, and upload only ciphertext.</li>
+  <li><strong>Run the function.</strong> The platform computes on the encrypted values.</li>
+  <li><strong>Decrypt together.</strong> Both sides contribute; one of you sees the answer and
+      shares it with the other.</li>
+</ol>
+
+<p>Both sides must write shared records the same way. Encoding depends on the exact text, so
+<code>Jane Smith,1984-12-15</code> and <code>Jane Smith, 1984-12-15</code> will not match.
+Agree a format before you start.</p>
+
+<div class="warn">
+<strong>Do not edit data files in a spreadsheet.</strong> Excel silently rewrites dates,
+drops leading zeros from identifiers, and changes quoting. Any of those stops your records
+matching the other side, and nothing will warn you: the result just comes back thin.
+</div>
+
+<h2>If something goes wrong</h2>
+
+<table>
+  <tr><th>No matches at all</th>
+      <td>The two sides encoded differently. Check the format agreement and that nothing
+          rewrote one file.</td></tr>
+  <tr><th>An answer that looks wrong</th>
+      <td>Usually a key problem. Check you registered the <em>final</em> key from each
+          protocol, not an intermediate round.</td></tr>
+  <tr><th>Last decimals differ</th>
+      <td>Expected. Some functions use approximate arithmetic; small deviations are normal.</td></tr>
+</table>
+
+<p>Run <code>julenny-toolkit --help</code>, or any subcommand with <code>--help</code>, to see
+what it expects.</p>
+
+<h2>Licence</h2>
+
+<p>The toolkit is <strong>source-available</strong> under the Business Source License 1.1. The
+full text is in <code>LICENSE.txt</code> in the install folder, and the source is published so
+you can verify for yourself that your data is encrypted before it leaves your machine. That is
+the whole reason it is readable.</p>
+
+<footer>
+JuLenny Ltd &middot; <a href="https://julenny.net/faq">julenny.net/faq</a> &middot;
+<a href="https://julenny.net/api-reference">API reference</a>
+</footer>
+
+</body>
+</html>
