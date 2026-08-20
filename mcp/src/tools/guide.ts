@@ -169,6 +169,18 @@ export function registerGuideTools(server: McpServer, api: JulennyApiClient) {
         catch (e) { return fail(`could not load function definition for ${perm.fheFunction} ${v}: ${(e as Error).message}`); }
         const inputs: Array<{ name: string; role: string; layout?: string; encodingRecipe?: unknown }> = def.inputs || [];
 
+        // Rotation state lives on the keysetup document, not the permission, and nothing
+        // else in the MCP surfaced it - an agent that had submitted all three rounds had
+        // no way to confirm the platform accepted them.
+        let ksRotation: unknown = null;
+        let rotationRounds: Array<{ round: number; messageType: string }> = [];
+        try {
+          const ksDoc = await api.get(`/api/fhe-permissions/${p.permissionId}/keysetup`) as Record<string, unknown>;
+          ksRotation = ksDoc.pendingRotationKeySetup ?? null;
+          rotationRounds = ((ksDoc.roundManifest as Array<{ round: number; messageType: string }>) || [])
+            .filter((e) => typeof e.messageType === 'string' && e.messageType.startsWith('rotation-'));
+        } catch { ksRotation = null; }
+
         let declared: Record<string, { datasetId?: string }> = {};
         try { declared = await api.get(`/api/fhe-permissions/${p.permissionId}/preferred-datasets`); }
         catch { declared = {}; }
@@ -225,6 +237,35 @@ export function registerGuideTools(server: McpServer, api: JulennyApiClient) {
         if (!allDeclared && !isSolo) {
           return ok({ ...base, stage: 'await-peer-inputs', summary: 'Your inputs are declared. BLOCKED on the other party to declare theirs before an execution can run. TELL THE USER to ask them to upload and declare their input; polling alone will not unblock it.', nextActions: ['TELL THE USER to ask the other party to declare their inputs', 'then call next_step again'] });
         }
+        // Rotation is the last gate and the only one with no round of its own until the
+        // rule-list input is declared: the platform derives the index set from that file,
+        // then grows the manifest. Until this reads 'complete' an execution will spend a
+        // credit and fail inside the engine, so check it before ever reporting 'run'.
+        {
+          const rot = ksRotation as Record<string, unknown> | null | undefined;
+          if (rot && rot.status !== 'complete') {
+            const status = String(rot.status ?? 'unknown');
+            const outstanding = (rotationRounds.length ? rotationRounds : [
+              { round: '?', messageType: 'rotation-round1' },
+              { round: '?', messageType: 'rotation-round1-continue' },
+              { round: '?', messageType: 'rotation-combine' },
+            ]).map((e) => `round ${e.round}: ${e.messageType}`);
+            return ok({
+              ...base,
+              stage: 'rotation-keysetup',
+              rotation: { status, indexCount: ((rot.indices as unknown[]) || []).length },
+              summary: `This function needs a ROTATION key and its setup is '${status}', not 'complete'. Do NOT trigger: it would spend a credit and fail inside the engine. Build the rotation key and submit it with publish_rotation_key, which handles all three rounds. Rotation keys are NOT accepted by publish_final_keys, and putting one in another key's slot is accepted by the platform but silently produces a wrong answer.`,
+              outstandingRounds: outstanding,
+              nextActions: [
+                'derive_rotation_indices(rulePairs, contextSpec) to get the index set - do NOT read the rule file or ask for filesystem access',
+                'rotation_contribute for each secret share, then rotation_combine',
+                'publish_rotation_key(leadContribution, mainContribution, combined, signingKey)',
+                'get_rotation_status to confirm it reads complete, then call next_step again',
+              ],
+            });
+          }
+        }
+
         if (role === 'dataConsumer') {
           if ((perm.remainingExecutions ?? 1) <= 0) {
             return ok({ ...base, stage: 'exhausted', summary: 'All inputs are declared but this permission has no remaining executions.', nextActions: ['request more executions from the data owner (add_executions on their side)'] });

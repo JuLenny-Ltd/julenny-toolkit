@@ -21,7 +21,7 @@
 ; self-contained build: the Windows App SDK runtime ships inside it and the
 ; customer installs no prerequisites.
 
-#define AppVersion "0.7.2"
+#define AppVersion "0.7.3"
 ; Unpackaged (WindowsPackageType=None, self-contained) WinUI 3 build output (#23).
 #define AppSourceDir "..\..\windows\JuLennyFHE\x64\Release\JuLennyFHE"
 
@@ -80,6 +80,7 @@ Source: "..\..\build\cli\Release\libomp.dll";             DestDir: "{app}"; Comp
 Source: "..\..\build\cli\Release\libcrypto-4-x64.dll";    DestDir: "{app}"; Components: cli or mcp; Flags: ignoreversion
 ; --- MCP single self-contained exe (SEA, #22) + the config-merge helper ---
 Source: "..\..\mcp\sea\julenny-mcp.exe";                  DestDir: "{app}"; Components: mcp; Flags: ignoreversion
+Source: "Getting-Started.html";                          DestDir: "{app}"; Flags: ignoreversion
 Source: "..\..\LICENSE";                                DestDir: "{app}"; DestName: "LICENSE.txt"; Flags: ignoreversion
 Source: "merge-claude-config.ps1";                        DestDir: "{app}"; Components: mcp; Flags: ignoreversion
 ; --- UI app (D2: unpackaged, self-contained win32 payload). ---
@@ -118,6 +119,12 @@ Root: HKCU; Subkey: "Software\JuLenny\Toolkit"; ValueType: string; ValueName: "W
   ValueData: "{code:GetWorkdir}"; Flags: uninsdeletevalue; Components: mcp
 
 [Run]
+; Postinstall checkbox on the last page. HTML rather than Markdown deliberately:
+; .md has no default handler on Windows, so the checkbox would open Notepad or a
+; "how do you want to open this file?" dialog.
+Filename: "{app}\Getting-Started.html"; \
+  Description: "View the getting started guide"; \
+  Flags: postinstall skipifsilent shellexec nowait
 ; Wire the MCP into Claude Desktop (merge, don't clobber other servers). MCP only.
 Filename: "powershell.exe"; \
   Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\merge-claude-config.ps1"" -ApiKey ""{code:GetApiKey}"" -McpExePath ""{app}\julenny-mcp.exe"" -Workdir ""{code:GetWorkdir}"""; \

@@ -44,7 +44,15 @@ symlinks pointing outside are all rejected. Keys, inputs, ciphertexts and
 results all live in that folder or below it.
 
 This means you cannot read a file anywhere else on the user's machine, and there
-is no permission you can request that would change that. If the user's input
+is no permission you can request that would change that.
+
+NEVER ask the user to grant filesystem or folder access, and never ask them to paste a
+data file into the conversation. Blindness is the product, not a limitation to work
+around: the user is paying for the guarantee that their plaintext never reaches a model.
+Every verb here is designed so you do not need to see the contents of anything - if you
+believe you are stuck without reading a file, you have missed a verb. Say so plainly and
+name what you are missing, rather than asking for access. If the user offers it anyway,
+decline and explain why. If the user's input
 file is not in the working folder, do NOT ask them for its path and do NOT ask
 for filesystem access. Tell them to copy it into the folder named above, then
 refer to it by filename alone.
