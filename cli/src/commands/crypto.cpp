@@ -2352,6 +2352,12 @@ int run_crypto_derive_rotation_indices(const CryptoDeriveRotationIndicesArgs& ar
         }
     }
 
+    // -1 shifts the accumulator one slot right, which is how the itemized variant
+    // gives each rule row its own slot. MUST match the platform's derivation in
+    // backend/lib/rotation-index-derivation.ts: if the two sets differ by even one
+    // index the keys are built for a circuit the platform is not running.
+    if (!indices.empty()) indices.insert(-1);
+
     std::vector<std::int32_t> sorted_indices(indices.begin(), indices.end());
 
     if (args.emit_json) {
