@@ -555,9 +555,20 @@ export function registerPipelineTools(server: McpServer, api: JulennyApiClient) 
           );
         }
 
+        // ONE round per call, resumable. The three rotation payloads are ~320MB each,
+        // so uploading all three inside a single tool call ran past the MCP client's
+        // timeout every time, and the operator had to fall back to publishing the
+        // rounds by hand. Publish the first outstanding round, report what is left,
+        // and let the caller call again.
+        const contributed = new Set<number>(
+          Object.values((ks.contributions as Record<string, number[]>) || {}).flat(),
+        );
+        const outstanding = steps.filter(([mt]) => !contributed.has(roundFor(mt)!));
+
         const signingPath = resolveInWorkdir(p.signingKey);
         const published: Array<Record<string, unknown>> = [];
-        for (const [messageType, file] of steps) {
+        if (outstanding.length) {
+          const [messageType, file] = outstanding[0];
           const round = roundFor(messageType)!;
           const r = await publishMessage(
             p.permissionId, round, messageType, resolveInWorkdir(file), signingPath,
@@ -565,6 +576,7 @@ export function registerPipelineTools(server: McpServer, api: JulennyApiClient) 
           if (!r.ok) return fail(`${messageType} (round ${round}): ${r.error}`);
           published.push({ round, messageType, mode: r.mode });
         }
+        const remaining = outstanding.slice(1).map(([mt]) => ({ round: roundFor(mt)!, messageType: mt }));
 
         // Report the gate rather than leaving the caller to guess: keysetupState reads
         // "complete" on an internal grant from the moment it is created, so it is not
@@ -574,10 +586,13 @@ export function registerPipelineTools(server: McpServer, api: JulennyApiClient) 
         const status = (rot.status as string) ?? 'unknown';
         return ok({
           published,
+          remaining,
           rotationStatus: status,
           completedAt: rot.completedAt ?? null,
           ready: status === 'complete',
-          summary: status === 'complete'
+          summary: remaining.length
+            ? `Published round ${published[0]?.round}. ${remaining.length} rotation round(s) still to publish: ${remaining.map((r) => `${r.round} (${r.messageType})`).join(', ')}. Call publish_rotation_key again to send the next one. Each call uploads one ~320MB payload, which is why they are not batched.`
+            : status === 'complete'
             ? 'Rotation key setup is COMPLETE. The permission can now run.'
             : `Rotation key setup reports '${status}', not 'complete'. Do NOT trigger an execution yet: it would spend a credit and fail inside the engine. Call get_rotation_status again, and if it does not reach 'complete', report that rather than retrying.`,
         });
