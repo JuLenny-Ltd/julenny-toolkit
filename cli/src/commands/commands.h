@@ -321,6 +321,7 @@ struct CryptoCombineArgs {
     bool non_zero_only = false;
     bool real_output = false;          // CKKS only: emit raw real-valued slots (no int rounding)
     std::string out_file_path;         // blind: write plaintext result here; stdout returns references only
+    bool full_vector = false;          // include every slot in --out-file (default: only the meaningful ones)
     bool emit_json = false;
 };
 // Diagnostic: dump a ciphertext file's metadata + EMBEDDED crypto context

@@ -1860,12 +1860,41 @@ int run_crypto_combine(const CryptoCombineArgs& args) {
             result["sumOfSignificant"]  = sum_significant;
             result["maxAbsValue"]       = max_abs;
             result["noiseThreshold"]    = threshold;
-            result["note"]              = "significantValues holds the slots above the noise "
-                                          "threshold, keyed by slot index. CKKS leaves every "
-                                          "other slot at a tiny non-zero value (~1e-14) which "
-                                          "carries no meaning. allValues has the full vector if "
-                                          "you need it.";
-            result["allValues"]         = std::vector<double>(reals.begin(), reals.end());
+            // CKKS is approximate, so a count of three arrives as 2.999999999999586.
+            // Round when every meaningful value sits within a whisker of a whole
+            // number, which is the case for counts and match vectors and is not the
+            // case for real results like averaged model weights. Never round those.
+            bool all_whole = significant_count > 0;
+            json rounded = json::object();
+            for (auto& [slot, val] : significant.items()) {
+                const double v = val.get<double>();
+                const double nearest = std::round(v);
+                if (std::abs(v - nearest) > std::max(1e-6, std::abs(v) * 1e-9)) {
+                    all_whole = false;
+                    break;
+                }
+                rounded[slot] = static_cast<std::int64_t>(nearest);
+            }
+            if (all_whole) {
+                result["significantValuesRounded"] = rounded;
+                // The common case is a single answer. Put it where a person will
+                // find it instead of making them read a map with one entry.
+                if (significant_count == 1) {
+                    result["result"] = rounded.begin().value();
+                }
+            }
+
+            result["note"] = std::string(
+                "significantValues holds the slots above the noise threshold, keyed by "
+                "slot index. CKKS leaves every other slot at a tiny non-zero value "
+                "(~1e-14) which carries no meaning.")
+                + (all_whole ? " significantValuesRounded gives the same values as whole numbers."
+                             : "")
+                + (args.full_vector ? " allValues has every slot."
+                                    : " Pass --full-vector to also write every slot.");
+            if (args.full_vector) {
+                result["allValues"] = std::vector<double>(reals.begin(), reals.end());
+            }
             std::filesystem::path op(args.out_file_path);
             if (op.has_parent_path()) std::filesystem::create_directories(op.parent_path());
             std::ofstream of(op, std::ios::trunc);
@@ -2844,6 +2873,10 @@ void register_crypto(CLI::App& app,
     combine->add_option("--out-file",   combine_args.out_file_path,
                         "Write the plaintext result to this file; stdout returns references "
                         "only (blind: no values printed). For agent/MCP use.");
+    combine->add_flag  ("--full-vector", combine_args.full_vector,
+                        "Include every slot in --out-file. Off by default: a count result is "
+                        "one number, and writing all 8,192 slots made a 240KB file nobody "
+                        "could read.");
     combine->callback([&combine_args, exit_code]() {
         *exit_code = run_crypto_combine(combine_args);
     });
