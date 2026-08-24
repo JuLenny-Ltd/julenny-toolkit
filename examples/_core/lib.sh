@@ -1245,7 +1245,7 @@ viewer_flow() {
             else
                 warn "Output is declared '$output_layout' but combine didn't report a uniform answer."
                 warn "Raw non-zero slot positions and values:"
-                echo "$combine_json" | jq -r '.nonZeroValues | to_entries[] | "    [\(.key)] = \(.value)"'
+                echo "$combine_json" | jq -r '(.significantValues // .nonZeroValues) | to_entries[] | "    [\(.key)] = \(.value)"'
             fi
             ;;
         packed-real-vector)
@@ -1297,7 +1297,7 @@ viewer_flow() {
                     while IFS= read -r _row; do _rows+=("$_row"); done \
                         < <(grep -v '^[[:space:]]*$' "$pair_file")
                     success "Matched rule pairs (satisfied by BOTH sides):"
-                    for _slot in $(echo "$combine_json" | jq -r '.nonZeroValues | keys_unsorted[]' | sort -n); do
+                    for _slot in $(echo "$combine_json" | jq -r '(.significantValues // .nonZeroValues) | keys_unsorted[]' | sort -n); do
                         if (( _slot < ${#_rows[@]} )); then
                             echo "    pair $_slot: ${_rows[$_slot]}"
                         else
@@ -1317,7 +1317,7 @@ viewer_flow() {
                     success "Answer: 0 matches. (No grid position was accepted by both sides.)"
                 else
                     success "Both sides accepted these grid positions:"
-                    echo "$combine_json" | jq -r '.nonZeroValues | to_entries[] | "    position \(.key)  (slot value \(.value))"'
+                    echo "$combine_json" | jq -r '(.significantValues // .nonZeroValues) | to_entries[] | "    position \(.key)  (slot value \(.value))"'
                     info "Map positions back to contract terms with your grid file (comment lines excluded)."
                 fi
             elif true; then
@@ -1326,11 +1326,11 @@ viewer_flow() {
                     success "Answer: 0 matches.  (No slots overlapped; the two datasets are disjoint.)"
                 elif [[ ! -f "$function_def" ]]; then
                     warn "No function-def at $function_def; cannot resolve indicator slots."
-                    echo "$combine_json" | jq -r '.nonZeroValues | to_entries[] | "    [\(.key)] = \(.value)"'
+                    echo "$combine_json" | jq -r '(.significantValues // .nonZeroValues) | to_entries[] | "    [\(.key)] = \(.value)"'
                 elif [[ -z "$input_name" ]]; then
                     warn "Could not determine this side's indicator input from the function-def."
                     warn "Set JULENNY_INPUT_NAME to your indicator input and re-run to resolve names."
-                    echo "$combine_json" | jq -r '.nonZeroValues | to_entries[] | "    [\(.key)] = \(.value)"'
+                    echo "$combine_json" | jq -r '(.significantValues // .nonZeroValues) | to_entries[] | "    [\(.key)] = \(.value)"'
                 else
                     local exec_doc input_idx my_datasets_json my_dset_id="" my_dset_name=""
                     exec_doc="$(curl_jl GET "/api/executions/$exec_id")"
@@ -1372,7 +1372,7 @@ viewer_flow() {
                         fi
                     fi
 
-                    local slots_csv; slots_csv="$(echo "$combine_json" | jq -r '.nonZeroValues | keys | join(",")')"
+                    local slots_csv; slots_csv="$(echo "$combine_json" | jq -r '(.significantValues // .nonZeroValues) | keys | join(",")')"
                     echo
                     step "Resolving $non_zero non-zero slot(s) against $input_csv..."
                     julenny-toolkit crypto resolve-indicator \

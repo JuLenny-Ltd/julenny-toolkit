@@ -2256,12 +2256,27 @@ function Save-JlExecutionFile {
     }
 }
 
-# Slot indices of the non-zero values, numerically sorted.
+# Slot indices of the meaningful values, numerically sorted.
+#
+# The field name depends on the scheme. The whole-number path (BFV) writes
+# nonZeroValues; the decimal path (CKKS) writes significantValues, because CKKS
+# leaves every empty slot at about 1e-14 and "non-zero" would mean all of them.
+# Reading only nonZeroValues made every CKKS function look like it returned
+# nothing, whatever it had actually computed.
+function Get-JlResultSlotMap {
+    param([Parameter(Mandatory = $true)] $CombineJson)
+    foreach ($field in 'significantValues', 'nonZeroValues') {
+        if (($CombineJson.PSObject.Properties.Name -contains $field) -and
+            ($null -ne $CombineJson.$field)) { return $CombineJson.$field }
+    }
+    return $null
+}
+
 function Get-JlNonZeroSlots {
     param([Parameter(Mandatory = $true)] $CombineJson)
-    if (-not ($CombineJson.PSObject.Properties.Name -contains 'nonZeroValues')) { return @() }
-    if ($null -eq $CombineJson.nonZeroValues) { return @() }
-    return @($CombineJson.nonZeroValues.PSObject.Properties.Name | Sort-Object { [int] $_ })
+    $map = Get-JlResultSlotMap $CombineJson
+    if ($null -eq $map) { return @() }
+    return @($map.PSObject.Properties.Name | Sort-Object { [int] $_ })
 }
 
 function Invoke-JlViewerFlow {
@@ -2468,7 +2483,7 @@ function Invoke-JlViewerFlow {
                 Write-JlWarn "Output is declared '$outputLayout' but combine didn't report a uniform answer."
                 Write-JlWarn "Raw non-zero slot positions and values:"
                 foreach ($s in (Get-JlNonZeroSlots $combine)) {
-                    Write-Host ("    [{0}] = {1}" -f $s, $combine.nonZeroValues.$s)
+                    Write-Host ("    [{0}] = {1}" -f $s, (Get-JlResultSlotMap $combine).$s)
                 }
             }
         }
@@ -2554,7 +2569,7 @@ function Invoke-JlViewerFlow {
                 } else {
                     Write-JlSuccess "Both sides accepted these grid positions:"
                     foreach ($s in (Get-JlNonZeroSlots $combine)) {
-                        Write-Host ("    position {0}  (slot value {1})" -f $s, $combine.nonZeroValues.$s)
+                        Write-Host ("    position {0}  (slot value {1})" -f $s, (Get-JlResultSlotMap $combine).$s)
                     }
                     Write-JlInfo "Map positions back to contract terms with your grid file (comment lines excluded)."
                 }
@@ -2564,13 +2579,13 @@ function Invoke-JlViewerFlow {
             } elseif ($null -eq $def) {
                 Write-JlWarn "No function-def at $functionDefPath; cannot resolve indicator slots."
                 foreach ($s in (Get-JlNonZeroSlots $combine)) {
-                    Write-Host ("    [{0}] = {1}" -f $s, $combine.nonZeroValues.$s)
+                    Write-Host ("    [{0}] = {1}" -f $s, (Get-JlResultSlotMap $combine).$s)
                 }
             } elseif (-not $inputName) {
                 Write-JlWarn "Could not determine this side's indicator input from the function-def."
                 Write-JlWarn "Set JULENNY_INPUT_NAME to your indicator input and re-run to resolve names."
                 foreach ($s in (Get-JlNonZeroSlots $combine)) {
-                    Write-Host ("    [{0}] = {1}" -f $s, $combine.nonZeroValues.$s)
+                    Write-Host ("    [{0}] = {1}" -f $s, (Get-JlResultSlotMap $combine).$s)
                 }
             } else {
                 # Resolve hash-bucket positions back to record names against THIS
