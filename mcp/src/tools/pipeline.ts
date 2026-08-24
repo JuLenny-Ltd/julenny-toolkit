@@ -38,6 +38,7 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import { readFile, writeFile, stat } from 'node:fs/promises';
+import { createReadStream } from 'node:fs';
 import { JulennyApiClient } from '../api-client.js';
 import { runCli } from './lib/cli.js';
 import { resolveInWorkdir } from './lib/paths.js';
@@ -374,7 +375,12 @@ export function registerPipelineTools(server: McpServer, api: JulennyApiClient) 
       const key = urlResp.objectKey as string | undefined;
       if (!uploadUrl || !key) return { ok: false, error: 'upload-url did not return uploadUrl + objectKey' };
       objectKey = key;
-      await api.putSignedUrl(uploadUrl, await readFile(payloadPath));
+      // Stream from disk. readFile pulled the whole payload into memory and
+      // putSignedUrl then copied it again into a Uint8Array and a Blob, so a
+      // 320MB rotation key cost about a gigabyte of churn before the first byte
+      // went out. That stall, not the network, is what ran the call past the
+      // client's timeout.
+      await api.putSignedUrlFromFile(uploadUrl, payloadPath);
       const r = await runCli(['crypto', 'wrap-envelope', '--object-key', objectKey, '--size-bytes', String(size), ...common]);
       if (!r.ok) return { ok: false, error: `wrap-envelope (reference) failed: ${r.error ?? 'unknown error'}` };
     }
@@ -482,8 +488,16 @@ export function registerPipelineTools(server: McpServer, api: JulennyApiClient) 
         const { createHash } = await import('node:crypto');
         const uploaded: { keyType: string; objectKey: string; sha256Hex: string }[] = [];
         for (const k of p.keys) {
-          const blobBytes = await readFile(resolveInWorkdir(k.file));
-          const sha256Hex = createHash('sha256').update(blobBytes).digest('hex');
+          // Hash by streaming rather than buffering: the eval-sum key is ~71MB and
+          // there is no reason to hold it whole.
+          const keyPath = resolveInWorkdir(k.file);
+          const sha256Hex = await new Promise<string>((resolve, reject) => {
+            const h = createHash('sha256');
+            const rs = createReadStream(keyPath);
+            rs.on('data', (c) => h.update(c));
+            rs.on('end', () => resolve(h.digest('hex')));
+            rs.on('error', reject);
+          });
           const urlResp = await api.post(
             `/api/fhe-permissions/${p.permissionId}/keysetup/final-keys/upload-url`,
             { keyType: k.keyType },
@@ -493,7 +507,7 @@ export function registerPipelineTools(server: McpServer, api: JulennyApiClient) 
           if (!uploadUrl || !objectKey) {
             return fail(`upload-url for ${k.keyType} did not return uploadUrl + objectKey`);
           }
-          await api.putSignedUrl(uploadUrl, blobBytes);
+          await api.putSignedUrlFromFile(uploadUrl, keyPath);
           uploaded.push({ keyType: k.keyType, objectKey, sha256Hex });
         }
         // Build the to-sign, sign with the toolkit (it extracts the fields and signs
