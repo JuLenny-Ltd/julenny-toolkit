@@ -633,14 +633,21 @@ export function registerToolkitTools(server: McpServer) {
     },
     async (p) => {
       try {
-        // The combine --out-file JSON carries nonZeroValues as an object keyed by
-        // slot index. Read it here so the slots never travel through the model.
+        // The combine --out-file JSON keys the surviving slots by slot index. The
+        // field name depends on the scheme: the integer path (BFV) writes
+        // nonZeroValues, the real path (CKKS) writes significantValues, because
+        // CKKS leaves every empty slot at ~1e-14 and "non-zero" would mean all
+        // 8192 of them. Read BOTH. Reading only nonZeroValues made every CKKS
+        // function report "no matches" no matter what it computed: a real
+        // two-party cross-match returning 3 was reported to the user as 0.
+        // Read here so the slots never travel through the model.
         let slots: string[];
         try {
           const parsed = JSON.parse(await readFile(resolveInWorkdir(p.plaintext), 'utf8')) as {
             nonZeroValues?: Record<string, number>;
+            significantValues?: Record<string, number>;
           };
-          slots = Object.keys(parsed.nonZeroValues ?? {});
+          slots = Object.keys(parsed.significantValues ?? parsed.nonZeroValues ?? {});
         } catch (e) {
           return fail(`could not read the plaintext file '${p.plaintext}': ${(e as Error).message}. It must be the file decrypt_result wrote.`);
         }
