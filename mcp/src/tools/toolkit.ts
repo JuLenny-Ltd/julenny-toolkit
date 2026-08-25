@@ -618,8 +618,8 @@ export function registerToolkitTools(server: McpServer) {
   // Deliberately ONE verb rather than "read the slots, then resolve them": the slot
   // list IS the answer in encoded form, so handing it back to the model would leak
   // the result. This reads the combine output itself, derives the slots, runs the
-  // resolution, writes the matched records to a workdir file, and returns only a
-  // path and a count. The model never sees a record or a slot index.
+  // resolution, writes the matched records to a workdir file, and returns ONLY a path.
+  // The model never sees a record, a slot index, or a count.
   // ---- resolve_rules ----
   // The cross-match twin of resolve_matches, and NOT interchangeable with it.
   //
@@ -654,10 +654,15 @@ export function registerToolkitTools(server: McpServer) {
         } catch (e) {
           return fail(`could not read the plaintext file '${p.plaintext}': ${(e as Error).message}. It must be the file decrypt_result wrote.`);
         }
+        // No early return for the empty case. Branching on it announces that the answer
+        // was zero, which is as much a disclosure as returning a count: an empty result
+        // IS the result. Write the empty file and report the path, so every run looks
+        // identical from here.
         if (slots.length === 0) {
+          await writeFile(resolveInWorkdir(p.output), '', 'utf8');
           return ok({
-            outputPath: null,
-            summary: 'No slots above the noise threshold: no rule was matched by both sides. Nothing to resolve.',
+            outputPath: p.output,
+            summary: `Wrote the matched rules to '${p.output}'. TELL THE USER to open that file; its contents are not returned here by design.`,
           });
         }
 
@@ -688,7 +693,7 @@ export function registerToolkitTools(server: McpServer) {
 
   server.tool(
     'resolve_matches',
-    "Turn an itemized result into the list of YOUR records that matched, writing them to a workdir file. Takes the plaintext file produced by decrypt_result plus the local CSV you encrypted for that input. Returns a file path and a match count only - never the records themselves, and never the slot positions (those are the answer in encoded form). Tell the user the file path so they can read it; do not attempt to read it yourself.",
+    "Turn an itemized result into the list of YOUR records that matched, writing them to a workdir file. Takes the plaintext file produced by decrypt_result plus the local CSV you encrypted for that input. Returns a file path only - never the records themselves, never the slot positions (those are the answer in encoded form), and never how many there were. TELL THE USER the path so they can read it; do not attempt to read it yourself.",
     {
       plaintext: z.string().describe("Workdir-relative plaintext file from decrypt_result (the combine --out-file JSON)"),
       csv: z.string().describe('Workdir-relative local CSV that was encrypted for this input; its records are re-hashed to find the matches'),
@@ -717,11 +722,13 @@ export function registerToolkitTools(server: McpServer) {
         } catch (e) {
           return fail(`could not read the plaintext file '${p.plaintext}': ${(e as Error).message}. It must be the file decrypt_result wrote.`);
         }
+        // No early return for the empty case, for the same reason as resolve_rules:
+        // announcing "nothing to resolve" announces the answer.
         if (slots.length === 0) {
+          await writeFile(resolveInWorkdir(p.output), '', 'utf8');
           return ok({
-            matchCount: 0,
-            outputPath: null,
-            summary: 'No non-zero slots in the result: the two sets have no records in common. Nothing to resolve.',
+            outputPath: p.output,
+            summary: `Wrote the matched records to '${p.output}'. TELL THE USER to open that file; its contents are not returned here by design.`,
           });
         }
 
@@ -740,7 +747,6 @@ export function registerToolkitTools(server: McpServer) {
         const j = (r.json ?? {}) as { matches?: string[]; matchCount?: number; distinctMatchCount?: number; duplicateRowCount?: number; collidingSlotCount?: number; linesRead?: number; linesSkipped?: number; nonZeroSlotCount?: number };
         const matches = j.matches ?? [];
         const outPath = resolveInWorkdir(p.output);
-        await writeFile(outPath, matches.join('\n') + (matches.length ? '\n' : ''), 'utf8');
 
         const matchCount = j.matchCount ?? matches.length;
         const duplicateRows = j.duplicateRowCount ?? 0;
@@ -755,6 +761,10 @@ export function registerToolkitTools(server: McpServer) {
         // advice to widen the slot count, when the real cause was simply the same
         // person listed twice. Never hand the model an ambiguity it will resolve
         // by picking the scarier branch.
+        //
+        // These notes quote counts, so they go in the OUTPUT FILE, not the tool result.
+        // They are written for the person reading their matches, and that is where they
+        // are read. Returning them here would hand the model the count by the back door.
         const notes: string[] = [];
         if (duplicateRows > 0) {
           notes.push(
@@ -772,16 +782,13 @@ export function registerToolkitTools(server: McpServer) {
           );
         }
 
+        const body = matches.join('\n') + (matches.length ? '\n' : '');
+        const footer = notes.length ? '\n' + notes.map(n => `# ${n}`).join('\n') + '\n' : '';
+        await writeFile(outPath, body + footer, 'utf8');
+
         return ok({
           outputPath: p.output,
-          matchCount,
-          distinctMatchCount: distinctMatches,
-          duplicateRowCount: duplicateRows,
-          nonZeroSlotCount: j.nonZeroSlotCount ?? slots.length,
-          linesRead: j.linesRead,
-          linesSkipped: j.linesSkipped,
-          summary: `Wrote ${matchCount} matched record(s) to '${p.output}'. TELL THE USER to open that file; its contents are not returned here by design.`,
-          note: notes.length ? notes.join(' ') : undefined,
+          summary: `Wrote the matched records to '${p.output}'. TELL THE USER to open that file; its contents are not returned here by design.`,
         });
       } catch (e) {
         return fail(e instanceof Error ? e.message : 'invalid parameters');
