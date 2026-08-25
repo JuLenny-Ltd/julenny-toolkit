@@ -233,6 +233,19 @@ struct CryptoResolveIndicatorArgs {
     bool emit_json = false;
 };
 
+// Map itemized cross-match result slots back to the rule rows that produced them.
+// Unlike resolve-indicator, a slot here is NOT a hash of a record: the itemized
+// circuit places rule row i in slot i, so resolving is a positional lookup into
+// the same rule list. The parse MUST match the platform's (skip blank lines, skip
+// lines with no comma) or the row numbering diverges and the answer confidently
+// names the wrong rules.
+struct CryptoResolveRulesArgs {
+    std::string slots_csv;          // comma-separated significant slot indices
+    std::string rule_pairs_path;    // the rule list those slots index into
+    std::string output_path;        // where to write the matched rules
+    bool emit_json = false;
+};
+
 // Derive the rotation index set for the rule-based-cross-match function (or any
 // function with the same pair-list shape). Implements the hash-based
 // derivation rule: index = fnv1a_64(name) % slotCount over every name in
@@ -352,6 +365,7 @@ void register_crypto(CLI::App& app,
                      CryptoPartialDecryptArgs& partial_args,
                      CryptoCombineArgs& combine_args,
                      CryptoResolveIndicatorArgs& resolve_indicator_args,
+                     CryptoResolveRulesArgs& resolve_rules_args,
                      CryptoDeriveRotationIndicesArgs& derive_rotation_indices_args,
                      CryptoInspectArgs& inspect_args,
                      int* exit_code);

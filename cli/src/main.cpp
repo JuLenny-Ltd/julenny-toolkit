@@ -43,6 +43,7 @@ int main(int argc, char** argv) {
     julenny_fhe::cli::CryptoPartialDecryptArgs  crypto_partial_args;
     julenny_fhe::cli::CryptoCombineArgs         crypto_combine_args;
     julenny_fhe::cli::CryptoResolveIndicatorArgs crypto_resolve_indicator_args;
+    julenny_fhe::cli::CryptoResolveRulesArgs crypto_resolve_rules_args;
     julenny_fhe::cli::CryptoDeriveRotationIndicesArgs crypto_derive_rotation_indices_args;
     julenny_fhe::cli::CryptoInspectArgs         crypto_inspect_args;
 
@@ -64,6 +65,7 @@ int main(int argc, char** argv) {
                                        crypto_partial_args,
                                        crypto_combine_args,
                                        crypto_resolve_indicator_args,
+                                       crypto_resolve_rules_args,
                                        crypto_derive_rotation_indices_args,
                                        crypto_inspect_args, &exit_code);
 

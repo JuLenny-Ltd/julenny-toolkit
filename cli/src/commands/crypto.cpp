@@ -2287,6 +2287,117 @@ int run_crypto_resolve_indicator(const CryptoResolveIndicatorArgs& args) {
     return 0;
 }
 
+// Map itemized cross-match slots back to rule rows.
+//
+// The itemized circuit puts rule row i in slot i, so this is a positional lookup,
+// not a hash resolve. resolve-indicator cannot answer it: that command re-hashes
+// local records to find which slot they landed in, which is correct for overlap
+// and the wrong question here.
+//
+// The parse mirrors the platform's parseCsvPairs exactly: strip trailing CR/LF,
+// skip empty lines, skip lines with no comma, trim spaces around each half. Row
+// numbering is defined by which lines survive that filter, so any divergence
+// makes the output name the wrong rules while looking perfectly plausible.
+int run_crypto_resolve_rules(const CryptoResolveRulesArgs& args) {
+    if (args.slots_csv.empty() || args.rule_pairs_path.empty() || args.output_path.empty()) {
+        std::cerr << "error: --slots, --rule-pairs and --output are all required\n";
+        return 2;
+    }
+
+    std::vector<std::size_t> slots;
+    {
+        std::string buf;
+        auto flush = [&]() {
+            if (buf.empty()) return true;
+            try {
+                std::size_t pos = 0;
+                long long v = std::stoll(buf, &pos);
+                if (pos != buf.size()) throw std::runtime_error("trailing chars");
+                if (v < 0) throw std::runtime_error("negative");
+                slots.push_back(static_cast<std::size_t>(v));
+            } catch (const std::exception&) {
+                std::cerr << "error: bad slot token: '" << buf << "'\n";
+                return false;
+            }
+            buf.clear();
+            return true;
+        };
+        for (char c : args.slots_csv) {
+            if (c == ' ' || c == '\t') continue;
+            if (c == ',') { if (!flush()) return 2; }
+            else buf.push_back(c);
+        }
+        if (!flush()) return 2;
+    }
+    if (slots.empty()) {
+        std::cerr << "error: --slots parsed to an empty set\n";
+        return 2;
+    }
+
+    std::ifstream rf(args.rule_pairs_path);
+    if (!rf) {
+        std::cerr << "error: cannot open --rule-pairs: " << args.rule_pairs_path << "\n";
+        return 2;
+    }
+    std::vector<std::string> rows;
+    std::string line;
+    while (std::getline(rf, line)) {
+        while (!line.empty() && (line.back() == '\r' || line.back() == '\n')) line.pop_back();
+        if (line.empty()) continue;
+        auto comma = line.find(',');
+        if (comma == std::string::npos) continue;
+        std::string left  = line.substr(0, comma);
+        std::string right = line.substr(comma + 1);
+        auto trim_spaces = [](std::string& v) {
+            while (!v.empty() && v.front() == ' ') v.erase(v.begin());
+            while (!v.empty() && v.back()  == ' ') v.pop_back();
+        };
+        trim_spaces(left);
+        trim_spaces(right);
+        rows.push_back(left + "," + right);
+    }
+
+    std::vector<std::string> matched;
+    std::vector<std::size_t> out_of_range;
+    for (auto slot : slots) {
+        if (slot < rows.size()) matched.push_back(rows[slot]);
+        else out_of_range.push_back(slot);
+    }
+
+    std::filesystem::path op(args.output_path);
+    if (op.has_parent_path()) std::filesystem::create_directories(op.parent_path());
+    std::ofstream of(op, std::ios::trunc);
+    if (!of) {
+        std::cerr << "error: cannot open --output: " << args.output_path << "\n";
+        return 1;
+    }
+    for (const auto& m : matched) of << m << "\n";
+    if (!of) {
+        std::cerr << "error: write failed: " << args.output_path << "\n";
+        return 1;
+    }
+    of.close();
+
+    if (args.emit_json) {
+        json out;
+        out["status"]     = "ok";
+        out["outputPath"] = args.output_path;
+        // A slot past the end of the rule list means the two sides are not using the
+        // same file. Flag that it happened; the answer itself stays in the file.
+        out["outOfRange"] = !out_of_range.empty();
+        std::cout << out.dump(2) << "\n";
+    } else {
+        std::cout << "Wrote " << matched.size() << " matched rule(s) to " << args.output_path << "\n";
+        for (const auto& m : matched) std::cout << "    " << m << "\n";
+        if (!out_of_range.empty()) {
+            std::cout << "  WARNING: " << out_of_range.size() << " slot(s) fall past the end of this\n";
+            std::cout << "  rule list (" << rows.size() << " rows). The two sides are not using the\n";
+            std::cout << "  same rule file, so this answer cannot be trusted.\n";
+        }
+    }
+    return 0;
+}
+
 // Derive the rotation index set from rule_pairs alone, using FNV1a-64 mod
 // slotCount on every name. Toolkit-side mirror of the platform's
 // derivation (changed in 0.5.5 alongside rule-based-cross-match's encoding
@@ -2523,6 +2634,7 @@ void register_crypto(CLI::App& app,
                      CryptoPartialDecryptArgs& partial_args,
                      CryptoCombineArgs& combine_args,
                      CryptoResolveIndicatorArgs& resolve_indicator_args,
+                     CryptoResolveRulesArgs& resolve_rules_args,
                      CryptoDeriveRotationIndicesArgs& derive_rotation_indices_args,
                      CryptoInspectArgs& inspect_args,
                      int* exit_code) {
@@ -2913,6 +3025,19 @@ void register_crypto(CLI::App& app,
     // Re-derive the rotation index set from local plaintext files. Defensive
     // cross-check used by 04.5-rotation-keysetup.sh against the platform's
     // pendingRotationKeySetup.indices. Pure local: no FHE crypto, no network.
+    auto* resolve_rules = crypto->add_subcommand("resolve-rules",
+        "Map itemized cross-match result slots back to the rule rows that fired (positional, not hash-based; use resolve-indicator for overlap results)");
+    resolve_rules->add_option("--slots", resolve_rules_args.slots_csv,
+                              "Comma-separated slot indices from the decrypted result")->required();
+    resolve_rules->add_option("--rule-pairs", resolve_rules_args.rule_pairs_path,
+                              "The same rule list that was declared as the plaintext input")->required();
+    resolve_rules->add_option("--output", resolve_rules_args.output_path,
+                              "File to write the matched rules to")->required();
+    resolve_rules->add_flag  ("--json", resolve_rules_args.emit_json, "Emit JSON output");
+    resolve_rules->callback([&resolve_rules_args, exit_code]() {
+        *exit_code = run_crypto_resolve_rules(resolve_rules_args);
+    });
+
     auto* derive_rot = crypto->add_subcommand("derive-rotation-indices",
         "Re-derive the rotation index set from a local rule_pairs file using FNV1a-64 hash mod slot count (toolkit-side mirror of the platform's derivation)");
     derive_rot->add_option("--rule-pairs", derive_rotation_indices_args.rule_pairs_path,
