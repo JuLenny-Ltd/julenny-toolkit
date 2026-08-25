@@ -620,6 +620,72 @@ export function registerToolkitTools(server: McpServer) {
   // the result. This reads the combine output itself, derives the slots, runs the
   // resolution, writes the matched records to a workdir file, and returns only a
   // path and a count. The model never sees a record or a slot index.
+  // ---- resolve_rules ----
+  // The cross-match twin of resolve_matches, and NOT interchangeable with it.
+  //
+  // For an overlap result a slot is a hash of a record, so resolving means
+  // re-hashing your own rows to see which ones landed in a lit slot. For an
+  // itemized cross-match the circuit places rule row i in slot i, so resolving is
+  // a positional lookup into the rule list. Pointing resolve_matches at a
+  // cross-match result fails outright ("only supports indicator-hash schema"),
+  // which is the good outcome: the alternative is a confident wrong answer.
+  //
+  // Returns the output path and nothing else. Not the rules, not the slots, and
+  // not a count: for a cross-match the count IS the answer.
+  server.tool(
+    'resolve_rules',
+    "Turn an itemized rule-based-cross-match result into the list of rule rows that fired, writing them to a workdir file. Takes the plaintext file produced by decrypt_result plus the same rule list that was declared as the plaintext input. Use this for cross-match; use resolve_matches for overlap-style results where a slot is a hashed record. Returns a file path only - never the rules, the slot positions, or how many there were. TELL THE USER the path so they can read it; do not attempt to read it yourself.",
+    {
+      plaintext: z.string().describe('Workdir-relative plaintext file from decrypt_result (the combine --out-file JSON)'),
+      rulePairs: z.string().describe('Workdir-relative rule list, the same file declared as the plaintext rule input'),
+      output: z.string().describe('Workdir-relative file to write the matched rules to'),
+    },
+    async (p) => {
+      try {
+        // Read the slots here rather than taking them as a parameter, so they never
+        // travel through the model. They are the answer in encoded form.
+        let slots: string[];
+        try {
+          const parsed = JSON.parse(await readFile(resolveInWorkdir(p.plaintext), 'utf8')) as {
+            nonZeroValues?: Record<string, number>;
+            significantValues?: Record<string, number>;
+          };
+          slots = Object.keys(parsed.significantValues ?? parsed.nonZeroValues ?? {});
+        } catch (e) {
+          return fail(`could not read the plaintext file '${p.plaintext}': ${(e as Error).message}. It must be the file decrypt_result wrote.`);
+        }
+        if (slots.length === 0) {
+          return ok({
+            outputPath: null,
+            summary: 'No slots above the noise threshold: no rule was matched by both sides. Nothing to resolve.',
+          });
+        }
+
+        const r = await runCli([
+          'crypto', 'resolve-rules',
+          '--slots', slots.join(','),
+          '--rule-pairs', resolveInWorkdir(p.rulePairs),
+          '--output', resolveInWorkdir(p.output),
+          '--json',
+        ]);
+        if (!r.ok) return fail(r.error || 'resolve-rules failed', { exitCode: r.exitCode });
+
+        const j = (r.json ?? {}) as { outOfRange?: boolean };
+        return ok({
+          outputPath: p.output,
+          summary: `Wrote the matched rules to '${p.output}'. TELL THE USER to open that file; its contents are not returned here by design.`,
+          // Not a count, and not which slots: only that the two sides disagree about
+          // the rule file, which invalidates the whole answer.
+          note: j.outOfRange
+            ? 'WARNING: at least one slot falls past the end of this rule list, so the two sides are not using the same rule file. The result cannot be trusted. Compare the file both parties declared before reading the output.'
+            : undefined,
+        });
+      } catch (e) {
+        return fail(e instanceof Error ? e.message : 'invalid parameters');
+      }
+    },
+  );
+
   server.tool(
     'resolve_matches',
     "Turn an itemized result into the list of YOUR records that matched, writing them to a workdir file. Takes the plaintext file produced by decrypt_result plus the local CSV you encrypted for that input. Returns a file path and a match count only - never the records themselves, and never the slot positions (those are the answer in encoded form). Tell the user the file path so they can read it; do not attempt to read it yourself.",

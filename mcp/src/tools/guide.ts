@@ -216,7 +216,13 @@ export function registerGuideTools(server: McpServer, api: JulennyApiClient) {
 
         // ---- STAGE 4: decrypt / release ----
         if (released && amViewer) {
-          return ok({ ...base, stage: 'decrypt', executionId: released.id, summary: 'The result is released and you are the viewer. Download both partials and combine.', nextActions: [`download_result(executionId=${released.id})`, `download_partial(executionId=${released.id}) for the releaser's partial`, `partial_decrypt your own share (lead:${leadFlag})`, 'decrypt_result to combine; the plaintext is written to a workdir file you read from disk'] });
+          // Which resolver applies depends on what a slot MEANS in this function's
+          // output, which the agent cannot infer from the verb names. Say it here.
+          const pairList = /cross-match/.test(String(base.function ?? ''));
+          const resolveHint = pairList
+            ? 'resolve_rules(plaintext, rulePairs, output) to turn the slots into the rule rows that fired. NOT resolve_matches: that one re-hashes your own records, which is the wrong question here and fails outright.'
+            : 'resolve_matches(plaintext, csv, functionDef, inputName, output) to turn the slots back into your own matching records.';
+          return ok({ ...base, stage: 'decrypt', executionId: released.id, summary: 'The result is released and you are the viewer. Download both partials and combine.', nextActions: [`download_result(executionId=${released.id})`, `download_partial(executionId=${released.id}) for the releaser's partial`, `partial_decrypt your own share (lead:${leadFlag})`, 'decrypt_result to combine; the plaintext is written to a workdir file you read from disk', resolveHint] });
         }
         if (awaitingRelease && !amViewer) {
           return ok({ ...base, stage: 'release', executionId: awaitingRelease.id, summary: 'An execution is awaiting release and you are the releaser. Release your partial so the viewer can combine.', nextActions: [`release(executionId=${awaitingRelease.id})`] });
