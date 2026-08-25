@@ -1,9 +1,9 @@
-peanut allergy,peanuts
-peanut allergy,tree nuts
 gluten intolerance,wheat
 gluten intolerance,barley
 gluten intolerance,rye
 gluten intolerance,oats
+peanut allergy,peanuts
+peanut allergy,tree nuts
 celiac disease,wheat
 celiac disease,barley
 celiac disease,rye

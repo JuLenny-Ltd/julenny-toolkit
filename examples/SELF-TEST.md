@@ -121,11 +121,24 @@ data but cannot return a clean zero is not actually working.
 | `left_indicator` | `rule-based-cross-match/beta/data/beta_restrictions.txt` | queryAnalyst |
 | `right_indicator` | `rule-based-cross-match/acme/data/acme_ingredients.txt` | dataOwner |
 
-77 rule pairs, 3 restrictions, 3 ingredients. A pair counts when its left name is in
+77 rule pairs, 3 restrictions, 4 ingredients. A pair counts when its left name is in
 the restriction list *and* its right name is in the ingredient list.
 
-**Expected count: `1`** - `peanut allergy,peanuts`. It is the only pair whose both
-halves are present.
+**Expected count: `3`.** Three pairs have both halves present:
+
+| Rule row | Pair |
+|---|---|
+| 0 | `gluten intolerance,wheat` |
+| 4 | `peanut allergy,peanuts` |
+| 6 | `celiac disease,wheat` |
+
+`-count` returns `3`. `-itemized` lights up **slots 0, 4 and 6**, one per matching
+rule; run `crypto resolve-rules` over the same rule list to turn those slots back
+into the rule text.
+
+Note `wheat` matching twice, under two different restrictions. That is the point of
+this sample: a single-match fixture cannot tell a working itemization from a count,
+because one match and one total both produce exactly one non-zero slot.
 
 `rule_pairs` is a plaintext input, uploaded as-is: it defines the question, not the
 data. Upload it as **plaintext** (`kind=plaintext`), not as ciphertext, or declaring it
