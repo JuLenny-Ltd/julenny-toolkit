@@ -34,7 +34,7 @@ if (-not (Test-Path -LiteralPath $jointPk)) {
     Write-JlInfo "Joint public key missing locally; refetching..."
     $perms = Invoke-JlApi GET "/api/fhe-permissions?status=active&view=permissioned"
     $jointKeyId = ''
-    if ($perms -and ($perms.PSObject.Properties.Name -contains 'permissions')) {
+    if ($perms -and ((Test-JlHasProperty $perms 'permissions'))) {
         $match = @($perms.permissions | Where-Object { $_.id -eq $script:JULENNY_PERMISSION_ID })
         if ($match.Count -gt 0) { $jointKeyId = $match[0].jointKeyId }
     }

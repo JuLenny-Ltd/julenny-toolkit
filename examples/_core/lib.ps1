@@ -106,6 +106,103 @@ $script:JULENNY_SIGNING_SECRET = ''
 # ============================================================================
 # Local time of the machine running the script, prefixed on every log line so
 # logs from the two sides can be correlated.
+# Does $Object have a property called $Name?
+#
+# Do NOT write $Object.PSObject.Properties.Name -contains 'x'. When the object has
+# ZERO properties - an API returning {} - member enumeration on the empty property
+# collection cannot find 'Name', and StrictMode turns that into a TERMINATING
+# error. The guard written to be safe becomes the crash, and it only fires on a
+# first run, when nothing has been declared yet.
+# POST a hand-built multipart body.
+#
+# Windows PowerShell 5.1 mangles a byte[] passed to Invoke-RestMethod -Body when
+# -ContentType is set: the array goes through string encoding and every non-ASCII
+# byte is corrupted, so the server sees a body it cannot parse ("Failed to parse
+# body as FormData") and returns 500. Proven by sending byte-identical bodies two
+# ways: curl got 201, Invoke-RestMethod -Body got 500.
+#
+# -InFile sends the bytes verbatim, so write the body out and post the file.
+# The server's explanation, not just its status code.
+#
+# Windows PowerShell 5.1 surfaces only "(402) Payment Required" in
+# $_.Exception.Message and leaves the JSON body on the response stream. That body
+# is the difference between "your plan has ended" and "storage limit reached",
+# which is the whole answer, so read it.
+function Get-JlHttpErrorDetail {
+    param($ErrorRecord)
+    $detail = "$($ErrorRecord.Exception.Message)"
+    $body = ''
+
+    # PowerShell has ALREADY consumed the response stream by the time the error
+    # record reaches us, so GetResponseStream() reads empty. The body is kept on
+    # ErrorDetails.Message instead. Try that first, and fall back to the stream
+    # for hosts that populate one and not the other.
+    try {
+        if ($ErrorRecord.ErrorDetails -and $ErrorRecord.ErrorDetails.Message) {
+            $body = "$($ErrorRecord.ErrorDetails.Message)"
+        }
+    } catch { }
+    if (-not $body) {
+        try {
+            $resp = $ErrorRecord.Exception.Response
+            if ($resp) {
+                $stream = $resp.GetResponseStream()
+                if ($stream) {
+                    if ($stream.CanSeek) { $stream.Position = 0 }
+                    $reader = New-Object System.IO.StreamReader($stream)
+                    $body = $reader.ReadToEnd()
+                    $reader.Dispose()
+                }
+            }
+        } catch { }
+    }
+    if ($body) {
+        $msg = $body
+        try {
+            $parsed = $body | ConvertFrom-Json
+            if (Test-JlHasProperty $parsed 'error')       { $msg = $parsed.error }
+            elseif (Test-JlHasProperty $parsed 'message') { $msg = $parsed.message }
+        } catch { }
+        $detail = "$detail - $msg"
+    }
+    return $detail
+}
+
+function Invoke-JlMultipartPost {
+    param(
+        [Parameter(Mandatory = $true)][string] $Uri,
+        [Parameter(Mandatory = $true)][byte[]] $Body,
+        [Parameter(Mandatory = $true)][string] $Boundary,
+        [hashtable] $Headers = @{}
+    )
+    $tmp = [System.IO.Path]::Combine([System.IO.Path]::GetTempPath(), "jl-multipart-$([System.Guid]::NewGuid().ToString('N')).bin")
+    try {
+        [System.IO.File]::WriteAllBytes($tmp, $Body)
+        return Invoke-RestMethod -Method POST -Uri $Uri -Headers $Headers `
+                   -ContentType "multipart/form-data; boundary=$Boundary" `
+                   -InFile $tmp -ErrorAction Stop
+    } finally {
+        Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue
+    }
+}
+
+function Test-JlHasProperty {
+    param($Object, [string] $Name)
+    if ($null -eq $Object) { return $false }
+    foreach ($p in $Object.PSObject.Properties) { if ($p.Name -eq $Name) { return $true } }
+    return $false
+}
+
+# Number of permissions the platform reports for a collaboration. The API renamed
+# this field to grantCount; older builds returned permissionCount. Read either.
+function Get-JlGrantCount {
+    param($Project)
+    foreach ($field in 'grantCount', 'permissionCount') {
+        if (Test-JlHasProperty $Project $field) { return [int]("0" + "$($Project.$field)") }
+    }
+    return 0
+}
+
 function Get-JlTimestamp { return (Get-Date -Format 'HH:mm:ss') }
 
 function Write-JlInfo {
@@ -488,7 +585,7 @@ function Get-JlPermission {
     if (-not $View)         { $View = $script:JL_PERM_VIEW }
 
     $resp = Invoke-JlApi GET "/api/fhe-permissions?status=active&view=$View"
-    if ($resp -and ($resp.PSObject.Properties.Name -contains 'permissions')) {
+    if ($resp -and ((Test-JlHasProperty $resp 'permissions'))) {
         $match = @($resp.permissions | Where-Object { $_.id -eq $PermissionId })
         if ($match.Count -gt 0) { return $match[0] }
     }
@@ -501,7 +598,7 @@ function Get-JlPermission {
 function Get-JlResultVisibility {
     $perm = Get-JlPermission
     $vis = ''
-    if ($perm -and $perm.PSObject.Properties.Name -contains 'resultVisibility') {
+    if ($perm -and (Test-JlHasProperty $perm 'resultVisibility')) {
         $vis = $perm.resultVisibility
     }
     if ([string]::IsNullOrWhiteSpace($vis)) { $vis = 'dataConsumer' }
@@ -530,7 +627,7 @@ function Get-JlPeerMessages {
 function Get-JlCollaborations {
     $resp = Invoke-JlApi GET "/api/fhe-projects?view=$($script:JL_PERM_VIEW)"
     if ($null -eq $resp) { return @() }
-    if ($resp.PSObject.Properties.Name -contains 'projects') { return @($resp.projects) }
+    if ((Test-JlHasProperty $resp 'projects')) { return @($resp.projects) }
     return @($resp)
 }
 
@@ -538,14 +635,14 @@ function Get-JlPermissionsForJointKey {
     param([Parameter(Mandatory = $true)][string] $JointKeyId)
     $resp = Invoke-JlApi GET "/api/fhe-permissions?view=$($script:JL_PERM_VIEW)&jointKeyId=$JointKeyId"
     if ($null -eq $resp) { return @() }
-    if ($resp.PSObject.Properties.Name -contains 'permissions') { return @($resp.permissions) }
+    if ((Test-JlHasProperty $resp 'permissions')) { return @($resp.permissions) }
     return @($resp)
 }
 
 function Get-JlFunctions {
     $resp = Invoke-JlApi GET "/api/fhe-functions"
     if ($null -eq $resp) { return @() }
-    if ($resp.PSObject.Properties.Name -contains 'functions') { return @($resp.functions) }
+    if ((Test-JlHasProperty $resp 'functions')) { return @($resp.functions) }
     return @($resp)
 }
 
@@ -557,7 +654,7 @@ function Get-JlFunctionsByScheme {
 function Get-JlMyDatasetsInProject {
     $resp = Invoke-JlApi GET "/api/fhe-datasets?projectId=$($script:JULENNY_PROJECT_ID)" -AllowFailure
     if ($null -eq $resp) { return @() }
-    if ($resp.PSObject.Properties.Name -contains 'datasets') { return @($resp.datasets) }
+    if ((Test-JlHasProperty $resp 'datasets')) { return @($resp.datasets) }
     return @($resp)
 }
 
@@ -617,7 +714,7 @@ function Get-JlPeerMessageOfType {
     param([Parameter(Mandatory = $true)][string] $MessageType)
     $resp = Get-JlPeerKeysetupMessages
     if ($null -eq $resp) { return $null }
-    if (-not ($resp.PSObject.Properties.Name -contains 'messages')) { return $null }
+    if (-not ((Test-JlHasProperty $resp 'messages'))) { return $null }
     foreach ($m in @($resp.messages)) {
         if ($m.messageType -eq $MessageType) { return $m }
     }
@@ -637,9 +734,9 @@ function Save-JlPeerShare {
     }
 
     $payloadB64 = ''
-    if ($msg.PSObject.Properties.Name -contains 'payloadB64') { $payloadB64 = $msg.payloadB64 }
+    if ((Test-JlHasProperty $msg 'payloadB64')) { $payloadB64 = $msg.payloadB64 }
     $downloadUrl = ''
-    if ($msg.PSObject.Properties.Name -contains 'downloadUrl') { $downloadUrl = $msg.downloadUrl }
+    if ((Test-JlHasProperty $msg 'downloadUrl')) { $downloadUrl = $msg.downloadUrl }
 
     $parent = Split-Path -Parent $OutPath
     if ($parent -and -not (Test-Path -LiteralPath $parent)) {
@@ -710,8 +807,8 @@ function Request-JlUploadUrl {
     $url = ''
     $key = ''
     if ($resp) {
-        if ($resp.PSObject.Properties.Name -contains 'uploadUrl') { $url = $resp.uploadUrl }
-        if ($resp.PSObject.Properties.Name -contains 'objectKey') { $key = $resp.objectKey }
+        if ((Test-JlHasProperty $resp 'uploadUrl')) { $url = $resp.uploadUrl }
+        if ((Test-JlHasProperty $resp 'objectKey')) { $key = $resp.objectKey }
     }
     if ([string]::IsNullOrWhiteSpace($url) -or [string]::IsNullOrWhiteSpace($key)) {
         Stop-JlWithError "Failed to obtain upload URL for round $Round."
@@ -778,7 +875,7 @@ function Publish-JlEnvelope {
         $resp = Invoke-RestMethod -Method POST -Uri $uri `
                                   -Headers @{ 'x-api-key' = $script:JULENNY_API_KEY } `
                                   -InFile $jsonPath -ContentType 'application/json' -ErrorAction Stop
-        if ($resp -and ($resp.PSObject.Properties.Name -contains 'message')) {
+        if ($resp -and ((Test-JlHasProperty $resp 'message'))) {
             Write-JlSuccess "Uploaded ${MessageType}: $($resp.message)"
         } else {
             Write-JlSuccess "Uploaded $MessageType"
@@ -830,8 +927,8 @@ function New-JlCollaboration {
     }
     $newId = ''
     if ($resp) {
-        if ($resp.PSObject.Properties.Name -contains 'project' -and $resp.project) { $newId = $resp.project.id }
-        elseif ($resp.PSObject.Properties.Name -contains 'id')                     { $newId = $resp.id }
+        if ((Test-JlHasProperty $resp 'project') -and $resp.project) { $newId = $resp.project.id }
+        elseif ((Test-JlHasProperty $resp 'id'))                     { $newId = $resp.id }
     }
     if ([string]::IsNullOrWhiteSpace($newId)) {
         Stop-JlWithError "Collaboration creation succeeded but no id was returned."
@@ -867,9 +964,9 @@ function New-JlPermission {
     $resp = Invoke-JlApi POST "/api/fhe-permissions" -Body $body
     $newId = ''
     if ($resp) {
-        if     ($resp.PSObject.Properties.Name -contains 'permission' -and $resp.permission) { $newId = $resp.permission.id }
-        elseif ($resp.PSObject.Properties.Name -contains 'id')                               { $newId = $resp.id }
-        elseif ($resp.PSObject.Properties.Name -contains 'permissionId')                     { $newId = $resp.permissionId }
+        if     ((Test-JlHasProperty $resp 'permission') -and $resp.permission) { $newId = $resp.permission.id }
+        elseif ((Test-JlHasProperty $resp 'id'))                               { $newId = $resp.id }
+        elseif ((Test-JlHasProperty $resp 'permissionId'))                     { $newId = $resp.permissionId }
     }
     if ([string]::IsNullOrWhiteSpace($newId)) {
         Stop-JlWithError "Permission creation succeeded but no id was returned."
@@ -900,7 +997,7 @@ function Get-JlRequiredEvalKeys {
     param([string] $Path = '')
     $def = Get-JlFunctionDefObject $Path
     if ($null -eq $def) { return @('relinearization', 'sum') }
-    if (-not ($def.PSObject.Properties.Name -contains 'requiredEvalKeys') -or $null -eq $def.requiredEvalKeys) {
+    if (-not ((Test-JlHasProperty $def 'requiredEvalKeys')) -or $null -eq $def.requiredEvalKeys) {
         return @('relinearization', 'sum')
     }
     return @($def.requiredEvalKeys)
@@ -919,21 +1016,21 @@ function Test-JlFunctionRequiresSumKeys {
 function Get-JlPendingRotationKeysetup {
     $state = Get-JlKeysetupState
     if ($null -eq $state) { return $null }
-    if (-not ($state.PSObject.Properties.Name -contains 'pendingRotationKeySetup')) { return $null }
+    if (-not ((Test-JlHasProperty $state 'pendingRotationKeySetup'))) { return $null }
     return $state.pendingRotationKeySetup
 }
 
 function Get-JlPendingRotationIndicesCsv {
     $prks = Get-JlPendingRotationKeysetup
     if ($null -eq $prks) { return '' }
-    if (-not ($prks.PSObject.Properties.Name -contains 'indices') -or $null -eq $prks.indices) { return '' }
+    if (-not ((Test-JlHasProperty $prks 'indices')) -or $null -eq $prks.indices) { return '' }
     return (@($prks.indices) -join ',')
 }
 
 function Get-JlRotationStatus {
     $prks = Get-JlPendingRotationKeysetup
     if ($null -eq $prks) { return 'absent' }
-    if (-not ($prks.PSObject.Properties.Name -contains 'status') -or [string]::IsNullOrWhiteSpace($prks.status)) {
+    if (-not ((Test-JlHasProperty $prks 'status')) -or [string]::IsNullOrWhiteSpace($prks.status)) {
         return 'absent'
     }
     return $prks.status
@@ -952,7 +1049,7 @@ function Wait-JlPendingRotationIndices {
         try { $prks = Get-JlPendingRotationKeysetup } catch { $prks = $null }
         if ($null -ne $prks) {
             $n = 0
-            if (($prks.PSObject.Properties.Name -contains 'indices') -and $null -ne $prks.indices) {
+            if (((Test-JlHasProperty $prks 'indices')) -and $null -ne $prks.indices) {
                 $n = @($prks.indices).Count
             }
             if ($n -gt 0) {
@@ -960,7 +1057,7 @@ function Wait-JlPendingRotationIndices {
                 return
             }
             $status = ''
-            if ($prks.PSObject.Properties.Name -contains 'status') { $status = $prks.status }
+            if ((Test-JlHasProperty $prks 'status')) { $status = $prks.status }
             if ($status -eq 'complete') {
                 Write-JlInfo "Platform derived an empty index set and transitioned to complete."
                 Write-JlInfo "No rotation keys needed for this execution."
@@ -1009,11 +1106,11 @@ function Get-JlRotationRoundOffset {
 
     $state = Get-JlKeysetupState
     $total = 0
-    if ($state -and ($state.PSObject.Properties.Name -contains 'totalRounds') -and $state.totalRounds) {
+    if ($state -and ((Test-JlHasProperty $state 'totalRounds')) -and $state.totalRounds) {
         $total = [int] $state.totalRounds
     }
     $prks = $null
-    if ($state -and ($state.PSObject.Properties.Name -contains 'pendingRotationKeySetup')) {
+    if ($state -and ((Test-JlHasProperty $state 'pendingRotationKeySetup'))) {
         $prks = $state.pendingRotationKeySetup
     }
 
@@ -1096,15 +1193,13 @@ function Send-JlDataset {
         }
         $uri = "$($script:JULENNY_API_BASE)/api/fhe-data-upload?permissionId=$($script:JULENNY_PERMISSION_ID)"
         try {
-            $resp = Invoke-RestMethod -Method POST -Uri $uri `
-                        -Headers @{ 'x-api-key' = $script:JULENNY_API_KEY } `
-                        -ContentType "multipart/form-data; boundary=$boundary" `
-                        -Body $body -ErrorAction Stop
+            $resp = Invoke-JlMultipartPost -Uri $uri -Body $body -Boundary $boundary `
+                        -Headers @{ 'x-api-key' = $script:JULENNY_API_KEY }
         } catch {
-            Stop-JlWithError "Dataset upload failed: $($_.Exception.Message)"
+            Stop-JlWithError "Dataset upload failed: $(Get-JlHttpErrorDetail $_)"
         }
         $id = ''
-        if ($resp -and ($resp.PSObject.Properties.Name -contains 'datasetId')) { $id = $resp.datasetId }
+        if ($resp -and ((Test-JlHasProperty $resp 'datasetId'))) { $id = $resp.datasetId }
         if ([string]::IsNullOrWhiteSpace($id)) {
             Stop-JlWithError "Dataset upload succeeded but no datasetId was returned."
         }
@@ -1119,8 +1214,8 @@ function Send-JlDataset {
     $upUrl = ''
     $id = ''
     if ($urlResp) {
-        if ($urlResp.PSObject.Properties.Name -contains 'uploadUrl') { $upUrl = $urlResp.uploadUrl }
-        if ($urlResp.PSObject.Properties.Name -contains 'datasetId') { $id    = $urlResp.datasetId }
+        if ((Test-JlHasProperty $urlResp 'uploadUrl')) { $upUrl = $urlResp.uploadUrl }
+        if ((Test-JlHasProperty $urlResp 'datasetId')) { $id    = $urlResp.datasetId }
     }
     if ([string]::IsNullOrWhiteSpace($upUrl) -or [string]::IsNullOrWhiteSpace($id)) {
         Stop-JlWithError "upload-url did not return both an uploadUrl and a datasetId."
@@ -1143,7 +1238,7 @@ function Send-JlDataset {
         retentionDays = 90
     }
     $confirmedId = ''
-    if ($confirm -and ($confirm.PSObject.Properties.Name -contains 'datasetId')) {
+    if ($confirm -and ((Test-JlHasProperty $confirm 'datasetId'))) {
         $confirmedId = $confirm.datasetId
     }
     if ([string]::IsNullOrWhiteSpace($confirmedId)) {
@@ -1160,7 +1255,7 @@ function Test-JlAllRequiredInputsDeclared {
     param([string] $FunctionDefPath = '')
     $def = Get-JlFunctionDefObject $FunctionDefPath
     if ($null -eq $def) { return $false }
-    if (-not ($def.PSObject.Properties.Name -contains 'inputs') -or $null -eq $def.inputs) { return $false }
+    if (-not ((Test-JlHasProperty $def 'inputs')) -or $null -eq $def.inputs) { return $false }
 
     $resp = Invoke-JlApi GET "/api/fhe-permissions/$($script:JULENNY_PERMISSION_ID)/preferred-datasets" -AllowFailure
     if ($null -eq $resp) { return $false }
@@ -1168,10 +1263,10 @@ function Test-JlAllRequiredInputsDeclared {
     foreach ($input in @($def.inputs)) {
         $name = $input.name
         if ([string]::IsNullOrWhiteSpace($name)) { continue }
-        if (-not ($resp.PSObject.Properties.Name -contains $name)) { return $false }
+        if (-not ((Test-JlHasProperty $resp $name))) { return $false }
         $entry = $resp.$name
         if ($null -eq $entry) { return $false }
-        if (-not ($entry.PSObject.Properties.Name -contains 'datasetId')) { return $false }
+        if (-not ((Test-JlHasProperty $entry 'datasetId'))) { return $false }
         if ([string]::IsNullOrWhiteSpace($entry.datasetId)) { return $false }
     }
     return $true
@@ -1275,10 +1370,10 @@ function Invoke-JlInitSession {
     # project ownership instead wrongly hides collabs the other party created.
     $mine = @($all | Where-Object {
         $roles = @()
-        if ($_.PSObject.Properties.Name -contains 'yourPermissionRoles' -and $_.yourPermissionRoles) {
+        if ((Test-JlHasProperty $_ 'yourPermissionRoles') -and $_.yourPermissionRoles) {
             $roles = @($_.yourPermissionRoles)
         }
-        ($roles -contains $myRoleName) -or ([int]("0" + "$($_.permissionCount)") -gt 0)
+        ($roles -contains $myRoleName) -or ((Get-JlGrantCount $_) -gt 0)
     } | Sort-Object createdAt -Descending)
 
     Write-Host ""
@@ -1291,7 +1386,7 @@ function Invoke-JlInitSession {
             $created = "$($mine[$i].createdAt)"
             if ($created.Length -gt 10) { $created = $created.Substring(0, 10) }
             Write-Host ("  [{0}] {1}  |  peer: {2}  |  {3} permission(s)  |  keysetup: {4}  |  created {5}  |  id: {6}" -f `
-                ($i + 1), $mine[$i].name, $peer, $mine[$i].permissionCount, $mine[$i].keysetupState, $created, $mine[$i].id)
+                ($i + 1), $mine[$i].name, $peer, (Get-JlGrantCount $mine[$i]), $mine[$i].keysetupState, $created, $mine[$i].id)
         }
     } else {
         Write-JlInfo "No active collaborations where you're the $myRoleName."
@@ -1385,7 +1480,7 @@ function Invoke-JlInitSession {
         }
         $project = $mine[$n - 1]
         $projectId = $project.id
-        if ($project.PSObject.Properties.Name -contains 'jointKeyId') { $jointKeyId = $project.jointKeyId }
+        if ((Test-JlHasProperty $project 'jointKeyId')) { $jointKeyId = $project.jointKeyId }
         Write-JlSuccess "Selected collaboration: $($project.name) ($projectId)"
 
         $perms = @(Get-JlPermissionsForJointKey $projectId)
@@ -1436,7 +1531,7 @@ function Invoke-JlInitSession {
                 Stop-JlWithError "Invalid choice: $permChoice"
             }
             $permId = $perms[$n - 1].id
-            if ($perms[$n - 1].PSObject.Properties.Name -contains 'jointKeyId') { $jointKeyId = $perms[$n - 1].jointKeyId }
+            if ((Test-JlHasProperty $perms[$n - 1] 'jointKeyId')) { $jointKeyId = $perms[$n - 1].jointKeyId }
             Write-JlSuccess "Selected permission: $permId"
         }
     }
@@ -1446,7 +1541,7 @@ function Invoke-JlInitSession {
     # -------- Resolve the joint key and activate the per-collab workdir --------
     if (-not $jointKeyId) {
         $perm = Get-JlPermission -PermissionId $permId
-        if ($perm -and ($perm.PSObject.Properties.Name -contains 'jointKeyId')) { $jointKeyId = $perm.jointKeyId }
+        if ($perm -and ((Test-JlHasProperty $perm 'jointKeyId'))) { $jointKeyId = $perm.jointKeyId }
     }
     if (-not $jointKeyId) {
         Stop-JlWithError "Could not resolve a jointKeyId for permission $permId."
@@ -1460,11 +1555,11 @@ function Invoke-JlInitSession {
     $fnVersion = $permObj.functionVersion
     $ctxSpec   = $permObj.cryptoContextSpec
     $visibility = 'dataConsumer'
-    if ($permObj.PSObject.Properties.Name -contains 'resultVisibility' -and $permObj.resultVisibility) {
+    if ((Test-JlHasProperty $permObj 'resultVisibility') -and $permObj.resultVisibility) {
         $visibility = $permObj.resultVisibility
     }
     $peerCollab = ''
-    if ($permObj.PSObject.Properties.Name -contains $script:JL_PEER_COLLAB_FIELD) {
+    if ((Test-JlHasProperty $permObj $script:JL_PEER_COLLAB_FIELD)) {
         $peerCollab = $permObj.$($script:JL_PEER_COLLAB_FIELD)
     }
 
@@ -1484,7 +1579,7 @@ function Invoke-JlInitSession {
     Write-JlSuccess "Function definition saved: $fnDefPath ($fnSlug v$fnVersion)"
 
     $scheme = ''
-    if ($fnDef.PSObject.Properties.Name -contains 'scheme') { $scheme = $fnDef.scheme }
+    if ((Test-JlHasProperty $fnDef 'scheme')) { $scheme = $fnDef.scheme }
 
     # -------- Signing keypair --------
     # Account-scoped and scheme-agnostic: generated once per machine and reused
@@ -1590,7 +1685,7 @@ function Invoke-JlEncryptAndUploadInputs {
     Write-JlStep "$($script:JL_OUR_LABEL): pick datasets for $MyRole inputs"
 
     $myInputs = @()
-    if ($def.PSObject.Properties.Name -contains 'inputs' -and $def.inputs) {
+    if ((Test-JlHasProperty $def 'inputs') -and $def.inputs) {
         $myInputs = @($def.inputs | Where-Object { $_.role -eq $MyRole })
     }
     if ($myInputs.Count -eq 0) {
@@ -1619,7 +1714,7 @@ function Invoke-JlEncryptAndUploadInputs {
             Write-JlInfo "Fetching joint public key from platform..."
             $perm = Get-JlPermission
             $jointKeyId = ''
-            if ($perm -and ($perm.PSObject.Properties.Name -contains 'jointKeyId')) { $jointKeyId = $perm.jointKeyId }
+            if ($perm -and ((Test-JlHasProperty $perm 'jointKeyId'))) { $jointKeyId = $perm.jointKeyId }
             if ([string]::IsNullOrWhiteSpace($jointKeyId)) {
                 Stop-JlWithError "Permission has no jointKeyId. Keysetup may not be complete."
             }
@@ -1656,7 +1751,7 @@ function Invoke-JlEncryptAndUploadInputs {
             Write-JlInfo "Existing dataset(s) in this project:"
             for ($i = 0; $i -lt $existing.Count; $i++) {
                 $created = '?'
-                if ($existing[$i].PSObject.Properties.Name -contains 'createdAt' -and $existing[$i].createdAt) {
+                if ((Test-JlHasProperty $existing[$i] 'createdAt') -and $existing[$i].createdAt) {
                     $created = "$($existing[$i].createdAt)".Substring(0, [Math]::Min(10, "$($existing[$i].createdAt)".Length))
                 }
                 Write-Host ("  {0}) {1}  (id: {2}, uploaded {3})" -f ($i + 1), $existing[$i].name, $existing[$i].id, $created)
@@ -1803,8 +1898,8 @@ function Request-JlFinalKeyUploadUrl {
     $url = ''
     $key = ''
     if ($resp) {
-        if ($resp.PSObject.Properties.Name -contains 'uploadUrl') { $url = $resp.uploadUrl }
-        if ($resp.PSObject.Properties.Name -contains 'objectKey') { $key = $resp.objectKey }
+        if ((Test-JlHasProperty $resp 'uploadUrl')) { $url = $resp.uploadUrl }
+        if ((Test-JlHasProperty $resp 'objectKey')) { $key = $resp.objectKey }
     }
     if ([string]::IsNullOrWhiteSpace($url) -or [string]::IsNullOrWhiteSpace($key)) {
         Stop-JlWithError "upload-url for $KeyType did not return both an uploadUrl and an objectKey."
@@ -1852,7 +1947,7 @@ function Invoke-JlFinalizeKeysetup {
                              -Body @{ keyType = 'joint_public_key' } -AllowFailure
     if ($null -eq $precheck) {
         $state = Get-JlKeysetupState
-        if ($state -and ($state.PSObject.Properties.Name -contains 'state') -and $state.state -eq 'complete') {
+        if ($state -and ((Test-JlHasProperty $state 'state')) -and $state.state -eq 'complete') {
             Write-JlInfo "Final keys already registered for this permission (keysetup complete). Skipping finalize."
             New-Item -ItemType File -Path $marker -Force | Out-Null
             return
@@ -2038,11 +2133,16 @@ function Invoke-JlFinalizeKeysetup {
     # -------- 8. Report --------
     $state = ''
     if ($resp) {
-        if     ($resp.PSObject.Properties.Name -contains 'permissionState') { $state = $resp.permissionState }
-        elseif ($resp.PSObject.Properties.Name -contains 'state')           { $state = $resp.state }
+        # grantState is what the API returns today; the other two are older names.
+        # Matching none of them used to fall through to the "unexpected state"
+        # branch, which skipped the completion marker and stalled a run whose
+        # submission had actually succeeded.
+        foreach ($field in 'grantState', 'permissionState', 'state') {
+            if ((Test-JlHasProperty $resp $field)) { $state = $resp.$field; break }
+        }
     }
     $msg = ''
-    if ($resp -and ($resp.PSObject.Properties.Name -contains 'message')) { $msg = $resp.message }
+    if ($resp -and ((Test-JlHasProperty $resp 'message'))) { $msg = $resp.message }
 
     Write-Host ""
     switch -Regex ($state) {
@@ -2088,7 +2188,7 @@ function Get-JlExecutionsInState {
     param([Parameter(Mandatory = $true)][string] $State)
     $resp = Invoke-JlApi GET "/api/fhe-permissions/$($script:JULENNY_PERMISSION_ID)/executions?state=$State" -AllowFailure
     if ($null -eq $resp) { return @() }
-    if (-not ($resp.PSObject.Properties.Name -contains 'executions')) { return @() }
+    if (-not ((Test-JlHasProperty $resp 'executions'))) { return @() }
     return @($resp.executions)
 }
 
@@ -2185,12 +2285,11 @@ function Invoke-JlReleaserFlow {
                 $body = New-JlMultipartBody -FilePath $partialBin -Boundary $boundary -Fields @{}
                 $state = ''
                 try {
-                    $resp = Invoke-RestMethod -Method POST `
+                    $resp = Invoke-JlMultipartPost `
                         -Uri "$($script:JULENNY_API_BASE)/api/executions/$execId/partial-decrypt" `
-                        -Headers @{ 'x-api-key' = $script:JULENNY_API_KEY; 'x-jl-signature' = $sigHex } `
-                        -ContentType "multipart/form-data; boundary=$boundary" `
-                        -Body $body -ErrorAction Stop
-                    if ($resp -and ($resp.PSObject.Properties.Name -contains 'state')) { $state = $resp.state }
+                        -Body $body -Boundary $boundary `
+                        -Headers @{ 'x-api-key' = $script:JULENNY_API_KEY; 'x-jl-signature' = $sigHex }
+                    if ($resp -and ((Test-JlHasProperty $resp 'state'))) { $state = $resp.state }
                 } catch {
                     Write-JlWarn "Upload failed for ${execId}: $($_.Exception.Message)"
                 }
@@ -2266,7 +2365,7 @@ function Save-JlExecutionFile {
 function Get-JlResultSlotMap {
     param([Parameter(Mandatory = $true)] $CombineJson)
     foreach ($field in 'significantValues', 'nonZeroValues') {
-        if (($CombineJson.PSObject.Properties.Name -contains $field) -and
+        if (((Test-JlHasProperty $CombineJson $field)) -and
             ($null -ne $CombineJson.$field)) { return $CombineJson.$field }
     }
     return $null
@@ -2313,13 +2412,13 @@ function Invoke-JlViewerFlow {
         if ($wantExec) {
             $doc = Invoke-JlApi GET "/api/executions/$wantExec" -AllowFailure
             $state = 'unknown'
-            if ($doc -and ($doc.PSObject.Properties.Name -contains 'state')) { $state = $doc.state }
+            if ($doc -and ((Test-JlHasProperty $doc 'state'))) { $state = $doc.state }
 
             if ($state -eq 'released') {
                 $execId = $wantExec
                 $execWhen = 'unknown date'
-                if ($doc.PSObject.Properties.Name -contains 'releasedAt' -and $doc.releasedAt) { $execWhen = $doc.releasedAt }
-                elseif ($doc.PSObject.Properties.Name -contains 'triggeredAt' -and $doc.triggeredAt) { $execWhen = $doc.triggeredAt }
+                if ((Test-JlHasProperty $doc 'releasedAt') -and $doc.releasedAt) { $execWhen = $doc.releasedAt }
+                elseif ((Test-JlHasProperty $doc 'triggeredAt') -and $doc.triggeredAt) { $execWhen = $doc.triggeredAt }
                 Remove-Item -LiteralPath $lastExecFile -Force -ErrorAction SilentlyContinue
                 Write-JlSuccess "This cycle's execution is released: $execId ($execWhen)"
                 break
@@ -2351,14 +2450,14 @@ function Invoke-JlViewerFlow {
             if ($released.Count -eq 1) {
                 $execId = $released[0].id
                 $execWhen = 'unknown date'
-                if ($released[0].PSObject.Properties.Name -contains 'releasedAt' -and $released[0].releasedAt) { $execWhen = $released[0].releasedAt }
+                if ((Test-JlHasProperty $released[0] 'releasedAt') -and $released[0].releasedAt) { $execWhen = $released[0].releasedAt }
                 Write-JlSuccess "Single released execution: $execId ($execWhen)"
                 break
             }
             Write-JlInfo "Found $($released.Count) released executions (newest first):"
             for ($i = 0; $i -lt $released.Count; $i++) {
                 $when = 'unknown date'
-                if ($released[$i].PSObject.Properties.Name -contains 'releasedAt' -and $released[$i].releasedAt) { $when = $released[$i].releasedAt }
+                if ((Test-JlHasProperty $released[$i] 'releasedAt') -and $released[$i].releasedAt) { $when = $released[$i].releasedAt }
                 Write-Host ("  {0}) {1}  ({2})" -f ($i + 1), $released[$i].id, $when)
             }
             $choice = Read-JlValue "Pick an execution (1-$($released.Count), or r to refresh)" '1'
@@ -2373,7 +2472,7 @@ function Invoke-JlViewerFlow {
             }
             $execId = $released[$n - 1].id
             $execWhen = 'unknown date'
-            if ($released[$n - 1].PSObject.Properties.Name -contains 'releasedAt' -and $released[$n - 1].releasedAt) { $execWhen = $released[$n - 1].releasedAt }
+            if ((Test-JlHasProperty $released[$n - 1] 'releasedAt') -and $released[$n - 1].releasedAt) { $execWhen = $released[$n - 1].releasedAt }
             Write-JlSuccess "Selected: $execId ($execWhen)"
             break
         }
@@ -2421,13 +2520,13 @@ function Invoke-JlViewerFlow {
     $def = Get-JlFunctionDefObject $functionDefPath
 
     $outputLayout = 'scalar'
-    if ($def -and ($def.PSObject.Properties.Name -contains 'output') -and $def.output -and
-        ($def.output.PSObject.Properties.Name -contains 'layout') -and $def.output.layout) {
+    if ($def -and ((Test-JlHasProperty $def 'output')) -and $def.output -and
+        ((Test-JlHasProperty $def.output 'layout')) -and $def.output.layout) {
         $outputLayout = $def.output.layout
     }
 
     $weightInputs = 0
-    if ($def -and ($def.PSObject.Properties.Name -contains 'inputs') -and $def.inputs) {
+    if ($def -and ((Test-JlHasProperty $def 'inputs')) -and $def.inputs) {
         $weightInputs = @($def.inputs | Where-Object { $_.schema -eq 'weight-vector' }).Count
     }
 
@@ -2475,7 +2574,7 @@ function Invoke-JlViewerFlow {
 
         '^(scalar|scalar-int)$' {
             $answer = ''
-            if ($combine.PSObject.Properties.Name -contains 'answer') { $answer = $combine.answer }
+            if ((Test-JlHasProperty $combine 'answer')) { $answer = $combine.answer }
             Write-Host ""
             if (-not [string]::IsNullOrWhiteSpace("$answer")) {
                 Write-JlSuccess "Answer: $answer"
@@ -2542,7 +2641,7 @@ function Invoke-JlViewerFlow {
                     $mapFile = Join-Path $script:JL_WORKDIR 'my_plaintext_paths.json'
                     if (Test-Path -LiteralPath $mapFile) {
                         $map = Get-Content -LiteralPath $mapFile -Raw | ConvertFrom-Json
-                        if ($map.PSObject.Properties.Name -contains $pairInput) { $pairFile = $map.$pairInput.path }
+                        if ((Test-JlHasProperty $map $pairInput)) { $pairFile = $map.$pairInput.path }
                     }
                     if (-not $pairFile -or -not (Test-Path -LiteralPath $pairFile)) {
                         $pairFile = Select-JlDataFile "File with the '$pairInput' rows used for this run"
@@ -2599,7 +2698,7 @@ function Invoke-JlViewerFlow {
                 $names = @($def.inputs | ForEach-Object { $_.name })
                 $inputIdx = [Array]::IndexOf($names, $inputName)
                 $myDsetId = ''
-                if ($inputIdx -ge 0 -and $execDoc -and ($execDoc.PSObject.Properties.Name -contains 'inputDatasetIds')) {
+                if ($inputIdx -ge 0 -and $execDoc -and ((Test-JlHasProperty $execDoc 'inputDatasetIds'))) {
                     $ids = @($execDoc.inputDatasetIds)
                     if ($inputIdx -lt $ids.Count) { $myDsetId = $ids[$inputIdx] }
                 }
@@ -2615,7 +2714,7 @@ function Invoke-JlViewerFlow {
                 $inputCsv = ''
                 if ($myDsetId -and (Test-Path -LiteralPath $csvMapFile)) {
                     $csvMap = Get-Content -LiteralPath $csvMapFile -Raw | ConvertFrom-Json
-                    if ($csvMap.PSObject.Properties.Name -contains $myDsetId) { $inputCsv = $csvMap.$myDsetId }
+                    if ((Test-JlHasProperty $csvMap $myDsetId)) { $inputCsv = $csvMap.$myDsetId }
                 }
 
                 if ($inputCsv -and (Test-Path -LiteralPath $inputCsv)) {

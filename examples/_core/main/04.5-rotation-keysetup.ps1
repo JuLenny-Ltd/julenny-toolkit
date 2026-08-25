@@ -70,7 +70,7 @@ $ptSidecar = Join-Path $script:JL_WORKDIR 'my_plaintext_paths.json'
 if (Test-Path -LiteralPath $ptSidecar) {
     $sidecar = Get-Content -LiteralPath $ptSidecar -Raw | ConvertFrom-Json
     $ptPairs = ''
-    if ($sidecar.PSObject.Properties.Name -contains 'rule_pairs') { $ptPairs = $sidecar.rule_pairs.path }
+    if ((Test-JlHasProperty $sidecar 'rule_pairs')) { $ptPairs = $sidecar.rule_pairs.path }
 
     if ($ptPairs -and (Test-Path -LiteralPath $ptPairs)) {
         Write-JlInfo "Re-deriving rotation indices locally to cross-check the platform..."

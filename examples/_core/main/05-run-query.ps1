@@ -28,7 +28,7 @@ $inputNames = @($def.inputs | ForEach-Object { $_.name })
 $missing = @()
 foreach ($name in $inputNames) {
     $id = ''
-    if ($declared -and ($declared.PSObject.Properties.Name -contains $name) -and $declared.$name) {
+    if ($declared -and ((Test-JlHasProperty $declared $name)) -and $declared.$name) {
         $id = $declared.$name.datasetId
     }
     if ([string]::IsNullOrWhiteSpace($id)) { $missing += $name }
@@ -45,7 +45,7 @@ Write-Host " DECLARED DATASET PICKS FOR THIS EXECUTION:"
 foreach ($name in $inputNames) {
     $entry = $declared.$name
     $when = '?'
-    if ($entry.PSObject.Properties.Name -contains 'declaredAt' -and $entry.declaredAt) { $when = $entry.declaredAt }
+    if ((Test-JlHasProperty $entry 'declaredAt') -and $entry.declaredAt) { $when = $entry.declaredAt }
     Write-Host "   ${name}:"
     Write-Host "       datasetId   = $($entry.datasetId)"
     Write-Host "       declaredAt  = $when"
@@ -72,7 +72,7 @@ function Confirm-JlRecheckOrStop {
     Write-Host ""
     Write-JlWarn "This permission has no remaining executions left."
     $perm = Get-JlPermission
-    if ($perm -and ($perm.PSObject.Properties.Name -contains 'allowedExecutions') -and $perm.allowedExecutions) {
+    if ($perm -and ((Test-JlHasProperty $perm 'allowedExecutions')) -and $perm.allowedExecutions) {
         Write-JlInfo "  (executions granted so far: $($perm.allowedExecutions), remaining: 0)"
     }
     Write-JlInfo "Ask $($script:JL_PEER_LABEL) (the data owner) to add more executions to this"
@@ -104,7 +104,7 @@ while (-not $execId) {
                         -Body @{ inputDatasetIds = $inputIds } -AllowFailure
 
     $options = @()
-    if ($est -and ($est.PSObject.Properties.Name -contains 'options') -and $est.options) {
+    if ($est -and ((Test-JlHasProperty $est 'options')) -and $est.options) {
         $options = @($est.options)
     }
 
@@ -136,10 +136,10 @@ while (-not $execId) {
         $costP90      = $options[$optIdx].costP90Credits
 
         $bal = '?'; $avail = '?'; $held = '?'
-        if ($est.PSObject.Properties.Name -contains 'balance' -and $est.balance) {
-            if ($est.balance.PSObject.Properties.Name -contains 'credits')     { $bal   = $est.balance.credits }
-            if ($est.balance.PSObject.Properties.Name -contains 'available')   { $avail = $est.balance.available }
-            if ($est.balance.PSObject.Properties.Name -contains 'heldCredits') { $held  = $est.balance.heldCredits }
+        if ((Test-JlHasProperty $est 'balance') -and $est.balance) {
+            if ((Test-JlHasProperty $est.balance 'credits'))     { $bal   = $est.balance.credits }
+            if ((Test-JlHasProperty $est.balance 'available'))   { $avail = $est.balance.available }
+            if ((Test-JlHasProperty $est.balance 'heldCredits')) { $held  = $est.balance.heldCredits }
         }
 
         Write-Host ""
@@ -154,7 +154,7 @@ while (-not $execId) {
         }
     } else {
         $estErr = ''
-        if ($est -and ($est.PSObject.Properties.Name -contains 'error')) { $estErr = $est.error }
+        if ($est -and ((Test-JlHasProperty $est 'error'))) { $estErr = $est.error }
         if (Test-JlNoExecutions $estErr) {
             Confirm-JlRecheckOrStop | Out-Null
             continue
@@ -187,7 +187,7 @@ while (-not $execId) {
         } catch { }
     }
 
-    if ($resp -and ($resp.PSObject.Properties.Name -contains 'error') -and $resp.error) {
+    if ($resp -and ((Test-JlHasProperty $resp 'error')) -and $resp.error) {
         $errMsg = $resp.error
         $resp = $null
     }
@@ -212,7 +212,7 @@ while (-not $execId) {
         Stop-JlWithError "Cannot proceed."
     }
 
-    if ($resp.PSObject.Properties.Name -contains 'executionId') { $execId = $resp.executionId }
+    if ((Test-JlHasProperty $resp 'executionId')) { $execId = $resp.executionId }
     if (-not $execId) { Stop-JlWithError "No executionId returned." }
 }
 
@@ -230,7 +230,7 @@ $delay = 5
 while ($true) {
     $doc = Invoke-JlApi GET "/api/executions/$execId" -AllowFailure
     $state = 'unknown'
-    if ($doc -and ($doc.PSObject.Properties.Name -contains 'state') -and $doc.state) { $state = $doc.state }
+    if ($doc -and ((Test-JlHasProperty $doc 'state')) -and $doc.state) { $state = $doc.state }
 
     $done = $false
     switch ($state) {

@@ -56,13 +56,13 @@ function Test-JlPeerUploaded {
 function Test-JlExecutionInState {
     param([string] $State)
     $resp = Invoke-JlApi GET "/api/fhe-permissions/$($script:JULENNY_PERMISSION_ID)/executions?state=$State&limit=1" -AllowFailure
-    if ($null -eq $resp -or -not ($resp.PSObject.Properties.Name -contains 'executions')) { return $false }
+    if ($null -eq $resp -or -not ((Test-JlHasProperty $resp 'executions'))) { return $false }
     return (@($resp.executions).Count -gt 0)
 }
 
 function Get-JlLatestExecutionState {
     $resp = Invoke-JlApi GET "/api/fhe-permissions/$($script:JULENNY_PERMISSION_ID)/executions?limit=1" -AllowFailure
-    if ($null -eq $resp -or -not ($resp.PSObject.Properties.Name -contains 'executions')) { return '' }
+    if ($null -eq $resp -or -not ((Test-JlHasProperty $resp 'executions'))) { return '' }
     $execs = @($resp.executions)
     if ($execs.Count -eq 0) { return '' }
     return "$($execs[0].state)"
@@ -71,7 +71,7 @@ function Get-JlLatestExecutionState {
 # Consumer-side: has the latest released execution already been decrypted here?
 function Test-JlLatestReleasedDecrypted {
     $resp = Invoke-JlApi GET "/api/fhe-permissions/$($script:JULENNY_PERMISSION_ID)/executions?state=released&limit=1" -AllowFailure
-    if ($null -eq $resp -or -not ($resp.PSObject.Properties.Name -contains 'executions')) { return $false }
+    if ($null -eq $resp -or -not ((Test-JlHasProperty $resp 'executions'))) { return $false }
     $execs = @($resp.executions)
     if ($execs.Count -eq 0) { return $false }
     return (Test-Path -LiteralPath (Join-Path $script:JL_KEYS_DIR "my-partial-$($execs[0].id).bin"))
@@ -115,8 +115,15 @@ function Invoke-JlPhase {
     param([Parameter(Mandatory = $true)][string] $ScriptName)
     $path = Join-Path (Join-Path $here $roleDir) $ScriptName
     if (-not (Test-Path -LiteralPath $path)) { Stop-JlWithError "Phase script not found: $path" }
+    # Clear it first. Invoking a PowerShell script does NOT set $LASTEXITCODE: it
+    # keeps whatever the last NATIVE process left behind. Without this reset, a
+    # stale non-zero from any earlier command is blamed on the phase, and a phase
+    # that returned normally - "final keys already submitted", which is the
+    # idempotent success path - is reported as "exited with code 1" and stops the
+    # run. The bash phases end with an explicit exit 0; these do not.
+    $global:LASTEXITCODE = 0
     & $path
-    if ($LASTEXITCODE -ne 0 -and $null -ne $LASTEXITCODE) {
+    if ($LASTEXITCODE -ne 0) {
         Stop-JlWithError "$ScriptName exited with code $LASTEXITCODE"
     }
 }
@@ -257,7 +264,7 @@ if ($def) {
     Write-Host " CURRENT PERMISSION / FUNCTION FOR THIS RUN:"
     Write-Host "   Permission ID : $($script:JULENNY_PERMISSION_ID)"
     Write-Host "   Function      : $($def.slug) v$($def.version)"
-    if ($def.PSObject.Properties.Name -contains 'description' -and $def.description) {
+    if ((Test-JlHasProperty $def 'description') -and $def.description) {
         Write-Host "   Description   : $($def.description)"
     }
     Write-Host "   (To use a different permission/function: switch at startup.)"
@@ -343,7 +350,7 @@ if (Test-JlIsOwner) { $myFnRole = 'dataOwner' } else { $myFnRole = 'queryAnalyst
 
 $def = Get-JlFunctionDefObject
 $myInputNames = @()
-if ($def -and ($def.PSObject.Properties.Name -contains 'inputs') -and $def.inputs) {
+if ($def -and ((Test-JlHasProperty $def 'inputs')) -and $def.inputs) {
     $myInputNames = @($def.inputs | Where-Object { $_.role -eq $myFnRole } | ForEach-Object { $_.name })
 }
 
@@ -352,7 +359,7 @@ if ($myInputNames.Count -gt 0) {
     $declared = Invoke-JlApi GET "/api/fhe-permissions/$($script:JULENNY_PERMISSION_ID)/preferred-datasets" -AllowFailure
     foreach ($n in $myInputNames) {
         $id = ''
-        if ($declared -and ($declared.PSObject.Properties.Name -contains $n) -and $declared.$n) { $id = $declared.$n.datasetId }
+        if ($declared -and ((Test-JlHasProperty $declared $n)) -and $declared.$n) { $id = $declared.$n.datasetId }
         if (-not $id) { $undeclared += $n }
     }
 }
