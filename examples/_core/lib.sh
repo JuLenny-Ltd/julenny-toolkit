@@ -213,12 +213,30 @@ load_session() {
 # -------- curl wrapper --------
 curl_jl() {
     # Usage: curl_jl <method> <path> [extra curl args...]
+    #
+    # Checks the HTTP status. Without this a rejected key returns an error BODY with a
+    # 401, callers pipe it through `jq '.projects // []'`, and the operator is told "no
+    # collaborations found" - sent to look for a missing invitation when the real problem
+    # is the key. A dev key pasted into a prod run reads exactly like an empty account.
     local method="$1"; shift
     local path="$1"; shift
-    curl -sS -X "$method" \
-         -H "x-api-key: $JULENNY_API_KEY" \
-         "$@" \
-         "$JULENNY_API_BASE$path"
+    local out status body
+    out="$(curl -sS -w $'
+%{http_code}' -X "$method" \n         -H "x-api-key: $JULENNY_API_KEY" \n         "$@" \n         "$JULENNY_API_BASE$path")" || return 1
+    status="${out##*$'
+'}"
+    body="${out%$'
+'*}"
+    case "$status" in
+        401) die "The platform rejected this API key (401) at $JULENNY_API_BASE.
+     The key is wrong, inactive, or belongs to a different environment.
+     A dev key used against prod fails exactly this way." ;;
+        403) die "This API key is not allowed to $method $path (403).
+     Its permission group, or the role of the user who created it, is too narrow." ;;
+        404) die "$method $path was not found on $JULENNY_API_BASE (404)." ;;
+        5??) die "The platform returned $status for $method $path. Body: ${body:0:200}" ;;
+    esac
+    printf '%s' "$body"
 }
 
 # -------- platform interactions --------
