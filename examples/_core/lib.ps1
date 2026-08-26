@@ -1305,8 +1305,10 @@ function Select-JlFunction {
     Write-Host ""
     Write-JlInfo "Functions available (scheme=$schemeLabel):"
     for ($i = 0; $i -lt $funcs.Count; $i++) {
+        # Trim to the last whole word and say it was trimmed. A hard cut at 80 stops
+        # mid-word, which reads like the description itself is broken.
         $desc = "$($funcs[$i].description)"
-        if ($desc.Length -gt 80) { $desc = $desc.Substring(0, 80) }
+        if ($desc.Length -gt 80) { $desc = ($desc.Substring(0, 77) -replace '\s+\S*$', '') + '...' }
         Write-Host ("  [{0}] {1} v{2}  |  scheme: {3}  |  {4}" -f `
             ($i + 1), $funcs[$i].slug, $funcs[$i].version, $funcs[$i].scheme, $desc)
     }

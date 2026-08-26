@@ -157,7 +157,7 @@ if [[ "${PROJECT_CHOICE,,}" == "n" ]]; then
     echo
     info "Functions available (scheme=$SCHEME_LABEL):"
     echo "$FUNCS_JSON" \
-        | jq -r 'to_entries[] | "  [\(.key + 1)] \(.value.slug) v\(.value.version // "?")  |  scheme: \(.value.scheme // "?")  |  \(.value.description // "" | .[0:80])"'
+        | jq -r 'to_entries[] | "  [\(.key + 1)] \(.value.slug) v\(.value.version // "?")  |  scheme: \(.value.scheme // "?")  |  \(.value.description // "" | if length > 80 then ((.[0:77] | sub(" [^ ]*$";"")) + "...") else . end)"'
     echo
 
     if (( FUNC_COUNT == 1 )); then
