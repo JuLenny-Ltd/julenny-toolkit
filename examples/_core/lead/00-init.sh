@@ -89,7 +89,7 @@ echo
 if (( PROJECT_COUNT > 0 )); then
     info "Active collaborations where you're the data owner (newest first):"
     echo "$OWNED_PROJECTS" \
-        | jq -r 'to_entries[] | "  [\(.key + 1)] \(.value.name // "(unnamed)")  |  peer: \(.value.partnerCompanyName // .value.ownerCompanyName // .value.partnerCollaborationId // "?")  |  \(.value.permissionCount) permission(s)  |  keysetup: \(.value.keysetupState // "n/a")  |  created \(.value.createdAt // "?" | .[0:10])  |  id: \(.value.id)"'
+        | jq -r 'to_entries[] | "  [\(.key + 1)] \(.value.name // "(unnamed)")  |  peer: \(.value.partnerCollaborationId // .value.ownerCollaborationId // "?")  |  \(.value.permissionCount) permission(s)  |  keysetup: \(.value.keysetupState // "n/a")  |  created \(.value.createdAt // "?" | .[0:10])  |  id: \(.value.id)"'
 else
     info "No active collaborations where you're the data owner."
 fi

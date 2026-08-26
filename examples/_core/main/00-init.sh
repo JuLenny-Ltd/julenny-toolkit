@@ -91,7 +91,7 @@ echo
 if (( PROJECT_COUNT > 0 )); then
     info "Active collaborations where you're the data consumer (newest first):"
     echo "$PARTNER_PROJECTS" \
-        | jq -r 'to_entries[] | "  [\(.key + 1)] \(.value.name // "(unnamed)")  |  peer: \(.value.ownerCompanyName // .value.partnerCompanyName // "?")  |  \(.value.permissionCount) permission(s)  |  keysetup: \(.value.keysetupState // "n/a")  |  created \(.value.createdAt // "?" | .[0:10])  |  id: \(.value.id)"'
+        | jq -r 'to_entries[] | "  [\(.key + 1)] \(.value.name // "(unnamed)")  |  peer: \(.value.ownerCollaborationId // .value.partnerCollaborationId // "?")  |  \(.value.permissionCount) permission(s)  |  keysetup: \(.value.keysetupState // "n/a")  |  created \(.value.createdAt // "?" | .[0:10])  |  id: \(.value.id)"'
 else
     info "No active collaborations where you're the data consumer."
 fi

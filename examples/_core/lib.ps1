@@ -1380,8 +1380,13 @@ function Invoke-JlInitSession {
     if ($mine.Count -gt 0) {
         Write-JlInfo "Active collaborations where you're the $myRoleName (newest first):"
         for ($i = 0; $i -lt $mine.Count; $i++) {
-            $peer = $mine[$i].partnerCompanyName
-            if (-not $peer) { $peer = $mine[$i].ownerCompanyName }
+            # Identify the peer by collaboration id, not by company name. These scripts
+            # authenticate with an API key, and the API does not give company names to
+            # API keys - that is deliberate, so that an agent driving these steps never
+            # learns who you are working with. The collaboration id is the public handle
+            # the two sides already exchanged to set this up.
+            $peer = $mine[$i].partnerCollaborationId
+            if (-not $peer) { $peer = $mine[$i].ownerCollaborationId }
             if (-not $peer) { $peer = '?' }
             $created = "$($mine[$i].createdAt)"
             if ($created.Length -gt 10) { $created = $created.Substring(0, 10) }
