@@ -5,7 +5,7 @@ import { JulennyApiClient } from '../api-client.js';
 export function registerCollaborationTools(server: McpServer, api: JulennyApiClient) {
   server.tool(
     'list_collaborations',
-    'List all collaborations (active and archived) with partner names, keysetup state, and permission count',
+    "List all collaborations (active and archived) with the peer's collaboration id, keysetup state, and permission count",
     { includeArchived: z.boolean().optional().describe('Include archived collaborations (default false)') },
     async ({ includeArchived }) => {
       const qs = includeArchived ? '?includeArchived=true' : '';
@@ -14,7 +14,10 @@ export function registerCollaborationTools(server: McpServer, api: JulennyApiCli
         id: p.id,
         name: p.name,
         yourRole: p.yourRole,
-        partnerCompanyName: p.partnerCompanyName,
+        // The peer is identified by collaboration id, the public handle the two sides
+        // exchanged to set this up. The API does not give company names to API keys, so
+        // that an agent driving these steps never learns who you are working with.
+        peerCollaborationId: p.partnerCollaborationId ?? p.ownerCollaborationId ?? null,
         status: p.status,
         keysetupState: p.keysetupState,
         grantCount: p.grantCount,
