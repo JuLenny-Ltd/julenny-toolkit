@@ -640,7 +640,7 @@ function Get-JlPermissionsForJointKey {
 }
 
 function Get-JlFunctions {
-    $resp = Invoke-JlApi GET "/api/fhe-functions"
+    $resp = Invoke-JlApi GET "/api/functions"
     if ($null -eq $resp) { return @() }
     if ((Test-JlHasProperty $resp 'functions')) { return @($resp.functions) }
     return @($resp)
@@ -904,7 +904,12 @@ function Update-JlFunctionDef {
     if ([string]::IsNullOrWhiteSpace($slug)) {
         Stop-JlWithError "Permission $($script:JULENNY_PERMISSION_ID) has no functionSlug."
     }
-    $def = Invoke-JlApi GET "/api/fhe-functions/$slug/versions/$version"
+    # /api/functions/<slug>/<version>/definition is the route the platform serves, and
+    # the same one the bash library and the grant-creation path below already use.
+    $def = Invoke-JlApi GET "/api/functions/$slug/$version/definition"
+    if (-not (Test-JlHasProperty $def 'slug') -or -not (Test-JlHasProperty $def 'inputs')) {
+        Stop-JlWithError "Platform response for $slug v$version does not look like a function definition."
+    }
     $out = Join-Path $script:JL_WORKDIR 'function-def.json'
     $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
     [System.IO.File]::WriteAllText($out, (ConvertTo-Json $def -Depth 30), $utf8NoBom)
