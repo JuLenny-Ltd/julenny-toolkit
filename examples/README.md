@@ -1,10 +1,10 @@
-# JuLenny FHE Toolkit — Examples
+# JuLenny FHE Toolkit: Examples
 
 End-to-end, runnable demos of a two-party JuLenny FHE collaboration: two
 companies jointly run a fixed function over their **encrypted** inputs, and
 neither side (nor the platform) ever sees the other's plaintext. Each demo walks
-the whole lifecycle — joint key setup, encryption, the platform compute, and
-multi-party threshold decryption — using the `julenny-toolkit` CLI.
+the whole lifecycle (joint key setup, encryption, the platform compute, and
+multi-party threshold decryption) using the `julenny-toolkit` CLI.
 
 ## The two parties
 
@@ -31,7 +31,7 @@ examples/
   joint-record-overlap/      Thin scenario
 ```
 
-### `_core/` — the shared driver
+### `_core/`: the shared driver
 
 One implementation backs both sides of every scenario. The side-specific bits
 (labels, API view, secret-share filename, role) come from a profile in
@@ -54,7 +54,7 @@ Each script has a `.sh` and a `.ps1` form. They are twins: same phases, same
 round numbers, same message types, same `config.env` format, so a Linux machine
 and a Windows machine can be the two sides of one collaboration.
 
-### Scenario folders — thin bootstraps
+### Scenario folders: thin bootstraps
 
 Each scenario's `acme/` and `beta/` driver just selects the side and the
 scenario's `data/` directory, then hands off to the one in `_core/`. The actual
@@ -114,7 +114,7 @@ The driver runs these in order; you can also run them individually. Each exists 
 | 1-2 | `01-keysetup-1`, `02-keysetup-2` | Multi-party joint key generation (skipped if the collaboration's key is already complete) |
 | 3 | `03-finalize-keysetup` | Submit/confirm the finalized joint keys |
 | 4 | `04-encrypt` | Encode and upload this side's input dataset(s) |
-| 4.5 | `04.5-rotation-keysetup` | Rotation-key augmentation — only if the function declares rotation in `requiredEvalKeys`; otherwise a no-op |
+| 4.5 | `04.5-rotation-keysetup` | Rotation-key augmentation, only if the function declares rotation in `requiredEvalKeys`; otherwise a no-op |
 | 5 | `05-release` (lead) / `05-run-query` (main) | Owner releases its partial decrypt; consumer triggers the execution |
 | 6 | `06-decrypt` (main) | Combine both partial decryptions and reveal the plaintext answer |
 
@@ -138,7 +138,7 @@ These scripts double as a reference corpus for AI agents. The JuLenny MCP server
 (in [`../mcp`](../mcp)) exposes the same collaboration flow as tools, and it
 drives the `julenny-toolkit` CLI with the same commands and flags these scripts use.
 An agent can read this folder to learn the exact phase sequence and arguments,
-then run the pipeline through the MCP tools — the crypto still happens locally
+then run the pipeline through the MCP tools. The crypto still happens locally
 via the CLI, so keys and plaintext never leave the user's machine. Keeping the
 examples and the MCP tools in lockstep is intentional: they are both the human
 quick-start and the agent's map.
