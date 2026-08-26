@@ -152,6 +152,18 @@ namespace winrt::JuLennyFHE::implementation
                 auto appWindow = winrt::Microsoft::UI::Windowing::AppWindow::GetFromWindowId(windowId);
                 if (appWindow)
                 {
+                    // Title-bar icon. app.rc embeds the icon as resource 1, which gives the
+                    // exe its Explorer, taskbar and shortcut icon, but WinUI 3 draws its own
+                    // title bar and shows a generic placeholder there unless the AppWindow is
+                    // told explicitly. Reuse the icon already compiled into the exe rather
+                    // than shipping a loose .ico beside it.
+                    if (auto hicon = static_cast<HICON>(::LoadImageW(
+                            ::GetModuleHandleW(nullptr), MAKEINTRESOURCEW(1),
+                            IMAGE_ICON, 0, 0, LR_DEFAULTSIZE | LR_SHARED)))
+                    {
+                        appWindow.SetIcon(winrt::Microsoft::UI::GetIconIdFromIcon(hicon));
+                    }
+
                     constexpr int width  = 1200;
                     constexpr int height = 850;
                     appWindow.Resize({ width, height });
