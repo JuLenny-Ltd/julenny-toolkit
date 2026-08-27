@@ -74,7 +74,11 @@ COMBINED_R1="$JL_KEYS_DIR/combined-relin-r1.bin"
 FINAL_RELIN_PRECHECK="$JL_KEYS_DIR/final_relin_key.bin"
 [[ "$NEEDS_RELIN" != "yes" || -f "$FINAL_RELIN_PRECHECK" || -f "$LEAD_R2" ]] \
     || die "Missing $LEAD_R2. Did 02-keysetup-2.sh run?"
-[[ "$NEEDS_SUM" != "yes" || -f "$LEAD_SUM" ]] || die "Missing $LEAD_SUM. Did 01-keysetup-1.sh run?"
+# Same reasoning as the relin intermediates: sum-round-1 is only needed to PRODUCE
+# the final sum key, so a reused joint key that already has it needs nothing.
+FINAL_SUM_PRECHECK="$JL_KEYS_DIR/final_sum_key.bin"
+[[ "$NEEDS_SUM" != "yes" || -f "$FINAL_SUM_PRECHECK" || -f "$LEAD_SUM" ]] \
+    || die "Missing $LEAD_SUM. Did 01-keysetup-1.sh run?"
 [[ "$NEEDS_RELIN" != "yes" || -f "$FINAL_RELIN_PRECHECK" || -f "$COMBINED_R1" ]] \
     || die "Missing $COMBINED_R1. Did 02-keysetup-2.sh run?"
 

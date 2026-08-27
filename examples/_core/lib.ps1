@@ -2077,7 +2077,10 @@ function Invoke-JlFinalizeKeysetup {
         if (-not (Test-Path -LiteralPath $mineR2))     { Stop-JlWithError "Missing $mineR2. Did 02-keysetup-2.ps1 run?" }
         if (-not (Test-Path -LiteralPath $combinedR1)) { Stop-JlWithError "Missing $combinedR1. Did 02-keysetup-2.ps1 run?" }
     }
-    if ($needsSum -and -not (Test-Path -LiteralPath $mineSum)) {
+    # Same reasoning as the relin intermediates above: sum-round-1 is only needed to
+    # PRODUCE the final sum key, so a reused joint key that already has it needs nothing.
+    $finalSumPath = Join-Path $script:JL_KEYS_DIR 'final_sum_key.bin'
+    if ($needsSum -and -not (Test-Path -LiteralPath $finalSumPath) -and -not (Test-Path -LiteralPath $mineSum)) {
         Stop-JlWithError "Missing $mineSum. Did 01-keysetup-1.ps1 run?"
     }
 
