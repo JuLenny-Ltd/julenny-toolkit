@@ -1532,7 +1532,17 @@ function Invoke-JlInitSession {
                 Stop-JlWithError "Only the data owner can create a permission."
             }
             $fn = Select-JlFunction
-            $partnerId = Read-JlValue "Partner ($($script:JL_PEER_LABEL)) Collaboration ID (XXXX-XXXX)"
+            # The partner is already known: this permission goes under a collaboration that
+            # was set up with them, and the project carries their collaboration id. Asking
+            # again invites a typo that would point the permission at the wrong company.
+            # Only fall back to a prompt if the project somehow has no partner recorded.
+            $partnerId = ''
+            if ((Test-JlHasProperty $project 'partnerCollaborationId')) { $partnerId = "$($project.partnerCollaborationId)" }
+            if ($partnerId) {
+                Write-JlInfo "Partner ($($script:JL_PEER_LABEL)) Collaboration ID: $partnerId"
+            } else {
+                $partnerId = Read-JlValue "Partner ($($script:JL_PEER_LABEL)) Collaboration ID (XXXX-XXXX)"
+            }
             if (-not $partnerId) { Stop-JlWithError "Partner Collaboration ID is required." }
             $allowed = Read-JlValue "How many executions should this permission allow?" '10'
             Write-Host ""
