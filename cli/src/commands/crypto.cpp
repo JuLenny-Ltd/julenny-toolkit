@@ -1855,15 +1855,37 @@ int run_crypto_combine(const CryptoCombineArgs& args) {
                 }
             }
 
+            // How many decimals are meaningful here. noiseThreshold is maxAbsValue * 1e-6,
+            // so anything past this is noise. Computed before the summary figures below so
+            // they are shown at the same precision as the values themselves.
+            int decimals = 6;
+            if (threshold > 0.0) {
+                decimals = static_cast<int>(std::ceil(-std::log10(threshold)));
+                if (decimals < 0)  decimals = 0;
+                if (decimals > 12) decimals = 12;
+            }
+            const double displayScale = std::pow(10.0, decimals);
+            auto roundToDisplay = [displayScale](double v) {
+                return std::round(v * displayScale) / displayScale;
+            };
+            // The threshold is a magnitude, not a measurement: rounding it to `decimals`
+            // places would print 0.000001 every time and hide the scale it exists to show.
+            // Three significant figures keeps it as 1.19e-06.
+            auto roundSignificant = [](double v, int digits) {
+                if (v == 0.0) return 0.0;
+                const double m = std::pow(10.0, digits - 1 - static_cast<int>(std::floor(std::log10(std::abs(v)))));
+                return std::round(v * m) / m;
+            };
+
             nlohmann::ordered_json result;
             result["valueType"]         = "real";
             result["totalSlots"]        = reals.size();
             result["contextSpec"]       = spec->id;
             result["significantSlots"]  = significant_count;
             result["significantValues"] = significant;
-            result["sumOfSignificant"]  = sum_significant;
-            result["maxAbsValue"]       = max_abs;
-            result["noiseThreshold"]    = threshold;
+            result["sumOfSignificant"]  = roundToDisplay(sum_significant);
+            result["maxAbsValue"]       = roundToDisplay(max_abs);
+            result["noiseThreshold"]    = roundSignificant(threshold, 3);
             // CKKS is approximate, so a count of three arrives as 2.999999999999586.
             // Round when every meaningful value sits within a whisker of a whole
             // number, which is the case for counts and match vectors and is not the
@@ -1879,44 +1901,46 @@ int run_crypto_combine(const CryptoCombineArgs& args) {
                 }
                 rounded[slot] = static_cast<std::int64_t>(nearest);
             }
-            if (!all_whole) {
-                // Not whole numbers, but 0.770000000000093 is still no way to show a person a
-                // model weight. Round to the precision this file already declares meaningful:
-                // noiseThreshold is maxAbsValue * 1e-6, so anything past that many decimals is
-                // noise. Reported separately from significantValues, which stays exact.
-                int decimals = 6;
-                if (threshold > 0.0) {
-                    decimals = static_cast<int>(std::ceil(-std::log10(threshold)));
-                    if (decimals < 0)  decimals = 0;
-                    if (decimals > 12) decimals = 12;
-                }
-                const double scale = std::pow(10.0, decimals);
-                nlohmann::ordered_json realRounded = nlohmann::ordered_json::object();
-                for (auto& [slot, val] : significant.items()) {
-                    realRounded[slot] = std::round(val.get<double>() * scale) / scale;
-                }
-                result["significantValuesRounded"] = realRounded;
-                result["roundedToDecimals"]        = decimals;
-            }
+            // significantValues carries the READABLE figures, not the raw ones. CKKS is
+            // approximate, so a weight of 0.77 decrypts as 0.770000000000093 and a count of
+            // three as 2.999999999999586. Printing that to a person is noise dressed as
+            // precision, and the scripts and the desktop app all display this field directly.
+            //
+            // Whole-number results (counts, match vectors) round to integers. Real results
+            // round to the precision this file already declares meaningful: noiseThreshold is
+            // maxAbsValue * 1e-6, so anything past that many decimals is noise either way.
+            //
+            // The exact figures are still available, but only with --full-vector, next to
+            // allValues: they matter for diagnosing an engine whose arithmetic is subtly
+            // wrong, which is a developer's need rather than a reader's.
             if (all_whole) {
-                result["significantValuesRounded"] = rounded;
+                result["significantValues"] = rounded;
                 // The common case is a single answer. Put it where a person will
                 // find it instead of making them read a map with one entry.
                 if (significant_count == 1) {
                     result["result"] = rounded.begin().value();
                 }
+            } else {
+                nlohmann::ordered_json readable = nlohmann::ordered_json::object();
+                for (auto& [slot, val] : significant.items()) {
+                    readable[slot] = roundToDisplay(val.get<double>());
+                }
+                result["significantValues"] = readable;
+            }
+            if (args.full_vector) {
+                result["significantValuesExact"] = significant;
             }
 
             result["note"] = std::string(
                 "significantValues holds the slots above the noise threshold, keyed by "
                 "slot index. CKKS leaves every other slot at a tiny non-zero value "
                 "(~1e-14) which carries no meaning.")
-                + (all_whole ? " significantValuesRounded gives the same values as whole numbers."
-                             : " significantValuesRounded gives the same values rounded to"
-                               " roundedToDecimals places, which is the precision noiseThreshold"
-                               " supports; significantValues keeps the exact figures.")
-                + (args.full_vector ? " allValues has every slot."
-                                    : " Pass --full-vector to also write every slot.");
+                + (all_whole ? " Values are whole numbers."
+                             : " Values are rounded to the precision noiseThreshold supports.")
+                + (args.full_vector ? " allValues has every slot and significantValuesExact"
+                                          " has the unrounded figures."
+                                    : " Pass --full-vector to also write every slot and the"
+                                      " unrounded figures.");
             if (args.full_vector) {
                 result["allValues"] = std::vector<double>(reals.begin(), reals.end());
             }
