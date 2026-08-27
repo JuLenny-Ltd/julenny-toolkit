@@ -25,10 +25,13 @@ LEAD_SUM_R1_BIN="$JL_PEER_DIR/lead-sum-r1.bin"
 # -------- 1. Wait for and download Acme's three shares --------
 info "Fetching Acme's bundle 1 contributions..."
 wait_for_peer_share "pk-share"
-wait_for_peer_share "relin-round1"
-
 download_peer_share "pk-share"      "$LEAD_PK_BIN"
-download_peer_share "relin-round1"  "$LEAD_RELIN_R1_BIN"
+
+# Additive-only functions declare requiredEvalKeys: [] and never send relin-round1.
+if function_requires_relin_keys; then
+    wait_for_peer_share "relin-round1"
+    download_peer_share "relin-round1"  "$LEAD_RELIN_R1_BIN"
+fi
 
 if function_requires_sum_keys; then
     wait_for_peer_share "sum-round1"
@@ -49,18 +52,22 @@ success "Joint public key: $JOINT_PK"
 
 wrap_and_upload "$JOINT_PK" 1 "pk-share"
 
-# -------- 3. relin-round1-continue (round 3) --------
-info "Generating relin round-1 continue..."
-julenny-toolkit crypto relin-contribute \
-    --context-spec "$JULENNY_CRYPTO_CONTEXT_SPEC" \
-    --round 1 --role main \
-    --secret-key "$MY_SHARE_SECRET" \
-    --peer-share "$LEAD_RELIN_R1_BIN" \
-    --output "$MAIN_RELIN_R1" \
-    > /dev/null
-success "Beta relin round-1: $MAIN_RELIN_R1"
+# -------- 3. relin-round1-continue (round 3) -- only if a relin key is needed --------
+if function_requires_relin_keys; then
+    info "Generating relin round-1 continue..."
+    julenny-toolkit crypto relin-contribute \
+        --context-spec "$JULENNY_CRYPTO_CONTEXT_SPEC" \
+        --round 1 --role main \
+        --secret-key "$MY_SHARE_SECRET" \
+        --peer-share "$LEAD_RELIN_R1_BIN" \
+        --output "$MAIN_RELIN_R1" \
+        > /dev/null
+    success "Beta relin round-1: $MAIN_RELIN_R1"
 
-wrap_and_upload "$MAIN_RELIN_R1" 3 "relin-round1-continue"
+    wrap_and_upload "$MAIN_RELIN_R1" 3 "relin-round1-continue"
+else
+    info "Function does not require a relinearization key; skipping relin-round1-continue."
+fi
 
 # -------- 4. sum-round1-continue (round 6) -- only if the function needs a sum key --------
 if function_requires_sum_keys; then
@@ -82,8 +89,13 @@ fi
 
 echo
 success "Bundle 1 uploaded. 3 messages submitted."
+if function_requires_relin_keys; then
+    NEXT_STEP="02-keysetup-2.sh"
+else
+    NEXT_STEP="03-finalize-keysetup.sh"
+fi
 wait_msg "Tell Acme to run their side of keysetup bundle 2 on their own machine
 (their run.sh / run.ps1 handles it, or the equivalent MCP verbs).
 
 When Acme's bundle 2 is uploaded, come back here and run:
-    $SCRIPT_DIR/02-keysetup-2.sh"
+    $SCRIPT_DIR/$NEXT_STEP"

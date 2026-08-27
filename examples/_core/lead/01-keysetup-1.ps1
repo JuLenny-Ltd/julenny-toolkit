@@ -31,18 +31,25 @@ Write-JlSuccess "FHE public contribution: $fhePublic"
 
 Publish-JlEnvelope -BinPath $fhePublic -Round 1 -MessageType 'pk-share'
 
-# -------- 2. relin-round1 (round 2) --------
-Write-JlInfo "Generating relinearization key round-1 contribution..."
-Invoke-JlCli @(
-    'crypto', 'relin-contribute',
-    '--context-spec', $script:JULENNY_CRYPTO_CONTEXT_SPEC,
-    '--round', '1', '--role', 'lead',
-    '--secret-key', $fheSecret,
-    '--output',     $relinR1
-)
-Write-JlSuccess "Relin round-1: $relinR1"
+# -------- 2. relin-round1 (round 2), only if the function needs a relin key --------
+# Additive-only functions (federated-average) declare requiredEvalKeys: [] and need
+# no relin key at all. Publishing round 1 anyway leaves both sides waiting on an
+# exchange the platform has already moved past.
+if (Test-JlFunctionRequiresRelinKeys) {
+    Write-JlInfo "Generating relinearization key round-1 contribution..."
+    Invoke-JlCli @(
+        'crypto', 'relin-contribute',
+        '--context-spec', $script:JULENNY_CRYPTO_CONTEXT_SPEC,
+        '--round', '1', '--role', 'lead',
+        '--secret-key', $fheSecret,
+        '--output',     $relinR1
+    )
+    Write-JlSuccess "Relin round-1: $relinR1"
 
-Publish-JlEnvelope -BinPath $relinR1 -Round 2 -MessageType 'relin-round1'
+    Publish-JlEnvelope -BinPath $relinR1 -Round 2 -MessageType 'relin-round1'
+} else {
+    Write-JlInfo "Function does not require a relinearization key; skipping relin-round1."
+}
 
 # -------- 3. sum-round1 (round 5), only if the function needs a sum key --------
 if (Test-JlFunctionRequiresSumKeys) {
@@ -63,9 +70,11 @@ if (Test-JlFunctionRequiresSumKeys) {
 
 Write-Host ""
 Write-JlSuccess "Bundle 1 uploaded."
+# With no relin key there is no bundle 2; finalization is the next step.
+if (Test-JlFunctionRequiresRelinKeys) { $nextStep = "02-keysetup-2.ps1" } else { $nextStep = "03-finalize-keysetup.ps1" }
 Write-JlWaitMessage @"
 Tell $($script:JL_PEER_LABEL) to run 01-keysetup-1 in their beta folder.
 
 When their bundle 1 is uploaded, come back here and run:
-    $here\02-keysetup-2.ps1
+    $here\$nextStep
 "@

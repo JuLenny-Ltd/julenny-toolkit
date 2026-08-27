@@ -32,17 +32,24 @@ success "FHE public contribution: $FHE_PUBLIC"
 
 wrap_and_upload "$FHE_PUBLIC" 1 "pk-share"
 
-# -------- 2. relin-round1 (round 2) --------
-info "Generating relinearization key round-1 contribution..."
-julenny-toolkit crypto relin-contribute \
-    --context-spec "$JULENNY_CRYPTO_CONTEXT_SPEC" \
-    --round 1 --role lead \
-    --secret-key "$FHE_SECRET" \
-    --output "$RELIN_R1" \
-    > /dev/null
-success "Relin round-1: $RELIN_R1"
+# -------- 2. relin-round1 (round 2) -- only if the function needs a relin key --------
+# Additive-only functions (federated-average) declare requiredEvalKeys: [] and need no
+# relin key. Publishing round 1 anyway leaves both sides waiting on an exchange the
+# platform has already moved past.
+if function_requires_relin_keys; then
+    info "Generating relinearization key round-1 contribution..."
+    julenny-toolkit crypto relin-contribute \
+        --context-spec "$JULENNY_CRYPTO_CONTEXT_SPEC" \
+        --round 1 --role lead \
+        --secret-key "$FHE_SECRET" \
+        --output "$RELIN_R1" \
+        > /dev/null
+    success "Relin round-1: $RELIN_R1"
 
-wrap_and_upload "$RELIN_R1" 2 "relin-round1"
+    wrap_and_upload "$RELIN_R1" 2 "relin-round1"
+else
+    info "Function does not require a relinearization key; skipping relin-round1."
+fi
 
 # -------- 3. sum-round1 (round 5) -- only if the function needs a sum key --------
 if function_requires_sum_keys; then
@@ -61,9 +68,17 @@ else
 fi
 
 echo
-success "Bundle 1 uploaded. 3 messages submitted (pk-share, relin-round1, sum-round1)."
+BUNDLE1_MSGS="pk-share"
+function_requires_relin_keys && BUNDLE1_MSGS="$BUNDLE1_MSGS, relin-round1"
+function_requires_sum_keys   && BUNDLE1_MSGS="$BUNDLE1_MSGS, sum-round1"
+success "Bundle 1 uploaded ($BUNDLE1_MSGS)."
+if function_requires_relin_keys; then
+    NEXT_STEP="02-keysetup-2.sh"
+else
+    NEXT_STEP="03-finalize-keysetup.sh"
+fi
 wait_msg "Tell Beta to run their side of keysetup bundle 1 on their own machine
 (their run.sh / run.ps1 handles it, or the equivalent MCP verbs).
 
 When Beta's bundle 1 is uploaded, come back here and run:
-    $SCRIPT_DIR/02-keysetup-2.sh"
+    $SCRIPT_DIR/$NEXT_STEP"

@@ -31,6 +31,9 @@ step "Beta: finalize joint keysetup"
 
 # Rotation-free functions (no "sum" in requiredEvalKeys) skip the sum key entirely.
 if function_requires_sum_keys; then NEEDS_SUM="yes"; else NEEDS_SUM="no"; fi
+# Additive-only functions (federated-average) declare requiredEvalKeys: [] and have
+# no relin key at all: no rounds, no combine, nothing to upload.
+if function_requires_relin_keys; then NEEDS_RELIN="yes"; else NEEDS_RELIN="no"; fi
 
 # -------- Idempotence marker: skip if already submitted for THIS permission --------
 # 03 registers the finalKeys references against the permission's own document.
@@ -51,9 +54,9 @@ MAIN_SUM="$JL_KEYS_DIR/main-sum-r1.bin"
 COMBINED_R1="$JL_KEYS_DIR/combined-relin-r1.bin"
 JOINT_PK="$JL_KEYS_DIR/joint_public_key.bin"
 
-[[ -f "$MAIN_R2"     ]] || die "Missing $MAIN_R2. Did 02-keysetup-2.sh run?"
+[[ "$NEEDS_RELIN" != "yes" || -f "$MAIN_R2" ]] || die "Missing $MAIN_R2. Did 02-keysetup-2.sh run?"
 [[ "$NEEDS_SUM" != "yes" || -f "$MAIN_SUM" ]] || die "Missing $MAIN_SUM. Did 01-keysetup-1.sh run?"
-[[ -f "$COMBINED_R1" ]] || die "Missing $COMBINED_R1. Did 02-keysetup-2.sh run?"
+[[ "$NEEDS_RELIN" != "yes" || -f "$COMBINED_R1" ]] || die "Missing $COMBINED_R1. Did 02-keysetup-2.sh run?"
 [[ -f "$JOINT_PK"    ]] || die "Missing $JOINT_PK. Did 01-keysetup-1.sh run?"
 
 # -------- 1. Download Acme's relin-round2 and sum-round1 --------
@@ -63,12 +66,14 @@ JOINT_PK="$JL_KEYS_DIR/joint_public_key.bin"
 LEAD_R2="$JL_PEER_DIR/lead-relin-r2.bin"
 LEAD_SUM="$JL_PEER_DIR/lead-sum-r1.bin"
 
-if [[ ! -f "$LEAD_R2" ]]; then
-    info "Waiting for Acme's relin-round2 contribution..."
-    wait_for_peer_share "relin-round2"
-    download_peer_share "relin-round2" "$LEAD_R2"
-else
-    info "Reusing existing peer share: $LEAD_R2"
+if [[ "$NEEDS_RELIN" == "yes" ]]; then
+    if [[ ! -f "$LEAD_R2" ]]; then
+        info "Waiting for Acme's relin-round2 contribution..."
+        wait_for_peer_share "relin-round2"
+        download_peer_share "relin-round2" "$LEAD_R2"
+    else
+        info "Reusing existing peer share: $LEAD_R2"
+    fi
 fi
 if [[ "$NEEDS_SUM" == "yes" ]]; then
     if [[ ! -f "$LEAD_SUM" ]]; then
@@ -84,7 +89,9 @@ fi
 FINAL_RELIN="$JL_KEYS_DIR/final_relin_key.bin"
 FINAL_SUM="$JL_KEYS_DIR/final_sum_key.bin"
 
-if [[ ! -f "$FINAL_RELIN" ]]; then
+if [[ "$NEEDS_RELIN" != "yes" ]]; then
+    info "Function does not require a relinearization key; no relin combine."
+elif [[ ! -f "$FINAL_RELIN" ]]; then
     info "Combining round-2 relin shares -> final relin key..."
     julenny-toolkit crypto relin-combine \
         --context-spec "$JULENNY_CRYPTO_CONTEXT_SPEC" \
@@ -119,13 +126,14 @@ info "Joint public key: $JOINT_PK ($(stat -c%s "$JOINT_PK") bytes)"
 
 # -------- 3. SHA-256 hashes (cross-party byte-equality check) --------
 JOINT_PK_SHA="$(sha256sum "$JOINT_PK"     | awk '{print $1}')"
-RELIN_SHA="$(   sha256sum "$FINAL_RELIN"  | awk '{print $1}')"
+RELIN_SHA=""
+[[ "$NEEDS_RELIN" == "yes" ]] && RELIN_SHA="$(sha256sum "$FINAL_RELIN" | awk '{print $1}')"
 SUM_SHA=""
 [[ "$NEEDS_SUM" == "yes" ]] && SUM_SHA="$(sha256sum "$FINAL_SUM" | awk '{print $1}')"
 
 info "Hashes computed."
 info "  joint_public_key: $JOINT_PK_SHA"
-info "  joint_relin_key:  $RELIN_SHA"
+[[ "$NEEDS_RELIN" == "yes" ]] && info "  joint_relin_key:  $RELIN_SHA"
 [[ "$NEEDS_SUM" == "yes" ]] && info "  eval_sum_key:     $SUM_SHA"
 
 # -------- 4. Request upload URLs, PUT each blob to object storage --------
@@ -173,9 +181,12 @@ JPK_URL_AND_KEY="$(request_final_key_upload_url joint_public_key)"
 JPK_URL="${JPK_URL_AND_KEY%|*}"
 JPK_OBJ="${JPK_URL_AND_KEY#*|}"
 
-REL_URL_AND_KEY="$(request_final_key_upload_url joint_relin_key)"
-REL_URL="${REL_URL_AND_KEY%|*}"
-REL_OBJ="${REL_URL_AND_KEY#*|}"
+REL_OBJ=""
+if [[ "$NEEDS_RELIN" == "yes" ]]; then
+    REL_URL_AND_KEY="$(request_final_key_upload_url joint_relin_key)"
+    REL_URL="${REL_URL_AND_KEY%|*}"
+    REL_OBJ="${REL_URL_AND_KEY#*|}"
+fi
 
 SUM_OBJ=""
 if [[ "$NEEDS_SUM" == "yes" ]]; then
@@ -187,8 +198,10 @@ fi
 info "Uploading the three final keys to object storage..."
 put_blob_to_storage "$JPK_URL" "$JOINT_PK"
 success "  joint_public_key -> $JPK_OBJ"
-put_blob_to_storage "$REL_URL" "$FINAL_RELIN"
-success "  joint_relin_key  -> $REL_OBJ"
+if [[ "$NEEDS_RELIN" == "yes" ]]; then
+    put_blob_to_storage "$REL_URL" "$FINAL_RELIN"
+    success "  joint_relin_key  -> $REL_OBJ"
+fi
 if [[ "$NEEDS_SUM" == "yes" ]]; then
     put_blob_to_storage "$SUM_URL" "$FINAL_SUM"
     success "  eval_sum_key     -> $SUM_OBJ"
@@ -205,17 +218,22 @@ if [[ "$NEEDS_SUM" == "yes" ]]; then
 else
     SUM_ENTRY="[]"
 fi
+if [[ "$NEEDS_RELIN" == "yes" ]]; then
+    RELIN_ENTRY="$(jq -n --arg ok "$REL_OBJ" --arg sha "$RELIN_SHA" \
+        '[{keyType: "joint_relin_key", objectKey: $ok, sha256Hex: $sha}]')"
+else
+    RELIN_ENTRY="[]"
+fi
 jq -n \
     --arg perm    "$JULENNY_PERMISSION_ID" \
     --arg ts      "$TIMESTAMP" \
     --arg jpk_ok  "$JPK_OBJ"  --arg jpk_sha "$JOINT_PK_SHA" \
-    --arg rel_ok  "$REL_OBJ"  --arg rel_sha "$RELIN_SHA" \
+    --argjson relin_entry "$RELIN_ENTRY" \
     --argjson sum_entry "$SUM_ENTRY" \
     '{
         keys: ($sum_entry + [
-            {keyType: "joint_public_key", objectKey: $jpk_ok, sha256Hex: $jpk_sha},
-            {keyType: "joint_relin_key",  objectKey: $rel_ok, sha256Hex: $rel_sha}
-        ]),
+            {keyType: "joint_public_key", objectKey: $jpk_ok, sha256Hex: $jpk_sha}
+        ] + $relin_entry),
         permissionId: $perm,
         timestamp: $ts
     }' > "$TO_SIGN"

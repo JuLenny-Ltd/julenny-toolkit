@@ -1018,6 +1018,16 @@ function Test-JlFunctionRequiresSumKeys {
     return ((Get-JlRequiredEvalKeys $Path) -contains 'sum')
 }
 
+# True if the function-def declares a "relinearization" eval key. Additive-only
+# functions (federated-average) declare requiredEvalKeys: [], and for those the whole
+# relin exchange - rounds 1, 2 and the final combine - must be skipped. The platform
+# knows this and goes straight to awaiting-finalization, so a script that waits for
+# relin-round1-continue waits forever.
+function Test-JlFunctionRequiresRelinKeys {
+    param([string] $Path = '')
+    return ((Get-JlRequiredEvalKeys $Path) -contains 'relinearization')
+}
+
 function Get-JlPendingRotationKeysetup {
     $state = Get-JlKeysetupState
     if ($null -eq $state) { return $null }
@@ -1966,7 +1976,8 @@ function Invoke-JlFinalizeKeysetup {
         }
     }
 
-    $needsSum = Test-JlFunctionRequiresSumKeys
+    $needsSum   = Test-JlFunctionRequiresSumKeys
+    $needsRelin = Test-JlFunctionRequiresRelinKeys
 
     # Role decides which share is "a" and which is "b"; side decides which of
     # them is local and which came from the peer.
@@ -1994,8 +2005,10 @@ function Invoke-JlFinalizeKeysetup {
     }
 
     $combinedR1 = Join-Path $script:JL_KEYS_DIR 'combined-relin-r1.bin'
-    if (-not (Test-Path -LiteralPath $mineR2))     { Stop-JlWithError "Missing $mineR2. Did 02-keysetup-2.ps1 run?" }
-    if (-not (Test-Path -LiteralPath $combinedR1)) { Stop-JlWithError "Missing $combinedR1. Did 02-keysetup-2.ps1 run?" }
+    if ($needsRelin) {
+        if (-not (Test-Path -LiteralPath $mineR2))     { Stop-JlWithError "Missing $mineR2. Did 02-keysetup-2.ps1 run?" }
+        if (-not (Test-Path -LiteralPath $combinedR1)) { Stop-JlWithError "Missing $combinedR1. Did 02-keysetup-2.ps1 run?" }
+    }
     if ($needsSum -and -not (Test-Path -LiteralPath $mineSum)) {
         Stop-JlWithError "Missing $mineSum. Did 01-keysetup-1.ps1 run?"
     }
@@ -2007,17 +2020,29 @@ function Invoke-JlFinalizeKeysetup {
                         (Join-Path $script:JL_PEER_DIR 'joint-pk.bin'))) {
         if (Test-Path -LiteralPath $cand) { $jointPk = $cand; break }
     }
+    # Normally the lead picks the joint pk up during bundle 2. An additive-only function
+    # has no bundle 2, so fetch the peer's pk-share here instead: for the lead, the
+    # consumer's pk-share IS the joint public key.
+    if (-not $jointPk -and $iAmLead) {
+        $cand = Join-Path $script:JL_PEER_DIR 'joint-pk.bin'
+        Write-JlInfo "Fetching the joint public key from $($script:JL_PEER_LABEL)'s pk-share..."
+        Wait-JlPeerShare 'pk-share'
+        Save-JlPeerShare -MessageType 'pk-share' -OutPath $cand
+        if (Test-Path -LiteralPath $cand) { $jointPk = $cand }
+    }
     if (-not $jointPk) { Stop-JlWithError "Cannot find the joint public key on disk." }
 
     # -------- 1. Fetch the peer's round-2 (and sum) shares --------
     # Skip if already present: a reused-joint-key permission has no fresh peer
     # upload for THIS permission, but the original bytes are still correct.
-    if (-not (Test-Path -LiteralPath $peerR2)) {
-        Write-JlInfo "Waiting for $($script:JL_PEER_LABEL)'s relin-round2 contribution..."
-        Wait-JlPeerShare 'relin-round2'
-        Save-JlPeerShare -MessageType 'relin-round2' -OutPath $peerR2
-    } else {
-        Write-JlInfo "Reusing existing peer share: $peerR2"
+    if ($needsRelin) {
+        if (-not (Test-Path -LiteralPath $peerR2)) {
+            Write-JlInfo "Waiting for $($script:JL_PEER_LABEL)'s relin-round2 contribution..."
+            Wait-JlPeerShare 'relin-round2'
+            Save-JlPeerShare -MessageType 'relin-round2' -OutPath $peerR2
+        } else {
+            Write-JlInfo "Reusing existing peer share: $peerR2"
+        }
     }
     if ($needsSum) {
         if (-not (Test-Path -LiteralPath $peerSum)) {
@@ -2033,20 +2058,24 @@ function Invoke-JlFinalizeKeysetup {
     $finalRelin = Join-Path $script:JL_KEYS_DIR 'final_relin_key.bin'
     $finalSum   = Join-Path $script:JL_KEYS_DIR 'final_sum_key.bin'
 
-    if (-not (Test-Path -LiteralPath $finalRelin)) {
-        Write-JlInfo "Combining round-2 relin shares -> final relin key..."
-        Invoke-JlCli @(
-            'crypto', 'relin-combine',
-            '--context-spec', $script:JULENNY_CRYPTO_CONTEXT_SPEC,
-            '--round', '2',
-            '--share-a',     $leadR2,
-            '--share-b',     $mainR2,
-            '--combined-r1', $combinedR1,
-            '--output',      $finalRelin
-        )
-        Write-JlSuccess "Final relin key: $finalRelin ($((Get-Item -LiteralPath $finalRelin).Length) bytes)"
+    if ($needsRelin) {
+        if (-not (Test-Path -LiteralPath $finalRelin)) {
+            Write-JlInfo "Combining round-2 relin shares -> final relin key..."
+            Invoke-JlCli @(
+                'crypto', 'relin-combine',
+                '--context-spec', $script:JULENNY_CRYPTO_CONTEXT_SPEC,
+                '--round', '2',
+                '--share-a',     $leadR2,
+                '--share-b',     $mainR2,
+                '--combined-r1', $combinedR1,
+                '--output',      $finalRelin
+            )
+            Write-JlSuccess "Final relin key: $finalRelin ($((Get-Item -LiteralPath $finalRelin).Length) bytes)"
+        } else {
+            Write-JlInfo "Reusing existing final relin key: $finalRelin"
+        }
     } else {
-        Write-JlInfo "Reusing existing final relin key: $finalRelin"
+        Write-JlInfo "Function does not require a relinearization key; no relin combine."
     }
 
     if ($needsSum) {
@@ -2070,27 +2099,31 @@ function Invoke-JlFinalizeKeysetup {
 
     # -------- 3. Hashes (the cross-party byte-equality check) --------
     $jointPkSha = Get-JlSha256 $jointPk
-    $relinSha   = Get-JlSha256 $finalRelin
+    $relinSha   = ''
+    if ($needsRelin) { $relinSha = Get-JlSha256 $finalRelin }
     $sumSha     = ''
     if ($needsSum) { $sumSha = Get-JlSha256 $finalSum }
 
     Write-JlInfo "Hashes computed."
     Write-JlInfo "  joint_public_key: $jointPkSha"
-    Write-JlInfo "  joint_relin_key:  $relinSha"
+    if ($needsRelin) { Write-JlInfo "  joint_relin_key:  $relinSha" }
     if ($needsSum) { Write-JlInfo "  eval_sum_key:     $sumSha" }
 
     # -------- 4. Upload URLs, then PUT each blob --------
     Write-JlInfo "Requesting upload URLs..."
     $jpkTarget = Request-JlFinalKeyUploadUrl 'joint_public_key'
-    $relTarget = Request-JlFinalKeyUploadUrl 'joint_relin_key'
+    $relTarget = $null
+    if ($needsRelin) { $relTarget = Request-JlFinalKeyUploadUrl 'joint_relin_key' }
     $sumTarget = $null
     if ($needsSum) { $sumTarget = Request-JlFinalKeyUploadUrl 'eval_sum_key' }
 
     Write-JlInfo "Uploading the final keys to object storage..."
     Send-JlBlobToStorage -Url $jpkTarget.UploadUrl -Path $jointPk
     Write-JlSuccess "  joint_public_key -> $($jpkTarget.ObjectKey)"
-    Send-JlBlobToStorage -Url $relTarget.UploadUrl -Path $finalRelin
-    Write-JlSuccess "  joint_relin_key  -> $($relTarget.ObjectKey)"
+    if ($needsRelin) {
+        Send-JlBlobToStorage -Url $relTarget.UploadUrl -Path $finalRelin
+        Write-JlSuccess "  joint_relin_key  -> $($relTarget.ObjectKey)"
+    }
     if ($needsSum) {
         Send-JlBlobToStorage -Url $sumTarget.UploadUrl -Path $finalSum
         Write-JlSuccess "  eval_sum_key     -> $($sumTarget.ObjectKey)"
@@ -2109,7 +2142,9 @@ function Invoke-JlFinalizeKeysetup {
         $keys += [ordered]@{ keyType = 'eval_sum_key'; objectKey = $sumTarget.ObjectKey; sha256Hex = $sumSha }
     }
     $keys += [ordered]@{ keyType = 'joint_public_key'; objectKey = $jpkTarget.ObjectKey; sha256Hex = $jointPkSha }
-    $keys += [ordered]@{ keyType = 'joint_relin_key';  objectKey = $relTarget.ObjectKey; sha256Hex = $relinSha }
+    if ($needsRelin) {
+        $keys += [ordered]@{ keyType = 'joint_relin_key';  objectKey = $relTarget.ObjectKey; sha256Hex = $relinSha }
+    }
 
     $doc = [ordered]@{
         keys         = $keys

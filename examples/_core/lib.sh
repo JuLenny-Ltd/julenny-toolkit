@@ -701,6 +701,17 @@ function_requires_sum_keys() {
         "$fn_def" > /dev/null 2>&1
 }
 
+# True if the function-def declares a "relinearization" eval key. Additive-only
+# functions (federated-average) declare requiredEvalKeys: [], and for those the whole
+# relin exchange - rounds 1, 2 and the final combine - must be skipped. The platform
+# knows this and goes straight to awaiting-finalization, so a script that waits for
+# relin-round1-continue waits forever.
+function_requires_relin_keys() {
+    local fn_def="${1:-$JL_WORKDIR/function-def.json}"
+    [[ -f "$fn_def" ]] || return 1
+    jq -e '(.requiredEvalKeys // ["relinearization", "sum"]) | index("relinearization")'         "$fn_def" > /dev/null 2>&1
+}
+
 get_pending_rotation_keysetup() {
     local state; state="$(get_keysetup_state)"
     echo "$state" | jq -c '.pendingRotationKeySetup // null'

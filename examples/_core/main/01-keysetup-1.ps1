@@ -22,11 +22,16 @@ $leadSumR1Bin   = Join-Path $script:JL_PEER_DIR 'lead-sum-r1.bin'
 
 # -------- 1. Wait for and download the peer's shares --------
 Write-JlInfo "Fetching $($script:JL_PEER_LABEL)'s bundle 1 contributions..."
-Wait-JlPeerShare 'pk-share'
-Wait-JlPeerShare 'relin-round1'
+$needsRelin = Test-JlFunctionRequiresRelinKeys
 
-Save-JlPeerShare -MessageType 'pk-share'     -OutPath $leadPkBin
-Save-JlPeerShare -MessageType 'relin-round1' -OutPath $leadRelinR1Bin
+Wait-JlPeerShare 'pk-share'
+Save-JlPeerShare -MessageType 'pk-share' -OutPath $leadPkBin
+
+# Additive-only functions declare requiredEvalKeys: [] and never send relin-round1.
+if ($needsRelin) {
+    Wait-JlPeerShare 'relin-round1'
+    Save-JlPeerShare -MessageType 'relin-round1' -OutPath $leadRelinR1Bin
+}
 
 $needsSum = Test-JlFunctionRequiresSumKeys
 if ($needsSum) {
@@ -49,19 +54,23 @@ Write-JlSuccess "Joint public key: $jointPk"
 
 Publish-JlEnvelope -BinPath $jointPk -Round 1 -MessageType 'pk-share'
 
-# -------- 3. relin-round1-continue (round 3) --------
-Write-JlInfo "Generating relin round-1 continue..."
-Invoke-JlCli @(
-    'crypto', 'relin-contribute',
-    '--context-spec', $script:JULENNY_CRYPTO_CONTEXT_SPEC,
-    '--round', '1', '--role', 'main',
-    '--secret-key', $myShareSecret,
-    '--peer-share', $leadRelinR1Bin,
-    '--output',     $mainRelinR1
-)
-Write-JlSuccess "$($script:JL_OUR_LABEL) relin round-1: $mainRelinR1"
+# -------- 3. relin-round1-continue (round 3), only if a relin key is needed --------
+if ($needsRelin) {
+    Write-JlInfo "Generating relin round-1 continue..."
+    Invoke-JlCli @(
+        'crypto', 'relin-contribute',
+        '--context-spec', $script:JULENNY_CRYPTO_CONTEXT_SPEC,
+        '--round', '1', '--role', 'main',
+        '--secret-key', $myShareSecret,
+        '--peer-share', $leadRelinR1Bin,
+        '--output',     $mainRelinR1
+    )
+    Write-JlSuccess "$($script:JL_OUR_LABEL) relin round-1: $mainRelinR1"
 
-Publish-JlEnvelope -BinPath $mainRelinR1 -Round 3 -MessageType 'relin-round1-continue'
+    Publish-JlEnvelope -BinPath $mainRelinR1 -Round 3 -MessageType 'relin-round1-continue'
+} else {
+    Write-JlInfo "Function does not require a relinearization key; skipping relin-round1-continue."
+}
 
 # -------- 4. sum-round1-continue (round 6), only if the function needs a sum key --------
 if ($needsSum) {
@@ -84,9 +93,11 @@ if ($needsSum) {
 
 Write-Host ""
 Write-JlSuccess "Bundle 1 uploaded."
+# With no relin key there is no bundle 2; finalization is the next step.
+if (Test-JlFunctionRequiresRelinKeys) { $nextStep = "02-keysetup-2.ps1" } else { $nextStep = "03-finalize-keysetup.ps1" }
 Write-JlWaitMessage @"
 Tell $($script:JL_PEER_LABEL) to run 02-keysetup-2 in their acme folder.
 
 When their bundle 2 is uploaded, come back here and run:
-    $here\02-keysetup-2.ps1
+    $here\$nextStep
 "@

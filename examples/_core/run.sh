@@ -113,11 +113,34 @@ gate() {
 # pk-share as bundle 1; the main (consumer) publishes relin-round1-continue.
 # Each side waits for the other's bundle-1 message type; bundle 2 is the same
 # message type both ways.
-if is_owner; then
-    peer_did_bundle1() { peer_has_uploaded "relin-round1-continue"; }
+#
+# An additive-only function (requiredEvalKeys: []) has no relin exchange at all, so
+# bundle 1 is just the pk-share pair and there is no bundle 2. Waiting for
+# relin-round1-continue there hangs forever: the platform goes straight to
+# awaiting-finalization and refuses further messages.
+if function_requires_relin_keys; then
+    JL_NEEDS_RELIN=1
 else
-    peer_did_bundle1() { peer_has_uploaded "pk-share"; }
+    JL_NEEDS_RELIN=0
 fi
+
+if is_owner; then
+    if (( JL_NEEDS_RELIN )); then
+        PEER_BUNDLE1_TYPE="relin-round1-continue"
+        OWN_BUNDLE1_MARKER="lead-relin-r1.bin"
+    else
+        PEER_BUNDLE1_TYPE="pk-share"
+        OWN_BUNDLE1_MARKER="fhe_public_key.bin"
+    fi
+else
+    PEER_BUNDLE1_TYPE="pk-share"
+    if (( JL_NEEDS_RELIN )); then
+        OWN_BUNDLE1_MARKER="main-relin-r1.bin"
+    else
+        OWN_BUNDLE1_MARKER="joint_public_key.bin"
+    fi
+fi
+peer_did_bundle1() { peer_has_uploaded "$PEER_BUNDLE1_TYPE"; }
 peer_did_bundle2() { peer_has_uploaded "relin-round2"; }
 
 # -------- Interactive front matter --------
@@ -292,27 +315,31 @@ case "$KS_STATE" in
     pending-keysetup|in-progress)
         if is_owner; then
             # Lead: publish bundle 1, wait for main's bundle 1, publish bundle 2, wait.
-            if [[ ! -f "$JL_KEYS_DIR/lead-relin-r1.bin" ]]; then
+            if [[ ! -f "$JL_KEYS_DIR/$OWN_BUNDLE1_MARKER" ]]; then
                 step "${JL_OUR_LABEL}: keysetup bundle 1"
                 "$SCRIPT_DIR/$JL_ROLE_DIR/01-keysetup-1.sh"
             fi
-            gate "${JL_PEER_LABEL} to complete bundle 1 (relin-round1-continue)" peer_did_bundle1
-            if [[ ! -f "$JL_KEYS_DIR/lead-relin-r2.bin" ]]; then
-                step "${JL_OUR_LABEL}: keysetup bundle 2"
-                "$SCRIPT_DIR/$JL_ROLE_DIR/02-keysetup-2.sh"
+            gate "${JL_PEER_LABEL} to complete bundle 1 ($PEER_BUNDLE1_TYPE)" peer_did_bundle1
+            if (( JL_NEEDS_RELIN )); then
+                if [[ ! -f "$JL_KEYS_DIR/lead-relin-r2.bin" ]]; then
+                    step "${JL_OUR_LABEL}: keysetup bundle 2"
+                    "$SCRIPT_DIR/$JL_ROLE_DIR/02-keysetup-2.sh"
+                fi
+                gate "${JL_PEER_LABEL} to complete bundle 2 (relin-round2)" peer_did_bundle2
             fi
-            gate "${JL_PEER_LABEL} to complete bundle 2 (relin-round2)" peer_did_bundle2
         else
             # Main: wait for lead's bundle 1, publish, wait for bundle 2, publish.
-            if [[ ! -f "$JL_KEYS_DIR/main-relin-r1.bin" ]]; then
+            if [[ ! -f "$JL_KEYS_DIR/$OWN_BUNDLE1_MARKER" ]]; then
                 gate "${JL_PEER_LABEL} to publish bundle 1 (pk-share)" peer_did_bundle1
                 step "${JL_OUR_LABEL}: keysetup bundle 1"
                 "$SCRIPT_DIR/$JL_ROLE_DIR/01-keysetup-1.sh"
             fi
-            if [[ ! -f "$JL_KEYS_DIR/main-relin-r2.bin" ]]; then
-                gate "${JL_PEER_LABEL} to publish bundle 2 (relin-round2)" peer_did_bundle2
-                step "${JL_OUR_LABEL}: keysetup bundle 2"
-                "$SCRIPT_DIR/$JL_ROLE_DIR/02-keysetup-2.sh"
+            if (( JL_NEEDS_RELIN )); then
+                if [[ ! -f "$JL_KEYS_DIR/main-relin-r2.bin" ]]; then
+                    gate "${JL_PEER_LABEL} to publish bundle 2 (relin-round2)" peer_did_bundle2
+                    step "${JL_OUR_LABEL}: keysetup bundle 2"
+                    "$SCRIPT_DIR/$JL_ROLE_DIR/02-keysetup-2.sh"
+                fi
             fi
         fi
         KS_STATE="$(fetch_permission_state)"

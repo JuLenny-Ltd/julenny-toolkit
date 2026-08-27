@@ -12,6 +12,15 @@ Import-JlSession
 
 Write-JlStep "$($script:JL_OUR_LABEL) keysetup bundle 2: relin-round2"
 
+# Bundle 2 is the second relin round and nothing else. An additive-only function
+# (requiredEvalKeys: []) has no relin key, so there is nothing to do here and the
+# file checks below would stop on intermediates that were never created.
+if (-not (Test-JlFunctionRequiresRelinKeys)) {
+    Write-JlInfo "Function does not require a relinearization key; bundle 2 has nothing to do."
+    Write-JlInfo "Go straight to 03-finalize-keysetup."
+    return
+}
+
 $fheSecret   = Join-Path $script:JL_KEYS_DIR $script:JL_SECRET_SHARE_FILE
 $relinR1Lead = Join-Path $script:JL_KEYS_DIR 'lead-relin-r1.bin'
 $relinR1Main = Join-Path $script:JL_PEER_DIR 'main-relin-r1.bin'

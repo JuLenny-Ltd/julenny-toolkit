@@ -14,6 +14,15 @@ load_session
 
 step "Acme keysetup bundle 2: relin-round2"
 
+# Bundle 2 is the second relin round and nothing else. An additive-only function
+# (requiredEvalKeys: []) has no relin key, so there is nothing to do and the file
+# checks below would stop on intermediates that were never created.
+if ! function_requires_relin_keys; then
+    info "Function does not require a relinearization key; bundle 2 has nothing to do."
+    info "Go straight to 03-finalize-keysetup."
+    exit 0
+fi
+
 FHE_SECRET="$JL_KEYS_DIR/fhe_secret_key.bin"
 RELIN_R1_LEAD="$JL_KEYS_DIR/lead-relin-r1.bin"
 RELIN_R1_MAIN="$JL_PEER_DIR/main-relin-r1.bin"

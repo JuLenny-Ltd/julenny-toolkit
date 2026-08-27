@@ -80,7 +80,14 @@ function Test-JlLatestReleasedDecrypted {
 # We always gate on the PEER's bundle uploads. The lead publishes pk-share as
 # bundle 1; the main publishes relin-round1-continue. Each side waits for the
 # other's bundle-1 message type; bundle 2 is the same type both ways.
-if (Test-JlIsOwner) { $peerBundle1Type = 'relin-round1-continue' } else { $peerBundle1Type = 'pk-share' }
+# An additive-only function (requiredEvalKeys: []) has no relin exchange at all, so
+# bundle 1 is just the pk-share pair and there is no bundle 2. Waiting for
+# relin-round1-continue there hangs forever: the platform goes straight to
+# awaiting-finalization and refuses further messages.
+$script:JlNeedsRelin = Test-JlFunctionRequiresRelinKeys
+if (Test-JlIsOwner -and $script:JlNeedsRelin) { $peerBundle1Type = 'relin-round1-continue' } else { $peerBundle1Type = 'pk-share' }
+if (Test-JlIsOwner) { $ownBundle1Marker = 'fhe_public_key.bin' } else { $ownBundle1Marker = 'joint_public_key.bin' }
+if ($script:JlNeedsRelin) { if (Test-JlIsOwner) { $ownBundle1Marker = 'lead-relin-r1.bin' } else { $ownBundle1Marker = 'main-relin-r1.bin' } }
 
 # ---------------- Gate: wait, or exit and let the operator re-run ----------------
 function Invoke-JlGate {
@@ -302,27 +309,31 @@ switch -Regex ($ksState) {
     '^(pending-keysetup|in-progress)$' {
         if (Test-JlIsOwner) {
             # OWNER: publish bundle 1, wait, publish bundle 2, wait.
-            if (-not (Test-Path -LiteralPath (Join-Path $script:JL_KEYS_DIR 'lead-relin-r1.bin'))) {
+            if (-not (Test-Path -LiteralPath (Join-Path $script:JL_KEYS_DIR $ownBundle1Marker))) {
                 Write-JlStep "$($script:JL_OUR_LABEL): keysetup bundle 1"
                 Invoke-JlPhase '01-keysetup-1.ps1'
             }
-            Invoke-JlGate "$($script:JL_PEER_LABEL) to complete bundle 1 (relin-round1-continue)" { Test-JlPeerUploaded $peerBundle1Type }
-            if (-not (Test-Path -LiteralPath (Join-Path $script:JL_KEYS_DIR 'lead-relin-r2.bin'))) {
-                Write-JlStep "$($script:JL_OUR_LABEL): keysetup bundle 2"
-                Invoke-JlPhase '02-keysetup-2.ps1'
+            Invoke-JlGate "$($script:JL_PEER_LABEL) to complete bundle 1 ($peerBundle1Type)" { Test-JlPeerUploaded $peerBundle1Type }
+            if ($script:JlNeedsRelin) {
+                if (-not (Test-Path -LiteralPath (Join-Path $script:JL_KEYS_DIR 'lead-relin-r2.bin'))) {
+                    Write-JlStep "$($script:JL_OUR_LABEL): keysetup bundle 2"
+                    Invoke-JlPhase '02-keysetup-2.ps1'
+                }
+                Invoke-JlGate "$($script:JL_PEER_LABEL) to complete bundle 2 (relin-round2)" { Test-JlPeerUploaded 'relin-round2' }
             }
-            Invoke-JlGate "$($script:JL_PEER_LABEL) to complete bundle 2 (relin-round2)" { Test-JlPeerUploaded 'relin-round2' }
         } else {
             # CONSUMER: wait for bundle 1, publish, wait for bundle 2, publish.
-            if (-not (Test-Path -LiteralPath (Join-Path $script:JL_KEYS_DIR 'main-relin-r1.bin'))) {
+            if (-not (Test-Path -LiteralPath (Join-Path $script:JL_KEYS_DIR $ownBundle1Marker))) {
                 Invoke-JlGate "$($script:JL_PEER_LABEL) to publish bundle 1 (pk-share)" { Test-JlPeerUploaded $peerBundle1Type }
                 Write-JlStep "$($script:JL_OUR_LABEL): keysetup bundle 1"
                 Invoke-JlPhase '01-keysetup-1.ps1'
             }
-            if (-not (Test-Path -LiteralPath (Join-Path $script:JL_KEYS_DIR 'main-relin-r2.bin'))) {
-                Invoke-JlGate "$($script:JL_PEER_LABEL) to publish bundle 2 (relin-round2)" { Test-JlPeerUploaded 'relin-round2' }
-                Write-JlStep "$($script:JL_OUR_LABEL): keysetup bundle 2"
-                Invoke-JlPhase '02-keysetup-2.ps1'
+            if ($script:JlNeedsRelin) {
+                if (-not (Test-Path -LiteralPath (Join-Path $script:JL_KEYS_DIR 'main-relin-r2.bin'))) {
+                    Invoke-JlGate "$($script:JL_PEER_LABEL) to publish bundle 2 (relin-round2)" { Test-JlPeerUploaded 'relin-round2' }
+                    Write-JlStep "$($script:JL_OUR_LABEL): keysetup bundle 2"
+                    Invoke-JlPhase '02-keysetup-2.ps1'
+                }
             }
         }
         $perm = Get-JlPermission
