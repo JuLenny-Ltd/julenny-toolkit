@@ -67,9 +67,16 @@ LEAD_R2="$JL_KEYS_DIR/lead-relin-r2.bin"
 LEAD_SUM="$JL_KEYS_DIR/lead-sum-r1.bin"
 COMBINED_R1="$JL_KEYS_DIR/combined-relin-r1.bin"
 
-[[ "$NEEDS_RELIN" != "yes" || -f "$LEAD_R2" ]] || die "Missing $LEAD_R2. Did 02-keysetup-2.sh run?"
+# The round-2 intermediates are only needed to PRODUCE the final relin key. A new
+# permission reusing an existing joint key already has the final key on disk, and the
+# combine below is skipped, so only insist on the intermediates when there is a
+# combine still to do.
+FINAL_RELIN_PRECHECK="$JL_KEYS_DIR/final_relin_key.bin"
+[[ "$NEEDS_RELIN" != "yes" || -f "$FINAL_RELIN_PRECHECK" || -f "$LEAD_R2" ]] \
+    || die "Missing $LEAD_R2. Did 02-keysetup-2.sh run?"
 [[ "$NEEDS_SUM" != "yes" || -f "$LEAD_SUM" ]] || die "Missing $LEAD_SUM. Did 01-keysetup-1.sh run?"
-[[ "$NEEDS_RELIN" != "yes" || -f "$COMBINED_R1" ]] || die "Missing $COMBINED_R1. Did 02-keysetup-2.sh run?"
+[[ "$NEEDS_RELIN" != "yes" || -f "$FINAL_RELIN_PRECHECK" || -f "$COMBINED_R1" ]] \
+    || die "Missing $COMBINED_R1. Did 02-keysetup-2.sh run?"
 
 # Joint PK can be at either of two paths depending on prior steps.
 JOINT_PK=""

@@ -54,9 +54,16 @@ MAIN_SUM="$JL_KEYS_DIR/main-sum-r1.bin"
 COMBINED_R1="$JL_KEYS_DIR/combined-relin-r1.bin"
 JOINT_PK="$JL_KEYS_DIR/joint_public_key.bin"
 
-[[ "$NEEDS_RELIN" != "yes" || -f "$MAIN_R2" ]] || die "Missing $MAIN_R2. Did 02-keysetup-2.sh run?"
+# The round-2 intermediates are only needed to PRODUCE the final relin key. A new
+# permission reusing an existing joint key already has the final key on disk, and the
+# combine below is skipped, so only insist on the intermediates when there is a
+# combine still to do.
+FINAL_RELIN_PRECHECK="$JL_KEYS_DIR/final_relin_key.bin"
+[[ "$NEEDS_RELIN" != "yes" || -f "$FINAL_RELIN_PRECHECK" || -f "$MAIN_R2" ]] \
+    || die "Missing $MAIN_R2. Did 02-keysetup-2.sh run?"
 [[ "$NEEDS_SUM" != "yes" || -f "$MAIN_SUM" ]] || die "Missing $MAIN_SUM. Did 01-keysetup-1.sh run?"
-[[ "$NEEDS_RELIN" != "yes" || -f "$COMBINED_R1" ]] || die "Missing $COMBINED_R1. Did 02-keysetup-2.sh run?"
+[[ "$NEEDS_RELIN" != "yes" || -f "$FINAL_RELIN_PRECHECK" || -f "$COMBINED_R1" ]] \
+    || die "Missing $COMBINED_R1. Did 02-keysetup-2.sh run?"
 [[ -f "$JOINT_PK"    ]] || die "Missing $JOINT_PK. Did 01-keysetup-1.sh run?"
 
 # -------- 1. Download Acme's relin-round2 and sum-round1 --------

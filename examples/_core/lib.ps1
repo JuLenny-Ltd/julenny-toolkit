@@ -2068,7 +2068,12 @@ function Invoke-JlFinalizeKeysetup {
     }
 
     $combinedR1 = Join-Path $script:JL_KEYS_DIR 'combined-relin-r1.bin'
-    if ($needsRelin) {
+    # The round-2 intermediates are only needed to PRODUCE the final relin key. When a new
+    # permission reuses an existing joint key, the final key is already on disk and the
+    # combine below is skipped, so demanding the intermediates here refuses a case that
+    # works perfectly well. Only insist on them when there is a combine still to do.
+    $finalRelinPath = Join-Path $script:JL_KEYS_DIR 'final_relin_key.bin'
+    if ($needsRelin -and -not (Test-Path -LiteralPath $finalRelinPath)) {
         if (-not (Test-Path -LiteralPath $mineR2))     { Stop-JlWithError "Missing $mineR2. Did 02-keysetup-2.ps1 run?" }
         if (-not (Test-Path -LiteralPath $combinedR1)) { Stop-JlWithError "Missing $combinedR1. Did 02-keysetup-2.ps1 run?" }
     }
