@@ -79,6 +79,10 @@ $script:JL_SIGNING_DIR    = Join-Path $script:JL_ROOT 'signing'
 $script:JL_SIGNING_SECRET = Join-Path $script:JL_SIGNING_DIR 'signing_secret_key.bin'
 $script:JL_SIGNING_PUBLIC = Join-Path $script:JL_SIGNING_DIR 'signing_public_key.bin'
 $script:JL_COLLABS_DIR    = Join-Path $script:JL_ROOT 'collabs'
+# The API key is account-scoped, like the signing key, not collaboration-scoped. It used
+# to live only in each collaboration's config.env, so every new collaboration asked for
+# it again AND left another copy of a live key on disk. Remembered here once instead.
+$script:JL_ACCOUNT_CONFIG = Join-Path $script:JL_ROOT 'account.env'
 $script:JL_CURRENT_FILE   = Join-Path $script:JL_ROOT 'CURRENT'
 
 # The scenario's data\ directory, set by the per-side bootstrap. It arrives as an
@@ -1296,19 +1300,33 @@ function Test-JlAllRequiredInputsDeclared {
 # side can see and whether it may create one.
 
 function Select-JlFunction {
-    param([string] $Prompt = 'Pick a function')
+    # LockScheme pins the list to one scheme instead of asking. A permission added to an
+    # EXISTING collaboration must match that collaboration's joint key: there is one joint
+    # key per collaboration, so a BFV function inside a CKKS collaboration would need a
+    # second joint key and break the keysetup reuse the whole flow depends on. Offering
+    # the choice there is offering a way to break it.
+    param(
+        [string] $Prompt = 'Pick a function',
+        [ValidateSet('CKKS', 'BFV', '')]
+        [string] $LockScheme = ''
+    )
 
-    Write-Host ""
-    Write-Host "Which scheme should the function use?"
-    Write-Host "  1) CKKS  (real-valued analytics)"
-    Write-Host "  2) BFV   (exact-integer functions)"
-    Write-Host "  3) Any"
-    $schemeChoice = Read-JlValue "Choose (1-3)" '1'
-    switch ($schemeChoice) {
-        '1' { $funcs = @(Get-JlFunctionsByScheme 'CKKS'); $schemeLabel = 'CKKS' }
-        '2' { $funcs = @(Get-JlFunctionsByScheme 'BFV');  $schemeLabel = 'BFV' }
-        '3' { $funcs = @(Get-JlFunctions);                $schemeLabel = 'any' }
-        default { Stop-JlWithError "Invalid choice: $schemeChoice" }
+    if ($LockScheme) {
+        $funcs = @(Get-JlFunctionsByScheme $LockScheme)
+        $schemeLabel = $LockScheme
+    } else {
+        Write-Host ""
+        Write-Host "Which scheme should the function use?"
+        Write-Host "  1) CKKS  (real-valued analytics)"
+        Write-Host "  2) BFV   (exact-integer functions)"
+        Write-Host "  3) Any"
+        $schemeChoice = Read-JlValue "Choose (1-3)" '1'
+        switch ($schemeChoice) {
+            '1' { $funcs = @(Get-JlFunctionsByScheme 'CKKS'); $schemeLabel = 'CKKS' }
+            '2' { $funcs = @(Get-JlFunctionsByScheme 'BFV');  $schemeLabel = 'BFV' }
+            '3' { $funcs = @(Get-JlFunctions);                $schemeLabel = 'any' }
+            default { Stop-JlWithError "Invalid choice: $schemeChoice" }
+        }
     }
     if ($funcs.Count -eq 0) { Stop-JlWithError "No functions found for scheme '$schemeLabel'." }
 
@@ -1364,11 +1382,30 @@ function Invoke-JlInitSession {
     # A key already in the environment wins, so the operator can supply it
     # without an interactive paste. Terminals vary in how they treat a pasted
     # secret at a hidden prompt, and this is the route a scripted run would use.
+    $rememberedKey = ''
+    if (Test-Path -LiteralPath $script:JL_ACCOUNT_CONFIG) {
+        foreach ($line in (Get-Content -LiteralPath $script:JL_ACCOUNT_CONFIG)) {
+            if ($line -match '^\s*JULENNY_API_KEY\s*=\s*"?([^"]*)"?\s*$') { $rememberedKey = $Matches[1] }
+        }
+    }
+
     if ($env:JULENNY_API_KEY) {
         $script:JULENNY_API_KEY = $env:JULENNY_API_KEY
         Write-JlInfo "Using JULENNY_API_KEY from the environment ($($script:JULENNY_API_KEY.Length) characters)."
+    } elseif ($rememberedKey) {
+        $script:JULENNY_API_KEY = $rememberedKey
+        Write-JlInfo "Using the API key remembered for this machine ($($rememberedKey.Length) characters)."
+        Write-JlInfo "Delete $($script:JL_ACCOUNT_CONFIG) to be asked again."
     } else {
         $script:JULENNY_API_KEY = Read-JlSecret "$($script:JL_OUR_LABEL)'s API key (starts with sk_live_)"
+        if (-not (Test-Path -LiteralPath $script:JL_ROOT)) {
+            New-Item -ItemType Directory -Path $script:JL_ROOT -Force | Out-Null
+        }
+        $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+        [System.IO.File]::WriteAllText($script:JL_ACCOUNT_CONFIG,
+            "# JuLenny account-scoped settings. Delete this file to be asked again.`r`n" +
+            "JULENNY_API_KEY=`"$($script:JULENNY_API_KEY)`"`r`n", $utf8NoBom)
+        Write-JlInfo "Remembered for future runs: $($script:JL_ACCOUNT_CONFIG) (delete it to be asked again)"
     }
     if (-not $script:JULENNY_API_KEY.StartsWith('sk_live_')) {
         Stop-JlWithError "API key must start with sk_live_"
@@ -1531,7 +1568,23 @@ function Invoke-JlInitSession {
             if (-not $CanCreatePermission) {
                 Stop-JlWithError "Only the data owner can create a permission."
             }
-            $fn = Select-JlFunction
+            # One joint key per collaboration, so a new permission must use the same scheme
+            # as the permissions already here. Infer it from an existing one rather than
+            # asking; only fall back to the prompt if there is nothing to read it from.
+            $lockScheme = ''
+            if ($perms.Count -gt 0 -and (Test-JlHasProperty $perms[0] 'cryptoContextSpec')) {
+                $existingSpec = "$($perms[0].cryptoContextSpec)"
+                if ($existingSpec -like 'ckks-*') { $lockScheme = 'CKKS' }
+                elseif ($existingSpec -like 'bfv-*') { $lockScheme = 'BFV' }
+                if ($lockScheme) {
+                    Write-JlInfo "This collaboration's joint key is $lockScheme ($existingSpec); a new"
+                    Write-JlInfo "permission must use the same scheme, so only $lockScheme functions are offered."
+                }
+            }
+            if (-not $lockScheme) {
+                Write-JlWarn "Could not infer this collaboration's scheme from its permissions."
+            }
+            $fn = Select-JlFunction -LockScheme $lockScheme
             # The partner is already known: this permission goes under a collaboration that
             # was set up with them, and the project carries their collaboration id. Asking
             # again invites a typo that would point the permission at the wrong company.

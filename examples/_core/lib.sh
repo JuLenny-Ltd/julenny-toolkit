@@ -41,6 +41,10 @@ JL_SIGNING_DIR="$JL_ROOT/signing"
 JL_SIGNING_SECRET="$JL_SIGNING_DIR/signing_secret_key.bin"
 JL_SIGNING_PUBLIC="$JL_SIGNING_DIR/signing_public_key.bin"
 JL_COLLABS_DIR="$JL_ROOT/collabs"
+# The API key is account-scoped, like the signing key, not collaboration-scoped. It used
+# to live only in each collaboration's config.env, so every new collaboration asked for it
+# again AND left another copy of a live key on disk. Remembered here once instead.
+JL_ACCOUNT_CONFIG="$JL_ROOT/account.env"
 JL_CURRENT_FILE="$JL_ROOT/CURRENT"
 
 # Per-collab paths. set_active_joint_key fills these in. They stay empty
@@ -208,6 +212,27 @@ load_session() {
     : "${JULENNY_SIGNING_SECRET:?config.env missing JULENNY_SIGNING_SECRET}"
 
     mkdir -p "$JL_KEYS_DIR" "$JL_ENV_DIR" "$JL_PEER_DIR"
+}
+
+# -------- account-scoped API key --------
+# Read the remembered key, if there is one. Returns non-zero when there is nothing to
+# read, so the caller falls through to prompting.
+load_account_key() {
+    [[ -f "$JL_ACCOUNT_CONFIG" ]] || return 1
+    # shellcheck disable=SC1090
+    source "$JL_ACCOUNT_CONFIG"
+    [[ -n "${JULENNY_API_KEY:-}" ]]
+}
+
+# Remember the key for this machine. Written 0600 BEFORE the secret goes in, so it is
+# never briefly world-readable on a default umask.
+save_account_key() {
+    mkdir -p "$JL_ROOT"
+    : > "$JL_ACCOUNT_CONFIG"
+    chmod 600 "$JL_ACCOUNT_CONFIG" 2>/dev/null || true
+    printf '# JuLenny account-scoped settings. Delete this file to be asked again.\n' > "$JL_ACCOUNT_CONFIG"
+    printf 'JULENNY_API_KEY="%s"\n' "$JULENNY_API_KEY" >> "$JL_ACCOUNT_CONFIG"
+    info "Remembered for future runs: $JL_ACCOUNT_CONFIG (delete it to be asked again)"
 }
 
 # -------- curl wrapper --------
@@ -519,9 +544,25 @@ prompt_secret() {
     # Say up front that nothing will appear. A silent prompt with no echo and no
     # confirmation looks like a frozen terminal, and the operator cannot tell
     # whether a paste registered.
-    echo "  (input is hidden - paste or type, then press Enter)" >&2
-    read -r -s -p "$prompt_text: " value < "$JL_TTY" || true
-    echo
+    # Echo an asterisk per character rather than using `read -s`, which shows nothing at
+    # all: with a silent prompt the operator cannot tell whether a paste registered, and a
+    # terminal that swallowed it looks identical to one that took it. Windows already shows
+    # asterisks; this matches.
+    printf '%s: ' "$prompt_text" >&2
+    local ch
+    while IFS= read -r -s -n 1 ch < "$JL_TTY"; do
+        [[ -z "$ch" ]] && break                 # Enter
+        if [[ "$ch" == $'\177' || "$ch" == $'\b' ]]; then
+            if [[ -n "$value" ]]; then
+                value="${value%?}"
+                printf '\b \b' >&2
+            fi
+        else
+            value+="$ch"
+            printf '*' >&2
+        fi
+    done
+    echo >&2
     # Terminals differ in what they append to a paste. A trailing carriage
     # return or space would leave the value looking correct while failing the
     # sk_live_ prefix check, so trim before reporting or validating.

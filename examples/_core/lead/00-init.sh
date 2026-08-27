@@ -57,8 +57,12 @@ fi
 # is also the route a scripted or CI run would take.
 if [[ -n "${JULENNY_API_KEY:-}" ]]; then
     info "Using JULENNY_API_KEY from the environment (${#JULENNY_API_KEY} characters)."
+elif load_account_key; then
+    info "Using the API key remembered for this machine (${#JULENNY_API_KEY} characters)."
+    info "Delete $JL_ACCOUNT_CONFIG to be asked again."
 else
     prompt_secret JULENNY_API_KEY "Acme's API key (starts with sk_live_)"
+    save_account_key
 fi
 [[ "$JULENNY_API_KEY" == sk_live_* ]] || die "API key must start with sk_live_"
 
