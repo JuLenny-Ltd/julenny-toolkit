@@ -75,13 +75,23 @@ latest_execution_state() {
     echo "$resp" | jq -r '.executions[0].state // empty'
 }
 
-# Consumer-side: has the latest released execution already been decrypted here?
+# Has this machine already finished its part of the latest released execution?
+#
+# Which file proves that depends on which flow this side runs, and that is set by
+# resultVisibility, not by owner/consumer. The viewer writes my-partial-<id>.bin;
+# the releaser writes releaser-partial-<id>.bin. Checking only the viewer's file
+# left the consumer-as-releaser case (resultVisibility: dataOwner) believing a
+# cycle was still live, so it skipped the trigger and sat in the releaser flow
+# waiting for an execution nobody would create, while the owner waited for the
+# same execution. Either marker means this cycle is done here.
 latest_released_decrypted() {
     local resp; resp="$(curl_jl GET \
         "/api/fhe-permissions/$JULENNY_PERMISSION_ID/executions?state=released&limit=1" \
         2>/dev/null || echo '{}')"
     local id; id="$(echo "$resp" | jq -r '.executions[0].id // empty')"
-    [[ -n "$id" ]] && [[ -f "$JL_KEYS_DIR/my-partial-$id.bin" ]]
+    [[ -n "$id" ]] || return 1
+    [[ -f "$JL_KEYS_DIR/my-partial-$id.bin" ]] && return 0
+    [[ -f "$JL_KEYS_DIR/releaser-partial-$id.bin" ]]
 }
 
 # Pin the newest released execution that has NOT been decrypted on this machine,
@@ -95,7 +105,8 @@ pin_next_undecrypted_execution() {
         "/api/fhe-permissions/$JULENNY_PERMISSION_ID/executions?state=released" \
         2>/dev/null || echo '{}')"
     for id in $(echo "$resp" | jq -r '.executions[]?.id'); do
-        if [[ ! -f "$JL_KEYS_DIR/my-partial-$id.bin" ]]; then
+        if [[ ! -f "$JL_KEYS_DIR/my-partial-$id.bin" \
+              && ! -f "$JL_KEYS_DIR/releaser-partial-$id.bin" ]]; then
             echo "$id" > "$JL_WORKDIR/last_exec_id"
             return 0
         fi

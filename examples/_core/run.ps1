@@ -68,13 +68,23 @@ function Get-JlLatestExecutionState {
     return "$($execs[0].state)"
 }
 
-# Consumer-side: has the latest released execution already been decrypted here?
+# Has this machine already finished its part of the latest released execution?
+#
+# Which file proves that depends on which flow this side runs, and that is set by
+# resultVisibility, not by owner/consumer. The viewer writes my-partial-<id>.bin;
+# the releaser writes releaser-partial-<id>.bin. Checking only the viewer's file
+# left the consumer-as-releaser case (resultVisibility: dataOwner) believing a
+# cycle was still live, so it skipped the trigger and sat in the releaser flow
+# waiting for an execution nobody would create, while the owner waited for the
+# same execution. Either marker means this cycle is done here.
 function Test-JlLatestReleasedDecrypted {
     $resp = Invoke-JlApi GET "/api/fhe-permissions/$($script:JULENNY_PERMISSION_ID)/executions?state=released&limit=1" -AllowFailure
     if ($null -eq $resp -or -not ((Test-JlHasProperty $resp 'executions'))) { return $false }
     $execs = @($resp.executions)
     if ($execs.Count -eq 0) { return $false }
-    return (Test-Path -LiteralPath (Join-Path $script:JL_KEYS_DIR "my-partial-$($execs[0].id).bin"))
+    $id = $execs[0].id
+    if (Test-Path -LiteralPath (Join-Path $script:JL_KEYS_DIR "my-partial-$id.bin"))       { return $true }
+    return (Test-Path -LiteralPath (Join-Path $script:JL_KEYS_DIR "releaser-partial-$id.bin"))
 }
 
 # Pin the newest released execution that has NOT been decrypted on this machine,
@@ -86,8 +96,9 @@ function Set-JlNextUndecryptedExecution {
     $resp = Invoke-JlApi GET "/api/fhe-permissions/$($script:JULENNY_PERMISSION_ID)/executions?state=released" -AllowFailure
     if ($null -eq $resp -or -not ((Test-JlHasProperty $resp 'executions'))) { return $false }
     foreach ($e in @($resp.executions)) {
-        $partial = Join-Path $script:JL_KEYS_DIR "my-partial-$($e.id).bin"
-        if (-not (Test-Path -LiteralPath $partial)) {
+        $mine     = Join-Path $script:JL_KEYS_DIR "my-partial-$($e.id).bin"
+        $released = Join-Path $script:JL_KEYS_DIR "releaser-partial-$($e.id).bin"
+        if ((-not (Test-Path -LiteralPath $mine)) -and (-not (Test-Path -LiteralPath $released))) {
             Set-Content -LiteralPath (Join-Path $script:JL_WORKDIR 'last_exec_id') -Value $e.id -Encoding ascii
             return $true
         }
