@@ -220,13 +220,14 @@ curl_jl() {
     # is the key. A dev key pasted into a prod run reads exactly like an empty account.
     local method="$1"; shift
     local path="$1"; shift
-    local out status body
-    out="$(curl -sS -w $'
-%{http_code}' -X "$method" \n         -H "x-api-key: $JULENNY_API_KEY" \n         "$@" \n         "$JULENNY_API_BASE$path")" || return 1
-    status="${out##*$'
-'}"
-    body="${out%$'
-'*}"
+    local out status body nl
+    nl=$'\n'
+    # The -w format is expanded by curl itself, so the backslash stays inside single
+    # quotes and bash never interprets it. Kept on one line: continuations here were
+    # once mangled into literal "\n" arguments, and curl tried to resolve a host called "n".
+    out="$(curl -sS -w '\n%{http_code}' -X "$method" -H "x-api-key: $JULENNY_API_KEY" "$@" "$JULENNY_API_BASE$path")" || return 1
+    status="${out##*"$nl"}"
+    body="${out%"$nl"*}"
     case "$status" in
         401) die "The platform rejected this API key (401) at $JULENNY_API_BASE.
      The key is wrong, inactive, or belongs to a different environment.
