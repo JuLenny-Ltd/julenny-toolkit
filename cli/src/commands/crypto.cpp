@@ -1838,7 +1838,11 @@ int run_crypto_combine(const CryptoCombineArgs& args) {
             for (double v : reals) max_abs = std::max(max_abs, std::abs(v));
             const double threshold = std::max(1e-9, max_abs * 1e-6);
 
-            json significant = json::object();
+            // ordered_json, not json: plain nlohmann::json is map-backed and sorts keys as
+            // STRINGS, so slots come out 0, 1, 10, 11, ... 15, 2, 3 - which invites a reader
+            // to line the wrong value up against the wrong slot. The loop below inserts in
+            // ascending slot order, so preserving insertion order is all that is needed.
+            nlohmann::ordered_json significant = nlohmann::ordered_json::object();
             std::size_t significant_count = 0;
             double sum_significant = 0.0;
             for (std::size_t i = 0; i < reals.size(); ++i) {
@@ -1851,7 +1855,7 @@ int run_crypto_combine(const CryptoCombineArgs& args) {
                 }
             }
 
-            json result;
+            nlohmann::ordered_json result;
             result["valueType"]         = "real";
             result["totalSlots"]        = reals.size();
             result["contextSpec"]       = spec->id;
@@ -1865,7 +1869,7 @@ int run_crypto_combine(const CryptoCombineArgs& args) {
             // number, which is the case for counts and match vectors and is not the
             // case for real results like averaged model weights. Never round those.
             bool all_whole = significant_count > 0;
-            json rounded = json::object();
+            nlohmann::ordered_json rounded = nlohmann::ordered_json::object();
             for (auto& [slot, val] : significant.items()) {
                 const double v = val.get<double>();
                 const double nearest = std::round(v);
