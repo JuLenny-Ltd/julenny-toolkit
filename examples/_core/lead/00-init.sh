@@ -76,26 +76,29 @@ export JULENNY_API_BASE JULENNY_API_KEY
 # /api/fhe-projects + /api/fhe-permissions creation flow.
 step "Fetching your collaborations..."
 ALL_PROJECTS="$(list_collaborations)"
-# Primary signal: the platform's yourPermissionRoles array (dataOwner/
-# dataConsumer per collab, added 2026-06-18); permissionCount>0 is a fallback.
-# Show collaborations where THIS account has at least one data-owner
-# permission, regardless of who created the project. permissionCount is
-# derived from view=permissioned (see list_collaborations), which is
-# role-scoped, so >0 means "I'm the data owner in >=1 active permission here".
-# Filtering on project ownership instead (ownerCompanyName == null) wrongly
-# hid collabs where this account is the data owner in the permission but the
-# OTHER party created the project (yourRole on those is still dataOwner).
-OWNED_PROJECTS="$(echo "$ALL_PROJECTS" \
-    | jq '[.[] | select(((.yourPermissionRoles // []) | any(. == "dataOwner")) or (.permissionCount > 0))] | sort_by(.createdAt) | reverse')"
+# yourPermissionRoles (dataOwner/dataConsumer per collab) is the primary signal that
+# this account already holds a permission of its role here; permissionCount, derived
+# from the role-scoped permissions view in list_collaborations, is the fallback.
+# A collaboration is only a container: the data owner is decided PER PERMISSION, so a
+# member holding no data-owner permission here can still create the first one. Listing
+# only collaborations where this account already holds one made the reversed-role case
+# impossible - the picker showed nothing, defaulted to 'n' and would have created a
+# second collaboration. Collaborations where this account already has a data-owner
+# permission come first; the rest are still listed, flagged, and selectable.
+ALL_SORTED="$(echo "$ALL_PROJECTS" | jq 'sort_by(.createdAt) | reverse')"
+OWNED_PROJECTS="$(echo "$ALL_SORTED" | jq '
+    def has_my_role: ((.yourPermissionRoles // []) | any(. == "dataOwner")) or (.permissionCount > 0);
+    [ .[] | select(has_my_role) ]
+    + [ .[] | select(has_my_role | not) | . + {noRoleYet: true} ]')"
 PROJECT_COUNT="$(echo "$OWNED_PROJECTS" | jq 'length')"
 
 echo
 if (( PROJECT_COUNT > 0 )); then
-    info "Active collaborations where you're the data owner (newest first):"
+    info "Your active collaborations (newest first):"
     echo "$OWNED_PROJECTS" \
-        | jq -r 'to_entries[] | "  [\(.key + 1)] \(.value.name // "(unnamed)")  |  peer: \(.value.partnerCollaborationId // .value.ownerCollaborationId // "?")  |  \(.value.permissionCount) permission(s)  |  keysetup: \(.value.keysetupState // "n/a")  |  created \(.value.createdAt // "?" | .[0:10])  |  id: \(.value.id)"'
+        | jq -r 'to_entries[] | "  [\(.key + 1)] \(.value.name // "(unnamed)")  |  peer: \(.value.partnerCollaborationId // .value.ownerCollaborationId // "?")  |  \(.value.permissionCount) permission(s)  |  keysetup: \(.value.keysetupState // "n/a")  |  created \(.value.createdAt // "?" | .[0:10])  |  id: \(.value.id)\(if .value.noRoleYet then "  |  no data-owner permission yet - pick to create the first one" else "" end)"'
 else
-    info "No active collaborations where you're the data owner."
+    info "You are not a member of any active collaboration yet."
 fi
 echo "  n) Create a NEW collaboration + permission via the API"
 echo

@@ -1422,17 +1422,28 @@ function Invoke-JlInitSession {
     # is the fallback. permissionCount is already role-scoped by the view, so >0
     # means "I hold at least one permission of my role here". Filtering on
     # project ownership instead wrongly hides collabs the other party created.
-    $mine = @($all | Where-Object {
+    # A collaboration is only a container: the data owner is decided PER PERMISSION, so a
+    # member holding no permission of this role here can still create the first one.
+    # Listing only collaborations where this account already holds one made the
+    # reversed-role case impossible - the picker showed nothing and offered only to
+    # create a second collaboration. Ones where this account already has a permission of
+    # its role come first; the rest are still listed, flagged, and selectable.
+    $hasMyRole = {
+        param($p)
         $roles = @()
-        if ((Test-JlHasProperty $_ 'yourPermissionRoles') -and $_.yourPermissionRoles) {
-            $roles = @($_.yourPermissionRoles)
+        if ((Test-JlHasProperty $p 'yourPermissionRoles') -and $p.yourPermissionRoles) {
+            $roles = @($p.yourPermissionRoles)
         }
-        ($roles -contains $myRoleName) -or ((Get-JlGrantCount $_) -gt 0)
-    } | Sort-Object createdAt -Descending)
+        return (($roles -contains $myRoleName) -or ((Get-JlGrantCount $p) -gt 0))
+    }
+    $sorted      = @($all | Sort-Object createdAt -Descending)
+    $withRole    = @($sorted | Where-Object { & $hasMyRole $_ })
+    $withoutRole = @($sorted | Where-Object { -not (& $hasMyRole $_) })
+    $mine        = @($withRole) + @($withoutRole)
 
     Write-Host ""
     if ($mine.Count -gt 0) {
-        Write-JlInfo "Active collaborations where you're the $myRoleName (newest first):"
+        Write-JlInfo "Your active collaborations (newest first):"
         for ($i = 0; $i -lt $mine.Count; $i++) {
             # Identify the peer by collaboration id, not by company name. These scripts
             # authenticate with an API key, and the API does not give company names to
@@ -1444,11 +1455,13 @@ function Invoke-JlInitSession {
             if (-not $peer) { $peer = '?' }
             $created = "$($mine[$i].createdAt)"
             if ($created.Length -gt 10) { $created = $created.Substring(0, 10) }
-            Write-Host ("  [{0}] {1}  |  peer: {2}  |  {3} permission(s)  |  keysetup: {4}  |  created {5}  |  id: {6}" -f `
-                ($i + 1), $mine[$i].name, $peer, (Get-JlGrantCount $mine[$i]), $mine[$i].keysetupState, $created, $mine[$i].id)
+            $flag = ''
+            if ($i -ge $withRole.Count) { $flag = "  |  no $myRoleName permission yet - pick to create the first one" }
+            Write-Host ("  [{0}] {1}  |  peer: {2}  |  {3} permission(s)  |  keysetup: {4}  |  created {5}  |  id: {6}{7}" -f `
+                ($i + 1), $mine[$i].name, $peer, (Get-JlGrantCount $mine[$i]), $mine[$i].keysetupState, $created, $mine[$i].id, $flag)
         }
     } else {
-        Write-JlInfo "No active collaborations where you're the $myRoleName."
+        Write-JlInfo "You are not a member of any active collaboration yet."
     }
     Write-Host "  n) Create a NEW collaboration + permission via the API"
     if (-not $CanCreatePermission) {
