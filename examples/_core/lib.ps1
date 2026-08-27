@@ -2106,7 +2106,11 @@ function Invoke-JlFinalizeKeysetup {
     # -------- 1. Fetch the peer's round-2 (and sum) shares --------
     # Skip if already present: a reused-joint-key permission has no fresh peer
     # upload for THIS permission, but the original bytes are still correct.
-    if ($needsRelin) {
+    # The peer's round-2 share is ONLY an input to the combine below, and that combine is
+    # skipped when the final key is already on disk. Waiting for a share we will never use
+    # deadlocks a reused-joint-key permission whose peer-share cache happens to be empty:
+    # the peer walks straight past its own (cached) wait and never re-publishes.
+    if ($needsRelin -and -not (Test-Path -LiteralPath $finalRelinPath)) {
         if (-not (Test-Path -LiteralPath $peerR2)) {
             Write-JlInfo "Waiting for $($script:JL_PEER_LABEL)'s relin-round2 contribution..."
             Wait-JlPeerShare 'relin-round2'
@@ -2115,7 +2119,7 @@ function Invoke-JlFinalizeKeysetup {
             Write-JlInfo "Reusing existing peer share: $peerR2"
         }
     }
-    if ($needsSum) {
+    if ($needsSum -and -not (Test-Path -LiteralPath $finalSumPath)) {
         if (-not (Test-Path -LiteralPath $peerSum)) {
             Write-JlInfo "Waiting for $($script:JL_PEER_LABEL)'s $peerSumMessageType contribution..."
             Wait-JlPeerShare $peerSumMessageType

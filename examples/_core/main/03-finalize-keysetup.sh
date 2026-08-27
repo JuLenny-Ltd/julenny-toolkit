@@ -77,7 +77,11 @@ FINAL_SUM_PRECHECK="$JL_KEYS_DIR/final_sum_key.bin"
 LEAD_R2="$JL_PEER_DIR/lead-relin-r2.bin"
 LEAD_SUM="$JL_PEER_DIR/lead-sum-r1.bin"
 
-if [[ "$NEEDS_RELIN" == "yes" ]]; then
+# The peer's round-2 share is ONLY an input to the combine below, and that combine is
+# skipped when the final key is already on disk. Waiting for a share we will never use
+# deadlocks a reused-joint-key permission whose peer-share cache happens to be empty:
+# the peer walks straight past its own (cached) wait and never re-publishes.
+if [[ "$NEEDS_RELIN" == "yes" && ! -f "$FINAL_RELIN_PRECHECK" ]]; then
     if [[ ! -f "$LEAD_R2" ]]; then
         info "Waiting for Acme's relin-round2 contribution..."
         wait_for_peer_share "relin-round2"
@@ -86,7 +90,7 @@ if [[ "$NEEDS_RELIN" == "yes" ]]; then
         info "Reusing existing peer share: $LEAD_R2"
     fi
 fi
-if [[ "$NEEDS_SUM" == "yes" ]]; then
+if [[ "$NEEDS_SUM" == "yes" && ! -f "$FINAL_SUM_PRECHECK" ]]; then
     if [[ ! -f "$LEAD_SUM" ]]; then
         download_peer_share "sum-round1" "$LEAD_SUM"
     else
