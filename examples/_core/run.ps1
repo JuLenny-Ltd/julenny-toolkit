@@ -77,6 +77,24 @@ function Test-JlLatestReleasedDecrypted {
     return (Test-Path -LiteralPath (Join-Path $script:JL_KEYS_DIR "my-partial-$($execs[0].id).bin"))
 }
 
+# Pin the newest released execution that has NOT been decrypted on this machine,
+# writing it to the same last_exec_id marker the consumer side uses. The viewer
+# flow already honours that marker and waits for that specific execution, so this
+# is how the owner-as-viewer asks for the NEXT cycle rather than the stale one.
+# Returns $false while every released execution has already been revealed here.
+function Set-JlNextUndecryptedExecution {
+    $resp = Invoke-JlApi GET "/api/fhe-permissions/$($script:JULENNY_PERMISSION_ID)/executions?state=released" -AllowFailure
+    if ($null -eq $resp -or -not ((Test-JlHasProperty $resp 'executions'))) { return $false }
+    foreach ($e in @($resp.executions)) {
+        $partial = Join-Path $script:JL_KEYS_DIR "my-partial-$($e.id).bin"
+        if (-not (Test-Path -LiteralPath $partial)) {
+            Set-Content -LiteralPath (Join-Path $script:JL_WORKDIR 'last_exec_id') -Value $e.id -Encoding ascii
+            return $true
+        }
+    }
+    return $false
+}
+
 # We always gate on the PEER's bundle uploads. The lead publishes pk-share as
 # bundle 1; the main publishes relin-round1-continue. Each side waits for the
 # other's bundle-1 message type; bundle 2 is the same type both ways.
@@ -412,6 +430,26 @@ if (Test-JlIsOwner) {
             $newTest = $true
         }
         Write-JlInfo "Waiting for $($script:JL_PEER_LABEL) to trigger a new execution..."
+    }
+    elseif ((-not $newTest) -and (-not (Test-JlAmReleaser)) -and
+            (Test-JlExecutionInState 'released') -and
+            (-not (Test-JlExecutionInState 'awaiting-release')) -and
+            (Test-JlLatestReleasedDecrypted)) {
+        # Owner-as-viewer (resultVisibility: dataOwner). The branch above only covers
+        # the owner when it is the RELEASER, so with no guard here the viewer flow
+        # picked up the previous cycle's released execution and revealed its answer
+        # again. That reads exactly like a fresh pass, which is how a replayed CPU
+        # answer could be recorded as a GPU one. The consumer path has had the
+        # equivalent check all along.
+        Write-JlInfo "Latest released execution is already decrypted on this machine."
+        $ans = Read-JlValue "Wait for a new test cycle to be triggered by $($script:JL_PEER_LABEL)? (y/N)" 'N'
+        if ($ans -notmatch '^[Yy]') {
+            Write-JlInfo "Exiting. (Start a new test cycle next time to skip this prompt.)"
+            exit 0
+        }
+        $newTest = $true
+        Write-JlInfo "Waiting for $($script:JL_PEER_LABEL) to trigger a new execution..."
+        Invoke-JlGate "a new execution to be released by $($script:JL_PEER_LABEL)" { Set-JlNextUndecryptedExecution }
     }
     Write-JlStep "$($script:JL_OUR_LABEL): end-of-cycle (resultVisibility: $($script:JULENNY_RESULT_VISIBILITY))"
     Invoke-JlPhase '05-release.ps1'

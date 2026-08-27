@@ -84,6 +84,25 @@ latest_released_decrypted() {
     [[ -n "$id" ]] && [[ -f "$JL_KEYS_DIR/my-partial-$id.bin" ]]
 }
 
+# Pin the newest released execution that has NOT been decrypted on this machine,
+# writing it to the same last_exec_id marker the consumer side uses. viewer_flow
+# already honours that marker and waits for that specific execution, so this is
+# how the owner-as-viewer asks for the NEXT cycle rather than the stale one.
+# Returns non-zero while every released execution has already been revealed here.
+pin_next_undecrypted_execution() {
+    local resp id
+    resp="$(curl_jl GET \
+        "/api/fhe-permissions/$JULENNY_PERMISSION_ID/executions?state=released" \
+        2>/dev/null || echo '{}')"
+    for id in $(echo "$resp" | jq -r '.executions[]?.id'); do
+        if [[ ! -f "$JL_KEYS_DIR/my-partial-$id.bin" ]]; then
+            echo "$id" > "$JL_WORKDIR/last_exec_id"
+            return 0
+        fi
+    done
+    return 1
+}
+
 # -------- Gate (wait or exit) --------
 gate() {
     local description="$1"
@@ -419,6 +438,24 @@ if is_owner; then
             NEW_TEST=true
         fi
         info "Waiting for ${JL_PEER_LABEL} to trigger a new execution..."
+    elif ! $NEW_TEST && ! am_i_releaser \
+         && execution_in_state "released" && ! execution_in_state "awaiting-release" \
+         && latest_released_decrypted; then
+        # Owner-as-viewer (resultVisibility: dataOwner). The branch above only covers
+        # the owner when it is the RELEASER, so with no guard here the viewer flow
+        # picked up the previous cycle's released execution and revealed its answer
+        # again. That reads exactly like a fresh pass, which is how a replayed CPU
+        # answer could be recorded as a GPU one. The consumer path has had the
+        # equivalent check all along.
+        info "Latest released execution is already decrypted on this machine."
+        prompt_for ACTION "Wait for a new test cycle to be triggered by ${JL_PEER_LABEL}? (y/N)" "N"
+        if [[ "${ACTION,,}" != "y" ]]; then
+            info "Exiting. (Start a new test cycle next time to skip this prompt.)"
+            exit 0
+        fi
+        NEW_TEST=true
+        info "Waiting for ${JL_PEER_LABEL} to trigger a new execution..."
+        gate "a new execution to be released by ${JL_PEER_LABEL}" pin_next_undecrypted_execution
     fi
     step "${JL_OUR_LABEL}: end-of-cycle (resultVisibility: $JULENNY_RESULT_VISIBILITY)"
     "$SCRIPT_DIR/$JL_ROLE_DIR/05-release.sh"
