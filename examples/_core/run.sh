@@ -255,6 +255,12 @@ fi
 if [[ ! -f "$JL_CONFIG" ]]; then
     step "${JL_OUR_LABEL}: initial session setup"
     "$SCRIPT_DIR/$JL_ROLE_DIR/00-init.sh"
+    # 00-init runs in its own process and may have selected a DIFFERENT collaboration
+    # than the one this shell resolved at startup; it records the choice in the CURRENT
+    # pointer. Drop the cached paths so load_session re-reads it. Without this the shell
+    # keeps the stale path and dies looking for the previous collaboration's config,
+    # even though the new one was just written. run.ps1 already re-resolves here.
+    JL_WORKDIR=""; JL_CONFIG=""; JL_KEYS_DIR=""; JL_ENV_DIR=""; JL_PEER_DIR=""
 fi
 load_session
 
