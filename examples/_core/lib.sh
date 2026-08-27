@@ -298,14 +298,39 @@ am_i_releaser() {
 # preserves the cached copy.
 refresh_function_def() {
     local fn_def="${1:-$JL_WORKDIR/function-def.json}"
-    [[ -f "$fn_def" ]] || return 0   # nothing cached yet; 00-init will fetch
     local slug version
-    slug="$(jq -r '.slug // empty' "$fn_def")"
-    version="$(jq -r '.version // empty' "$fn_def")"
-    if [[ -z "$slug" || -z "$version" ]]; then
-        warn "Cached function-def at $fn_def is missing slug/version; not refreshing."
-        return 0
+
+    # Prefer the cached copy for slug/version, but do NOT depend on it. The cache can be
+    # absent (first run after a session was moved) or unreadable (a truncated write, or a
+    # bad response written straight to disk). It used to be the only source, so a missing
+    # or corrupt file was unrecoverable: this function bailed out, callers then saw a
+    # definition with no inputs, and the run reported "nothing to upload" and waited
+    # forever on inputs it had silently skipped. The permission always knows which
+    # function it is for, so fall back to that.
+    if [[ -f "$fn_def" ]]; then
+        slug="$(jq -r '.slug // empty' "$fn_def" 2>/dev/null)"
+        version="$(jq -r '.version // empty' "$fn_def" 2>/dev/null)"
     fi
+
+    if [[ -z "$slug" || -z "$version" ]]; then
+        if [[ -z "${JULENNY_PERMISSION_ID:-}" ]]; then
+            warn "No cached function-def and no permission id; cannot refresh."
+            return 0
+        fi
+        info "Function-def cache is missing or unreadable; recovering from the permission..."
+        local perm
+        perm="$(curl_jl GET "/api/fhe-permissions/$JULENNY_PERMISSION_ID" 2>/dev/null)" || {
+            warn "Could not read permission $JULENNY_PERMISSION_ID to recover the function-def."
+            return 0
+        }
+        slug="$(echo "$perm" | jq -r '.fheFunction // .functionSlug // empty' 2>/dev/null)"
+        version="$(echo "$perm" | jq -r '.functionVersion // empty' 2>/dev/null)"
+        if [[ -z "$slug" || -z "$version" ]]; then
+            warn "Permission $JULENNY_PERMISSION_ID did not name a function; cannot refresh."
+            return 0
+        fi
+    fi
+
     local resp
     resp="$(curl_jl GET "/api/functions/$slug/$version/definition" 2>/dev/null)" || {
         warn "Could not refresh function-def for $slug v$version. Keeping cached copy."
@@ -320,6 +345,7 @@ refresh_function_def() {
         warn "Platform response for $slug v$version doesn't look like a function-def. Keeping cached copy."
         return 0
     fi
+    mkdir -p "$(dirname "$fn_def")"
     echo "$resp" > "$fn_def.tmp" && mv "$fn_def.tmp" "$fn_def"
     info "Refreshed function-def for $slug v$version."
 }
