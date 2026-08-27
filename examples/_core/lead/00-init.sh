@@ -280,10 +280,21 @@ else
         # function picker below is identical to that branch's picker.
         step "Creating a new permission under collaboration $JULENNY_PROJECT_ID"
 
-        # Partner (Beta) is already known from the project doc.
-        PARTNER_ID="$(echo "$PROJECT_OBJ" | jq -r '.partnerCollaborationId // empty')"
+        # The counterparty is already known from the project doc, but WHICH field holds
+        # it depends on who created the project, not on who is running this script.
+        # partnerCollaborationId is the non-creator; ownerCollaborationId is the creator.
+        # Reading partnerCollaborationId unconditionally named THIS account as its own
+        # partner whenever the other side had created the collaboration, which is exactly
+        # the reversed-role case. yourRole ('owner' when this account created the project,
+        # 'partner' otherwise) is what disambiguates it.
+        PROJECT_ROLE="$(echo "$PROJECT_OBJ" | jq -r '.yourRole // empty')"
+        if [[ "$PROJECT_ROLE" == "partner" ]]; then
+            PARTNER_ID="$(echo "$PROJECT_OBJ" | jq -r '.ownerCollaborationId // empty')"
+        else
+            PARTNER_ID="$(echo "$PROJECT_OBJ" | jq -r '.partnerCollaborationId // empty')"
+        fi
         [[ -n "$PARTNER_ID" ]] \
-            || die "Project has no partnerCollaborationId; cannot create a permission."
+            || die "Project records no counterparty collaboration id; cannot create a permission."
         info "Partner (Beta) Collaboration ID: $PARTNER_ID"
 
         # 1) Determine scheme. A permission created under an EXISTING
@@ -292,7 +303,13 @@ else
         # cryptoContextSpec rather than asking - picking the other scheme would
         # need a separate joint key and break keysetup reuse. Fall back to a
         # prompt only if the collab has no existing permission to read from.
-        EXISTING_SPEC="$(echo "$PERMISSIONS_JSON" | jq -r '.[0].cryptoContextSpec // empty')"
+        # Prefer the project's own cryptoContextSpec: PERMISSIONS_JSON is scoped to the
+        # permissions THIS account holds in its role, so it is empty for a member creating
+        # their first grant here, and the scheme prompt that follows would then offer a
+        # choice that cannot work (one joint key per collaboration).
+        EXISTING_SPEC="$(echo "$PROJECT_OBJ" | jq -r '.cryptoContextSpec // empty')"
+        [[ -n "$EXISTING_SPEC" ]] \
+            || EXISTING_SPEC="$(echo "$PERMISSIONS_JSON" | jq -r '.[0].cryptoContextSpec // empty')"
         case "$EXISTING_SPEC" in
             ckks-*) SCHEME_LABEL="CKKS" ;;
             bfv-*)  SCHEME_LABEL="BFV"  ;;

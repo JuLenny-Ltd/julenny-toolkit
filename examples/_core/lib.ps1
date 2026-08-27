@@ -1602,8 +1602,19 @@ function Invoke-JlInitSession {
             # was set up with them, and the project carries their collaboration id. Asking
             # again invites a typo that would point the permission at the wrong company.
             # Only fall back to a prompt if the project somehow has no partner recorded.
+            # WHICH field holds the counterparty depends on who created the project, not
+            # on who is running this script. partnerCollaborationId is the non-creator;
+            # ownerCollaborationId is the creator. Reading partnerCollaborationId
+            # unconditionally named THIS account as its own partner whenever the other
+            # side had created the collaboration, which is exactly the reversed-role case.
             $partnerId = ''
-            if ((Test-JlHasProperty $project 'partnerCollaborationId')) { $partnerId = "$($project.partnerCollaborationId)" }
+            $projectRole = ''
+            if ((Test-JlHasProperty $project 'yourRole')) { $projectRole = "$($project.yourRole)" }
+            if ($projectRole -eq 'partner') {
+                if ((Test-JlHasProperty $project 'ownerCollaborationId')) { $partnerId = "$($project.ownerCollaborationId)" }
+            } elseif ((Test-JlHasProperty $project 'partnerCollaborationId')) {
+                $partnerId = "$($project.partnerCollaborationId)"
+            }
             if ($partnerId) {
                 Write-JlInfo "Partner ($($script:JL_PEER_LABEL)) Collaboration ID: $partnerId"
             } else {
