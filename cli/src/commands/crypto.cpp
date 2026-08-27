@@ -1879,6 +1879,25 @@ int run_crypto_combine(const CryptoCombineArgs& args) {
                 }
                 rounded[slot] = static_cast<std::int64_t>(nearest);
             }
+            if (!all_whole) {
+                // Not whole numbers, but 0.770000000000093 is still no way to show a person a
+                // model weight. Round to the precision this file already declares meaningful:
+                // noiseThreshold is maxAbsValue * 1e-6, so anything past that many decimals is
+                // noise. Reported separately from significantValues, which stays exact.
+                int decimals = 6;
+                if (threshold > 0.0) {
+                    decimals = static_cast<int>(std::ceil(-std::log10(threshold)));
+                    if (decimals < 0)  decimals = 0;
+                    if (decimals > 12) decimals = 12;
+                }
+                const double scale = std::pow(10.0, decimals);
+                nlohmann::ordered_json realRounded = nlohmann::ordered_json::object();
+                for (auto& [slot, val] : significant.items()) {
+                    realRounded[slot] = std::round(val.get<double>() * scale) / scale;
+                }
+                result["significantValuesRounded"] = realRounded;
+                result["roundedToDecimals"]        = decimals;
+            }
             if (all_whole) {
                 result["significantValuesRounded"] = rounded;
                 // The common case is a single answer. Put it where a person will
@@ -1893,7 +1912,9 @@ int run_crypto_combine(const CryptoCombineArgs& args) {
                 "slot index. CKKS leaves every other slot at a tiny non-zero value "
                 "(~1e-14) which carries no meaning.")
                 + (all_whole ? " significantValuesRounded gives the same values as whole numbers."
-                             : "")
+                             : " significantValuesRounded gives the same values rounded to"
+                               " roundedToDecimals places, which is the precision noiseThreshold"
+                               " supports; significantValues keeps the exact figures.")
                 + (args.full_vector ? " allValues has every slot."
                                     : " Pass --full-vector to also write every slot.");
             if (args.full_vector) {
