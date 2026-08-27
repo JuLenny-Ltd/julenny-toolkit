@@ -197,6 +197,15 @@ while (-not $execId) {
             Confirm-JlRecheckOrStop | Out-Null
             continue
         }
+        # The quote is a price lock with a 5 minute life, and the clock starts when
+        # the estimate is fetched, not when the operator answers. Thinking time, or a
+        # phone call, should not cost the run: go back and re-quote instead of dying.
+        if ($errMsg -like '*Quote token has expired*') {
+            Write-Host ""
+            Write-JlWarn "That quote expired while you were deciding (they last 5 minutes)."
+            Write-JlWarn "Fetching a fresh estimate. Nothing has been charged or held."
+            continue
+        }
         Write-JlErr "/execute rejected the trigger:"
         Write-JlErr "  $errMsg"
         if ($errMsg -like '*has not declared*') {
@@ -206,8 +215,7 @@ while (-not $execId) {
         }
         if ($errMsg -match 'redit|uote') {
             Write-JlErr ""
-            Write-JlErr "Looks credit/quote related: the quoteToken may have expired (5 min)"
-            Write-JlErr "or the balance is insufficient. Re-run to fetch a fresh estimate."
+            Write-JlErr "Looks credit related: the balance may be insufficient."
         }
         Stop-JlWithError "Cannot proceed."
     }

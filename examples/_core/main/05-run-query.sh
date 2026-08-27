@@ -171,6 +171,15 @@ while [[ -z "$EXEC_ID" ]]; do
             recheck_or_stop
             continue
         fi
+        # The quote is a price lock with a 5 minute life, and the clock starts when
+        # the estimate is fetched, not when the operator answers. Thinking time, or a
+        # phone call, should not cost the run: go back and re-quote instead of dying.
+        if [[ "$ERR_MSG" == *"Quote token has expired"* ]]; then
+            echo
+            warn "That quote expired while you were deciding (they last 5 minutes)."
+            warn "Fetching a fresh estimate. Nothing has been charged or held."
+            continue
+        fi
         err "/execute rejected the trigger:"
         echo "$RESP" | jq . >&2
         if [[ "$ERR_MSG" == *"has not declared"* ]]; then
@@ -180,8 +189,7 @@ while [[ -z "$EXEC_ID" ]]; do
         fi
         if [[ "$ERR_MSG" == *redit* || "$ERR_MSG" == *uote* ]]; then
             err
-            err "Looks credit/quote related: the quoteToken may have expired (5 min)"
-            err "or the balance is insufficient. Re-run to fetch a fresh estimate."
+            err "Looks credit related: the balance may be insufficient."
         fi
         die "Cannot proceed."
     fi
