@@ -2593,6 +2593,21 @@ function Invoke-JlViewerFlow {
 
     if (-not $execId) {
         while ($true) {
+            # Which of these has this machine already revealed? A run that asked for a NEW
+            # cycle must not be offered the previous one: in a test transcript a replayed
+            # answer is indistinguishable from a fresh pass. When exactly one is still
+            # unrevealed here, that is unambiguously the one wanted; take it.
+            $unrevealed = @($released | Where-Object {
+                -not (Test-Path -LiteralPath (Join-Path $script:JL_KEYS_DIR "my-partial-$($_.id).bin"))
+            })
+            if ($released.Count -gt 1 -and $unrevealed.Count -eq 1) {
+                $execId = $unrevealed[0].id
+                $execWhen = 'unknown date'
+                if ((Test-JlHasProperty $unrevealed[0] 'releasedAt') -and $unrevealed[0].releasedAt) { $execWhen = $unrevealed[0].releasedAt }
+                Write-JlSuccess "Only one released execution has not been revealed here: $execId ($execWhen)"
+                Write-JlInfo "  ($($released.Count - 1) other released execution(s) were already decrypted on this machine.)"
+                break
+            }
             if ($released.Count -eq 1) {
                 $execId = $released[0].id
                 $execWhen = 'unknown date'
@@ -2604,7 +2619,12 @@ function Invoke-JlViewerFlow {
             for ($i = 0; $i -lt $released.Count; $i++) {
                 $when = 'unknown date'
                 if ((Test-JlHasProperty $released[$i] 'releasedAt') -and $released[$i].releasedAt) { $when = $released[$i].releasedAt }
-                Write-Host ("  {0}) {1}  ({2})" -f ($i + 1), $released[$i].id, $when)
+                # Mark the ones already revealed here, so a stale pick is a deliberate one.
+                $mark = ''
+                if (Test-Path -LiteralPath (Join-Path $script:JL_KEYS_DIR "my-partial-$($released[$i].id).bin")) {
+                    $mark = '  [already revealed here]'
+                }
+                Write-Host ("  {0}) {1}  ({2}){3}" -f ($i + 1), $released[$i].id, $when, $mark)
             }
             $choice = Read-JlValue "Pick an execution (1-$($released.Count), or r to refresh)" '1'
             if ($choice -match '^[Rr]$') {

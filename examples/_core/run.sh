@@ -45,6 +45,9 @@ for arg in "$@"; do
 done
 
 # Internal mode flags set by the interactive front matter below.
+# Captured at the top because "$@" inside a function is the FUNCTION's arguments,
+# and offer_another_cycle re-execs this script with its original ones.
+JL_ARGV=("$@")
 WATCH_MODE=false
 NEW_TEST=false
 SWITCH=false
@@ -190,6 +193,17 @@ if [[ -f "$JL_CONFIG" ]]; then
     [[ -z "$LATEST_STATE" ]] && LATEST_STATE="none"
 fi
 
+# Re-entry from "wait for another cycle" at the end of a previous run. The answers
+# are already known, so skip the menu entirely rather than asking the operator to
+# retype them: same permission, a new cycle, still watching.
+if [[ "${JL_NEXT_CYCLE:-}" == "1" ]]; then
+    NEW_TEST=true
+    WATCH_MODE=true
+    unset JL_NEXT_CYCLE
+    step "${JL_OUR_LABEL}: next test cycle on the same permission"
+fi
+
+if [[ "${NEW_TEST}" != "true" ]]; then
 echo
 echo "============================================================"
 echo " ${JL_OUR_LABEL^^} RUN: what would you like to do?"
@@ -269,6 +283,7 @@ prompt_for WATCH "Use watch mode? (Y/n)" "Y"
 if [[ "${WATCH,,}" == "y" || -z "$WATCH" ]]; then
     WATCH_MODE=true
 fi
+fi  # end of the interactive front matter (skipped on a next-cycle re-entry)
 
 # Switch clears the active-collab pointer so 00-init's picker re-runs. Per-collab
 # state for the previous collab is preserved on disk under $JL_COLLABS_DIR/.
@@ -414,6 +429,35 @@ for in_name in "${MY_INPUT_NAMES[@]}"; do
     fi
 done
 
+# Re-declare this side's inputs for a fresh cycle. Phase 4 runs BEFORE phase 5, so a
+# "start a new test cycle?" answered down in phase 5 used to trigger over whatever was
+# already declared and never ask which datasets to use - the same words as menu option 2
+# but quietly different behaviour. Every phase-5 path that turns NEW_TEST on now calls
+# this first, so both routes into a new cycle ask the same question.
+new_cycle_datasets() {
+    if (( ${#MY_INPUT_NAMES[@]} == 0 )); then
+        info "Function declares no inputs for ${JL_OUR_LABEL}'s role ($MY_FN_ROLE); nothing to upload."
+        return 0
+    fi
+    step "${JL_OUR_LABEL}: encrypt and upload dataset (new test cycle)"
+    JULENNY_NEW_TEST=1 "$SCRIPT_DIR/$JL_ROLE_DIR/04-encrypt.sh"
+}
+
+# A run drives ONE cycle and then exits, so the side that finishes first is gone by the
+# time the peer starts the next one - which is how "start a new cycle" on one machine
+# left the other showing the previous cycle's answer. In watch mode, offer to stay and
+# run another. Re-exec rather than loop: 00-init and the keysetup phases are idempotent
+# and cheap, and re-entering from the top is exactly what the operator does by hand.
+offer_another_cycle() {
+    $WATCH_MODE || return 0
+    echo
+    prompt_for AGAIN "Wait for another test cycle on this permission? (y/N)" "N"
+    [[ "${AGAIN,,}" == "y" ]] || return 0
+    echo
+    info "Starting another cycle on the same permission."
+    JL_NEXT_CYCLE=1 exec "$0" "${JL_ARGV[@]}"
+}
+
 if (( ${#MY_INPUT_NAMES[@]} == 0 )); then
     info "Function declares no inputs for ${JL_OUR_LABEL}'s role ($MY_FN_ROLE); nothing to upload."
 elif $NEW_TEST; then
@@ -447,6 +491,7 @@ if is_owner; then
                 exit 0
             fi
             NEW_TEST=true
+            new_cycle_datasets
         fi
         info "Waiting for ${JL_PEER_LABEL} to trigger a new execution..."
     elif ! $NEW_TEST && ! am_i_releaser \
@@ -465,6 +510,7 @@ if is_owner; then
             exit 0
         fi
         NEW_TEST=true
+        new_cycle_datasets
         info "Waiting for ${JL_PEER_LABEL} to trigger a new execution..."
         gate "a new execution to be released by ${JL_PEER_LABEL}" pin_next_undecrypted_execution
     fi
@@ -472,6 +518,7 @@ if is_owner; then
     "$SCRIPT_DIR/$JL_ROLE_DIR/05-release.sh"
     echo
     success "All ${JL_OUR_LABEL} phases done."
+    offer_another_cycle
 else
     # Consumer: trigger a new execution if needed, then decrypt.
     ANY_EXEC=false
@@ -493,6 +540,7 @@ else
         prompt_for ACTION "Start a new test cycle (trigger a fresh execution)? (y/N)" "N"
         if [[ "${ACTION,,}" == "y" ]]; then
             NEW_TEST=true
+            new_cycle_datasets
             NEED_TRIGGER=true
         else
             info "Exiting. (Start a new test cycle next time to skip this prompt.)"
@@ -510,4 +558,5 @@ else
     "$SCRIPT_DIR/$JL_ROLE_DIR/06-decrypt.sh"
     echo
     success "All ${JL_OUR_LABEL} phases done. Answer is above."
+    offer_another_cycle
 fi

@@ -13,6 +13,10 @@
 [CmdletBinding()]
 param([switch] $Help)
 
+# Captured here because a function's $PSBoundParameters is its own, and
+# Invoke-JlOfferAnotherCycle re-invokes this script with its original arguments.
+$script:JlScriptArgs = $PSBoundParameters
+
 $ErrorActionPreference = 'Stop'
 $here = $PSScriptRoot
 
@@ -180,6 +184,17 @@ if ($script:JL_CONFIG -and (Test-Path -LiteralPath $script:JL_CONFIG)) {
     if (-not $latestState) { $latestState = 'none' }
 }
 
+# Re-entry from "wait for another cycle" at the end of a previous run. The answers are
+# already known, so skip the menu entirely rather than asking the operator to retype
+# them: same permission, a new cycle, still watching.
+if ($env:JL_NEXT_CYCLE -eq '1') {
+    $newTest = $true
+    $watchMode = $true
+    Remove-Item Env:\JL_NEXT_CYCLE -ErrorAction SilentlyContinue
+    Write-JlStep "$($script:JL_OUR_LABEL): next test cycle on the same permission"
+}
+
+if (-not $newTest) {
 Write-Host ""
 Write-Host "============================================================"
 Write-Host " $($script:JL_OUR_LABEL.ToUpper()) RUN: what would you like to do?"
@@ -259,6 +274,7 @@ Write-Host " satisfied. Without it, the script exits at the first wait and you"
 Write-Host " re-run when the peer is done."
 $watch = Read-JlValue "Use watch mode? (Y/n)" 'Y'
 if ($watch -match '^[Yy]') { $watchMode = $true }
+}  # end of the interactive front matter (skipped on a next-cycle re-entry)
 
 # Switching clears the active-collab pointer so 00-init's picker re-runs. The
 # previous collab's state stays on disk under JL_COLLABS_DIR.
@@ -404,6 +420,40 @@ if ($myInputNames.Count -gt 0) {
     }
 }
 
+# Re-declare this side's inputs for a fresh cycle. Phase 4 runs BEFORE phase 5, so a
+# "start a new test cycle?" answered down in phase 5 used to trigger over whatever was
+# already declared and never ask which datasets to use - the same words as menu option 2
+# but quietly different behaviour. Every phase-5 path that turns $newTest on now calls
+# this first, so both routes into a new cycle ask the same question.
+function Invoke-JlNewCycleDatasets {
+    if ($myInputNames.Count -eq 0) {
+        Write-JlInfo "Function declares no inputs for $($script:JL_OUR_LABEL)'s role ($myFnRole); nothing to upload."
+        return
+    }
+    Write-JlStep "$($script:JL_OUR_LABEL): encrypt and upload dataset (new test cycle)"
+    $env:JULENNY_NEW_TEST = '1'
+    try { Invoke-JlPhase '04-encrypt.ps1' } finally { Remove-Item Env:\JULENNY_NEW_TEST -ErrorAction SilentlyContinue }
+}
+
+# A run drives ONE cycle and then exits, so the side that finishes first is gone by the
+# time the peer starts the next one - which is how "start a new cycle" on one machine
+# left the other showing the previous cycle's answer. In watch mode, offer to stay and
+# run another. Re-invoke rather than loop: 00-init and the keysetup phases are idempotent
+# and cheap, and re-entering from the top is exactly what the operator does by hand.
+function Invoke-JlOfferAnotherCycle {
+    if (-not $watchMode) { return }
+    Write-Host ""
+    $again = Read-JlValue "Wait for another test cycle on this permission? (y/N)" 'N'
+    if ($again -notmatch '^[Yy]') { return }
+    Write-Host ""
+    Write-JlInfo "Starting another cycle on the same permission."
+    $env:JL_NEXT_CYCLE = '1'
+    # $PSBoundParameters inside a function is the FUNCTION's, so the script's own
+    # arguments are captured at the top as $script:JlScriptArgs.
+    & $PSCommandPath @script:JlScriptArgs
+    exit $LASTEXITCODE
+}
+
 if ($myInputNames.Count -eq 0) {
     Write-JlInfo "Function declares no inputs for $($script:JL_OUR_LABEL)'s role ($myFnRole); nothing to upload."
 } elseif ($newTest) {
@@ -439,6 +489,7 @@ if (Test-JlIsOwner) {
                 exit 0
             }
             $newTest = $true
+            Invoke-JlNewCycleDatasets
         }
         Write-JlInfo "Waiting for $($script:JL_PEER_LABEL) to trigger a new execution..."
     }
@@ -459,6 +510,7 @@ if (Test-JlIsOwner) {
             exit 0
         }
         $newTest = $true
+        Invoke-JlNewCycleDatasets
         Write-JlInfo "Waiting for $($script:JL_PEER_LABEL) to trigger a new execution..."
         Invoke-JlGate "a new execution to be released by $($script:JL_PEER_LABEL)" { Set-JlNextUndecryptedExecution }
     }
@@ -466,6 +518,7 @@ if (Test-JlIsOwner) {
     Invoke-JlPhase '05-release.ps1'
     Write-Host ""
     Write-JlSuccess "All $($script:JL_OUR_LABEL) phases done."
+    Invoke-JlOfferAnotherCycle
 } else {
     $anyExec = (Test-JlExecutionInState 'awaiting-release') -or
                (Test-JlExecutionInState 'released') -or
@@ -483,6 +536,7 @@ if (Test-JlIsOwner) {
         $ans = Read-JlValue "Start a new test cycle (trigger a fresh execution)? (y/N)" 'N'
         if ($ans -match '^[Yy]') {
             $newTest = $true
+            Invoke-JlNewCycleDatasets
             $needTrigger = $true
         } else {
             Write-JlInfo "Exiting. (Start a new test cycle next time to skip this prompt.)"
@@ -500,4 +554,5 @@ if (Test-JlIsOwner) {
     Invoke-JlPhase '06-decrypt.ps1'
     Write-Host ""
     Write-JlSuccess "All $($script:JL_OUR_LABEL) phases done. Answer is above."
+Invoke-JlOfferAnotherCycle
 }

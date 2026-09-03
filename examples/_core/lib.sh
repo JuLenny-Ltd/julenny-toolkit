@@ -1204,14 +1204,36 @@ viewer_flow() {
     done
 
     if [[ -z "$exec_id" ]]; then
-        if (( count == 1 )); then
+        # Which of these has this machine already revealed? A run that asked for a NEW
+        # cycle must not be offered the previous one: in a test transcript a replayed
+        # answer is indistinguishable from a fresh pass. When exactly one is still
+        # unrevealed here, that is unambiguously the one wanted; take it.
+        local undecrypted_ids=() e_id
+        for e_id in $(echo "$list_resp" | jq -r '.executions[]?.id'); do
+            [[ -f "$JL_KEYS_DIR/my-partial-$e_id.bin" ]] || undecrypted_ids+=("$e_id")
+        done
+
+        if (( count > 1 && ${#undecrypted_ids[@]} == 1 )); then
+            exec_id="${undecrypted_ids[0]}"
+            exec_when="$(echo "$list_resp" | jq -r --arg i "$exec_id" \
+                '.executions[] | select(.id == $i) | .releasedAt // .triggeredAt // "unknown date"')"
+            success "Only one released execution has not been revealed here: $exec_id ($exec_when)"
+            info "  ($(( count - 1 )) other released execution(s) were already decrypted on this machine.)"
+        elif (( count == 1 )); then
             exec_id="$(echo "$list_resp"   | jq -r '.executions[0].id')"
             exec_when="$(echo "$list_resp" | jq -r '.executions[0].releasedAt // .executions[0].triggeredAt // "unknown date"')"
             success "Single released execution: $exec_id ($exec_when)"
         else
             while true; do
                 info "Found $count released executions (newest first):"
-                echo "$list_resp" | jq -r '.executions | to_entries[] | "  \(.key + 1)) \(.value.id)  (\(.value.releasedAt // .value.triggeredAt // "unknown date"))"'
+                # Mark the ones already revealed here, so a stale pick is a deliberate one.
+                local seen_json="[]" s_id
+                for s_id in $(echo "$list_resp" | jq -r '.executions[]?.id'); do
+                    if [[ -f "$JL_KEYS_DIR/my-partial-$s_id.bin" ]]; then
+                        seen_json="$(echo "$seen_json" | jq --arg i "$s_id" '. + [$i]')"
+                    fi
+                done
+                echo "$list_resp" | jq -r --argjson seen "$seen_json" '.executions | to_entries[] | "  \(.key + 1)) \(.value.id)  (\(.value.releasedAt // .value.triggeredAt // "unknown date"))\(if ($seen | index(.value.id)) then "  [already revealed here]" else "" end)"'
                 local choice
                 prompt_for choice "Pick an execution (1-$count, or r to refresh)" "1"
                 if [[ "${choice,,}" == "r" ]]; then
