@@ -441,6 +441,15 @@ new_cycle_datasets() {
     fi
     step "${JL_OUR_LABEL}: encrypt and upload dataset (new test cycle)"
     JULENNY_NEW_TEST=1 "$SCRIPT_DIR/$JL_ROLE_DIR/04-encrypt.sh"
+
+    # Rotation indices are derived from the DECLARED plaintext data, so re-declaring can
+    # invalidate the rotation keys and reopen rotation keysetup on the platform. This
+    # rewind is called from phase 5, which is past 4.5, so without re-running it the side
+    # that rewound never re-contributes and both sides deadlock on awaiting-contributions
+    # while the peer waits for a contribution that is never coming. 4.5 is a no-op when
+    # the function declares no rotation, and idempotent when nothing changed.
+    step "${JL_OUR_LABEL}: rotation key augmentation (after re-declaring datasets)"
+    "$SCRIPT_DIR/$JL_ROLE_DIR/04.5-rotation-keysetup.sh"
 }
 
 # A run drives ONE cycle and then exits, so the side that finishes first is gone by the
