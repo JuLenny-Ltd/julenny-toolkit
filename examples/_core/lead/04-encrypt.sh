@@ -165,8 +165,12 @@ for ((i = 0; i < MY_INPUT_COUNT; i++)); do
             echo "JULENNY_INPUT_CSV=\"$INPUT_FILE\"" >> "$JL_CONFIG"
         fi
 
+        # Name the source file, not just the input and the date. The old default was
+        # "<side> <input> (<date>)", so every upload for the same input on the same day
+        # collided and the picker showed several identically-named datasets with no way
+        # to tell which file each held. The default is what people actually accept.
         prompt_for DATASET_NAME "Display name for the uploaded dataset" \
-                   "Acme $INPUT_NAME ($(date +%Y-%m-%d))"
+                   "Acme $INPUT_NAME $(basename "$INPUT_FILE") ($(date +%Y-%m-%d))"
 
         if $IS_BUNDLE; then
             # ---- Encrypted-bundle path: recipe-encode -> encrypt -> upload (kind=ciphertext) ----

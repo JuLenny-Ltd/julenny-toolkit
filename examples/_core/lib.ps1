@@ -1934,8 +1934,12 @@ function Invoke-JlEncryptAndUploadInputs {
 
             if ($inputFile -ne $default) { Set-JlConfigValue 'JULENNY_INPUT_CSV' $inputFile }
 
+            # Name the source file, not just the input and the date. The old default was
+            # "<side> <input> (<date>)", so every upload for the same input on the same day
+            # collided and the picker showed several identically-named datasets with no way
+            # to tell which file each held. The default is what people actually accept.
             $datasetName = Read-JlValue "Display name for the uploaded dataset" `
-                                        "$($script:JL_OUR_LABEL) $inputName ($(Get-Date -Format 'yyyy-MM-dd'))"
+                                        "$($script:JL_OUR_LABEL) $inputName $([System.IO.Path]::GetFileName($inputFile)) ($(Get-Date -Format 'yyyy-MM-dd'))"
 
             $base = [System.IO.Path]::GetFileName($inputFile)
 
