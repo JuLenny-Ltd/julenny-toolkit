@@ -300,6 +300,15 @@ Import-JlSession
 # Re-fetch the function-def (mutable per slug/version); soft-fails offline.
 try { Update-JlFunctionDef | Out-Null } catch { Write-JlWarn "Could not refresh the function definition; using the local copy." }
 
+# Recomputed here, AFTER 00-init has fetched the function definition. The value set
+# before phase 1 is decided when a first run has no function-def.json at all, so it is
+# a guess rather than a reading. bash guessed the other way and its consumer skipped
+# keysetup bundle 2 entirely, deadlocking against an owner waiting for it.
+$script:JlNeedsRelin = Test-JlFunctionRequiresRelinKeys
+if (Test-JlIsOwner -and $script:JlNeedsRelin) { $peerBundle1Type = 'relin-round1-continue' } else { $peerBundle1Type = 'pk-share' }
+if (Test-JlIsOwner) { $ownBundle1Marker = 'fhe_public_key.bin' } else { $ownBundle1Marker = 'joint_public_key.bin' }
+if ($script:JlNeedsRelin) { if (Test-JlIsOwner) { $ownBundle1Marker = 'lead-relin-r1.bin' } else { $ownBundle1Marker = 'main-relin-r1.bin' } }
+
 # Consumer shortcut: skip everything and just decrypt. 06-decrypt is
 # self-contained (polls, and picks if there are several).
 if ($onlyDecrypt) {

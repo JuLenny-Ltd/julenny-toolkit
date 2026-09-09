@@ -312,6 +312,36 @@ load_session
 # Re-fetch the function-def (mutable per slug/version); fails softly offline.
 refresh_function_def
 
+# Recomputed here, AFTER 00-init has fetched the function definition.
+#
+# The value above is decided before phase 1, when a first run has no
+# function-def.json at all, so neither side is reading anything real: bash
+# defaulted to "no relin" and PowerShell to "relin needed". On a first run of a
+# relin function the consumer therefore skipped bundle 2 entirely and walked on
+# to the dataset phase, while the owner sat waiting for a relin-round2 that was
+# never coming. The two halves disagreeing made it look like a peer problem.
+if function_requires_relin_keys; then
+    JL_NEEDS_RELIN=1
+else
+    JL_NEEDS_RELIN=0
+fi
+if is_owner; then
+    if (( JL_NEEDS_RELIN )); then
+        PEER_BUNDLE1_TYPE="relin-round1-continue"
+        OWN_BUNDLE1_MARKER="lead-relin-r1.bin"
+    else
+        PEER_BUNDLE1_TYPE="pk-share"
+        OWN_BUNDLE1_MARKER="fhe_public_key.bin"
+    fi
+else
+    PEER_BUNDLE1_TYPE="pk-share"
+    if (( JL_NEEDS_RELIN )); then
+        OWN_BUNDLE1_MARKER="main-relin-r1.bin"
+    else
+        OWN_BUNDLE1_MARKER="joint_public_key.bin"
+    fi
+fi
+
 # Consumer-only shortcut: skip everything and just decrypt the latest released
 # execution. 06-decrypt is self-contained (polls the platform, picks if many).
 if $ONLY_DECRYPT; then

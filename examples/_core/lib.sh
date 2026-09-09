@@ -789,7 +789,11 @@ function_requires_sum_keys() {
 # relin-round1-continue waits forever.
 function_requires_relin_keys() {
     local fn_def="${1:-$JL_WORKDIR/function-def.json}"
-    [[ -f "$fn_def" ]] || return 1
+    # No definition on disk yet: assume relin IS needed, which is the schema default and
+    # what PowerShell already assumed. Guessing "not needed" makes the consumer skip
+    # bundle 2 and deadlock against a peer that is waiting for it; guessing "needed" at
+    # worst attempts an exchange the platform will reject.
+    [[ -f "$fn_def" ]] || return 0
     jq -e '(.requiredEvalKeys // ["relinearization", "sum"]) | index("relinearization")'         "$fn_def" > /dev/null 2>&1
 }
 
