@@ -2752,18 +2752,27 @@ function Invoke-JlViewerFlow {
     # indicator-style analysis entirely.
     if ($weightInputs -gt 0) {
         $nSlots = 0
-        if ($script:JULENNY_SHOW_SLOTS) { $nSlots = [int] $script:JULENNY_SHOW_SLOTS }
+        # Test-Path on the variable, not the value: JULENNY_SHOW_SLOTS is an optional
+        # override that is usually never set, and reading an unset script-scope variable
+        # under strict mode is a terminating error - which killed the viewer AFTER the
+        # answer had been decrypted. bash has always had a ${JULENNY_SHOW_SLOTS:-} default.
+        if ((Test-Path 'variable:script:JULENNY_SHOW_SLOTS') -and $script:JULENNY_SHOW_SLOTS) {
+            $nSlots = [int] $script:JULENNY_SHOW_SLOTS
+        }
         if ($nSlots -le 0 -and $script:JULENNY_INPUT_CSV -and (Test-Path -LiteralPath $script:JULENNY_INPUT_CSV)) {
             $nSlots = @([System.IO.File]::ReadAllLines($script:JULENNY_INPUT_CSV)).Count
         }
         if ($nSlots -le 0) { $nSlots = 16 }
 
-        Invoke-JlCli @(
+        # -PassThru, then print: Invoke-JlCli captures and discards output otherwise, so
+        # "shown above" showed nothing. See the packed-real-vector branch below.
+        $vecDump = Invoke-JlCli -PassThru @(
             'crypto', 'combine',
             '--context-spec', $script:JULENNY_CRYPTO_CONTEXT_SPEC,
             '--partials',     $peerPartialBin, $myPartialBin,
             '--real', '--show-slots', "$nSlots"
         )
+        if ($vecDump) { Write-Host $vecDump }
         Write-Host ""
         Write-JlSuccess "Decryption complete. The combined (averaged) vector is shown above."
         Write-Host ""
@@ -2807,14 +2816,22 @@ function Invoke-JlViewerFlow {
             # slot values; the predicted class is the argmax. NOT an indicator
             # vector, so do not resolve slots against a dataset.
             $nShow = 8
-            if ($script:JULENNY_SHOW_SLOTS) { $nShow = [int] $script:JULENNY_SHOW_SLOTS }
+            if ((Test-Path 'variable:script:JULENNY_SHOW_SLOTS') -and $script:JULENNY_SHOW_SLOTS) {
+                $nShow = [int] $script:JULENNY_SHOW_SLOTS
+            }
             Write-Host ""
-            Invoke-JlCli @(
+            # -PassThru, then print. Invoke-JlCli CAPTURES the CLI output and discards it
+            # unless asked for it, so the slot values were computed and thrown away: the
+            # viewer printed a blank gap where the answer should be, while bash - which
+            # runs the CLI directly - showed the vector. The whole point of the itemized
+            # variant is seeing WHICH slots fired, so losing this loses the feature.
+            $slotDump = Invoke-JlCli -PassThru @(
                 'crypto', 'combine',
                 '--context-spec', $script:JULENNY_CRYPTO_CONTEXT_SPEC,
                 '--partials',     $peerPartialBin, $myPartialBin,
                 '--real', '--show-slots', "$nShow"
             )
+            if ($slotDump) { Write-Host $slotDump }
             Write-Host ""
             Write-JlSuccess "Decryption complete. The real-valued result vector is shown above (predicted class = argmax)."
         }
