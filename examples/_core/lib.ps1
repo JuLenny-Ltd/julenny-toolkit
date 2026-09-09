@@ -1022,6 +1022,11 @@ function New-JlPermission {
 function Get-JlFunctionDefObject {
     param([string] $Path = '')
     if ([string]::IsNullOrWhiteSpace($Path)) {
+        # On a first run there is no collaboration store yet, so JL_WORKDIR is empty and
+        # Join-Path THROWS rather than returning a path that simply does not exist - which
+        # killed run.ps1 before its first prompt on any machine without ~/.julenny-collab.
+        # No workdir means no function definition, which is what every caller expects.
+        if ([string]::IsNullOrWhiteSpace($script:JL_WORKDIR)) { return $null }
         $Path = Join-Path $script:JL_WORKDIR 'function-def.json'
     }
     if (-not (Test-Path -LiteralPath $Path)) { return $null }
