@@ -90,7 +90,7 @@ for ((i = 0; i < MY_INPUT_COUNT; i++)); do
     fi
     echo "============================================================"
 
-    EXISTING="$(my_datasets_in_project)"
+    EXISTING="$(my_datasets_in_project "$JULENNY_PERMISSION_ID" "$INPUT_NAME")"
     EXISTING_COUNT="$(echo "$EXISTING" | jq 'length')"
 
     PICKED_ID=""
@@ -190,7 +190,7 @@ for ((i = 0; i < MY_INPUT_COUNT; i++)); do
                 --output "$BUNDLE_BIN" \
                 > /dev/null
             success "Encrypted bundle: $BUNDLE_BIN ($(stat -c%s "$BUNDLE_BIN") bytes)"
-            PICKED_ID="$(upload_plaintext_dataset "$BUNDLE_BIN" "$DATASET_NAME" "ciphertext")" \
+            PICKED_ID="$(upload_plaintext_dataset "$BUNDLE_BIN" "$DATASET_NAME" "ciphertext" "$INPUT_NAME")" \
                 || die "Bundle upload failed."
             success "Uploaded encrypted bundle '$DATASET_NAME' ($PICKED_ID)."
 
@@ -201,7 +201,7 @@ for ((i = 0; i < MY_INPUT_COUNT; i++)); do
             echo " UPLOADING PLAINTEXT FILE FOR '$INPUT_NAME': $INPUT_FILE"
             echo "    encoding=$INPUT_ENC, $(stat -c%s "$INPUT_FILE") bytes"
             echo "============================================================"
-            PICKED_ID="$(upload_plaintext_dataset "$INPUT_FILE" "$DATASET_NAME")" \
+            PICKED_ID="$(upload_plaintext_dataset "$INPUT_FILE" "$DATASET_NAME" "plaintext" "$INPUT_NAME")" \
                 || die "Plaintext upload failed."
             success "Uploaded plaintext '$DATASET_NAME' ($PICKED_ID)."
 

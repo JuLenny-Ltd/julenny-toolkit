@@ -626,10 +626,23 @@ list_permissions_for_joint_key() {
     echo "$resp" | jq --arg jk "$jk_id" '[.permissions[]? | select(.jointKeyId == $jk)]'
 }
 
+# Datasets for ONE function input, not every dataset in the collaboration.
+#
+# Without the narrowing the prompt for 'rule_pairs' offered model weights, negotiation
+# matrices and two dozen unrelated indicator files, because nothing recorded what a dataset
+# was for. Uploads now carry the input name; the platform filters on it and keeps untagged
+# older datasets, judging those on kind alone.
 my_datasets_in_project() {
     local perm_id="${1:-$JULENNY_PERMISSION_ID}"
+    local input_name="${2:-}"
+    local kind="${3:-}"
+    local qs=""
+    [[ -n "$input_name" ]] && qs="?inputName=$input_name"
+    if [[ -n "$kind" ]]; then
+        [[ -n "$qs" ]] && qs="$qs&kind=$kind" || qs="?kind=$kind"
+    fi
     local resp
-    resp="$(curl_jl GET "/api/fhe-permissions/$perm_id/datasets")"
+    resp="$(curl_jl GET "/api/fhe-permissions/$perm_id/datasets$qs")"
     echo "$resp" | jq '[.datasets[]? | select(.isYours == true)]'
 }
 
@@ -891,6 +904,9 @@ upload_plaintext_dataset() {
     local file_path="$1"
     local dataset_name="$2"
     local kind="${3:-plaintext}"   # "plaintext" (raw input) or "ciphertext" (encrypted bundle)
+    # Which function input this file is for. Recorded on the dataset so later pickers can
+    # offer it for THIS input and not for every other one.
+    local input_name="${4:-}"
 
     [[ -f "$file_path" ]] || die "upload_plaintext_dataset: file not found: $file_path"
 
@@ -904,6 +920,7 @@ upload_plaintext_dataset() {
             -F "file=@$file_path" \
             -F "name=$dataset_name" \
             -F "kind=$kind" \
+            -F "inputName=$input_name" \
             "$JULENNY_API_BASE/api/fhe-data-upload?permissionId=$JULENNY_PERMISSION_ID")"
         if echo "$resp" | jq -e '.error' > /dev/null 2>&1; then
             err "Plaintext upload failed:"
@@ -937,7 +954,8 @@ upload_plaintext_dataset() {
             -H "Content-Type: application/json" \
             --data-binary "$(jq -n --arg id "$id" --arg n "$dataset_name" \
                 --arg f "$(basename "$file_path")" --arg p "$JULENNY_PERMISSION_ID" --arg k "$kind" \
-                '{datasetId: $id, name: $n, kind: $k, fileName: $f, permissionId: $p, retentionDays: 90}')")"
+                --arg in "$input_name" \
+                '{datasetId: $id, name: $n, kind: $k, fileName: $f, permissionId: $p, inputName: $in, retentionDays: 90}')")"
         if echo "$confirm_resp" | jq -e '.error' > /dev/null 2>&1; then
             err "Plaintext upload confirm failed:"
             echo "$confirm_resp" | jq . >&2
