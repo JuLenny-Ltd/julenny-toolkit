@@ -655,8 +655,17 @@ function Get-JlFunctionsByScheme {
     return @(Get-JlFunctions | Where-Object { $_.scheme -eq $Scheme })
 }
 
+# Datasets for ONE function input, not every dataset in the company.
+#
+# Without the narrowing the prompt for one input listed every dataset ever uploaded, because
+# nothing recorded what a dataset was for. Uploads now carry the input name; the platform
+# filters on it and keeps untagged older datasets, judging those on kind alone.
 function Get-JlMyDatasetsInProject {
-    $resp = Invoke-JlApi GET "/api/fhe-datasets?projectId=$($script:JULENNY_PROJECT_ID)" -AllowFailure
+    param([string] $InputName = '', [string] $Kind = '')
+    $qs = "?projectId=$($script:JULENNY_PROJECT_ID)"
+    if ($InputName) { $qs += "&inputName=$InputName" }
+    if ($Kind)      { $qs += "&kind=$Kind" }
+    $resp = Invoke-JlApi GET "/api/fhe-datasets$qs" -AllowFailure
     if ($null -eq $resp) { return @() }
     if ((Test-JlHasProperty $resp 'datasets')) { return @($resp.datasets) }
     return @($resp)
@@ -947,6 +956,26 @@ function New-JlCollaboration {
 
 # resultVisibility is "dataConsumer" (default) or "dataOwner". Mode "both" is
 # deferred (needs transport-key infrastructure).
+# Ask for an optional expiry, mirroring lead/00-init.sh:191. PowerShell never asked, so every
+# permission created from Windows was open-ended while the bash side offered the choice - the
+# two halves of the same wizard behaving differently. Blank means no expiry, which stays the
+# default because an expiry CANNOT be extended later: a short one silently strands the
+# collaboration and the only remedy is a new grant plus a new keysetup ceremony.
+function Read-JlExpirationDate {
+    $days = Read-JlValue "Permission expiration in days from now (blank = no expiry)" ''
+    if (-not $days) {
+        Write-JlInfo "Permission will not expire (no expiration date set)."
+        return ''
+    }
+    $n = 0
+    if (-not [int]::TryParse($days, [ref] $n) -or $n -le 0) {
+        Stop-JlWithError "Expiration days must be a positive integer or blank (got: '$days')."
+    }
+    $iso = (Get-Date).ToUniversalTime().AddDays($n).ToString('yyyy-MM-ddTHH:mm:ss.fffZ')
+    Write-JlInfo "Permission will expire: $iso"
+    return $iso
+}
+
 function New-JlPermission {
     param(
         [Parameter(Mandatory = $true)][string] $ProjectId,
@@ -1195,7 +1224,10 @@ function Send-JlDataset {
     param(
         [Parameter(Mandatory = $true)][string] $FilePath,
         [Parameter(Mandatory = $true)][string] $DatasetName,
-        [ValidateSet('plaintext', 'ciphertext')][string] $Kind = 'plaintext'
+        [ValidateSet('plaintext', 'ciphertext')][string] $Kind = 'plaintext',
+        # Which function input this file is for. Recorded on the dataset so later pickers can
+        # offer it for THIS input and not for every other one.
+        [string] $InputName = ''
     )
     if (-not (Test-Path -LiteralPath $FilePath -PathType Leaf)) {
         Stop-JlWithError "Send-JlDataset: file not found: $FilePath"
@@ -1207,8 +1239,9 @@ function Send-JlDataset {
 
         $boundary = [System.Guid]::NewGuid().ToString()
         $body = New-JlMultipartBody -FilePath $FilePath -Boundary $boundary -Fields @{
-            name = $DatasetName
-            kind = $Kind
+            name      = $DatasetName
+            kind      = $Kind
+            inputName = $InputName
         }
         $uri = "$($script:JULENNY_API_BASE)/api/fhe-data-upload?permissionId=$($script:JULENNY_PERMISSION_ID)"
         try {
@@ -1254,6 +1287,7 @@ function Send-JlDataset {
         kind          = $Kind
         fileName      = [System.IO.Path]::GetFileName($FilePath)
         permissionId  = $script:JULENNY_PERMISSION_ID
+        inputName     = $InputName
         retentionDays = 90
     }
     $confirmedId = ''
@@ -1539,10 +1573,13 @@ function Invoke-JlInitSession {
             if ($visChoice -eq '2') { $visibility = 'dataOwner' }
         }
 
+        $expiration = Read-JlExpirationDate
+
         Write-JlStep "Creating permission via POST /api/fhe-permissions..."
         $permId = New-JlPermission -ProjectId $projectId -FunctionSlug $fnSlug `
                                    -FunctionVersion $fnVersion -ConsumerCollaborationId $partnerId `
-                                   -AllowedExecutions ([int] $allowed) -ResultVisibility $visibility
+                                   -AllowedExecutions ([int] $allowed) -ResultVisibility $visibility `
+                                   -ExpirationDate $expiration
         Write-JlSuccess "Permission created: $permId  ($fnSlug v$fnVersion)"
 
     } else {
@@ -1630,9 +1667,12 @@ function Invoke-JlInitSession {
             $visibility = 'dataConsumer'
             if ($visChoice -eq '2') { $visibility = 'dataOwner' }
 
+            $expiration = Read-JlExpirationDate
+
             $permId = New-JlPermission -ProjectId $projectId -FunctionSlug $fn.slug `
                                        -FunctionVersion $fn.version -ConsumerCollaborationId $partnerId `
-                                       -AllowedExecutions ([int] $allowed) -ResultVisibility $visibility
+                                       -AllowedExecutions ([int] $allowed) -ResultVisibility $visibility `
+                                       -ExpirationDate $expiration
             Write-JlSuccess "Permission created: $permId"
         } else {
             $n = 0
@@ -1854,7 +1894,7 @@ function Invoke-JlEncryptAndUploadInputs {
         Write-Host "============================================================"
 
         # Offer datasets already uploaded under this collaboration.
-        $existing = @(Get-JlMyDatasetsInProject)
+        $existing = @(Get-JlMyDatasetsInProject -InputName $inputName)
         $pickedId = ''
         if ($existing.Count -gt 0) {
             Write-JlInfo "Existing dataset(s) in this project:"
@@ -1923,7 +1963,7 @@ function Invoke-JlEncryptAndUploadInputs {
                     '--output',            $bundleBin
                 )
                 Write-JlSuccess "Encrypted bundle: $bundleBin ($((Get-Item -LiteralPath $bundleBin).Length) bytes)"
-                $pickedId = Send-JlDataset -FilePath $bundleBin -DatasetName $datasetName -Kind 'ciphertext'
+                $pickedId = Send-JlDataset -FilePath $bundleBin -DatasetName $datasetName -Kind 'ciphertext' -InputName $inputName
                 Write-JlSuccess "Uploaded encrypted bundle '$datasetName' ($pickedId)."
 
             } elseif ($isPlaintext) {
@@ -1932,7 +1972,7 @@ function Invoke-JlEncryptAndUploadInputs {
                 Write-Host " UPLOADING PLAINTEXT FILE FOR '$inputName': $inputFile"
                 Write-Host "    encoding=$inputEnc, $((Get-Item -LiteralPath $inputFile).Length) bytes"
                 Write-Host "============================================================"
-                $pickedId = Send-JlDataset -FilePath $inputFile -DatasetName $datasetName -Kind 'plaintext'
+                $pickedId = Send-JlDataset -FilePath $inputFile -DatasetName $datasetName -Kind 'plaintext' -InputName $inputName
                 Write-JlSuccess "Uploaded plaintext '$datasetName' ($pickedId)."
 
                 # Sidecar: phase 4.5 re-derives rotation indices from these files
@@ -1958,7 +1998,7 @@ function Invoke-JlEncryptAndUploadInputs {
                 )
                 Write-JlSuccess "Encrypted: $ciphertext ($((Get-Item -LiteralPath $ciphertext).Length) bytes)"
 
-                $pickedId = Send-JlDataset -FilePath $ciphertext -DatasetName $datasetName -Kind 'ciphertext'
+                $pickedId = Send-JlDataset -FilePath $ciphertext -DatasetName $datasetName -Kind 'ciphertext' -InputName $inputName
                 Write-JlSuccess "Uploaded as '$datasetName' ($pickedId)."
 
                 # Remember which cleartext file produced this dataset, so the
