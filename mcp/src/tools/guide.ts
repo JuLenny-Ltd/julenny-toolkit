@@ -89,7 +89,15 @@ export function registerGuideTools(server: McpServer, api: JulennyApiClient) {
           const myCollab: string | undefined = ks?.participants?.[myParty]?.collaborationId;
           const myContribs: number[] = (myCollab && ks.contributions?.[myCollab]) || [];
 
-          if (ks.state === 'AWAITING_FINALIZATION') {
+          // The platform spells this 'awaiting-finalization' (lower, hyphen); this branch
+          // compared against 'AWAITING_FINALIZATION' and so NEVER fired. Execution fell
+          // through to the round-manifest lookup, where finalization sits at currentRound 5
+          // in a manifest of 4 rounds, found no entry, and reported "BLOCKED on the other
+          // party" - sending the side that owed the finalize off to chase the side that was
+          // already waiting for it. Normalise instead of swapping the literal, so either
+          // spelling works.
+          const ksStateNorm = String(ks.state || '').toUpperCase().replace(/-/g, '_');
+          if (ksStateNorm === 'AWAITING_FINALIZATION') {
             const iFinalized = !!(myCollab && ks.finalKeySubmissions?.[myCollab]);
             if (iFinalized) {
               return ok({ ...base, stage: 'keysetup-finalize-wait', keysetup: { state: ks.state }, summary: 'You have submitted final keys. BLOCKED on the other party to finalize theirs before the permission activates. TELL THE USER to ask them to run their finalize step; polling alone will not unblock it.', nextActions: ['TELL THE USER to ask the other party to finalize', 'then call next_step again'] });
