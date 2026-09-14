@@ -637,7 +637,7 @@ function Get-JlCollaborations {
 
 function Get-JlPermissionsForJointKey {
     param([Parameter(Mandatory = $true)][string] $JointKeyId)
-    $resp = Invoke-JlApi GET "/api/fhe-permissions?view=$($script:JL_PERM_VIEW)&jointKeyId=$JointKeyId"
+    $resp = Invoke-JlApi GET "/api/fhe-permissions?status=active&view=$($script:JL_PERM_VIEW)&jointKeyId=$JointKeyId"
     if ($null -eq $resp) { return @() }
     if ((Test-JlHasProperty $resp 'permissions')) { return @($resp.permissions) }
     return @($resp)
