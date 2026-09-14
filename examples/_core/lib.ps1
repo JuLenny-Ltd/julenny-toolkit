@@ -2978,7 +2978,7 @@ function Invoke-JlViewerFlow {
                 $slotsCsv = (Get-JlNonZeroSlots $combine) -join ','
                 Write-Host ""
                 Write-JlStep "Resolving $nonZero non-zero slot(s) against $inputCsv..."
-                Invoke-JlCli @(
+                $resolved = Invoke-JlCli -PassThru @(
                     'crypto', 'resolve-indicator',
                     '--context-spec', $script:JULENNY_CRYPTO_CONTEXT_SPEC,
                     '--slots',        $slotsCsv,
@@ -2986,6 +2986,7 @@ function Invoke-JlViewerFlow {
                     '--function-def', $functionDefPath,
                     '--input-name',   $inputName
                 )
+                Write-Host $resolved
             }
         }
 
