@@ -574,9 +574,19 @@ export function registerPipelineTools(server: McpServer, api: JulennyApiClient) 
         // timeout every time, and the operator had to fall back to publishing the
         // rounds by hand. Publish the first outstanding round, report what is left,
         // and let the caller call again.
-        const contributed = new Set<number>(
-          Object.values((ks.contributions as Record<string, number[]>) || {}).flat(),
-        );
+        // Count only OUR OWN contributions. `contributions` is keyed by collaboration id,
+        // and rotation rounds are per-party: BOTH sides submit their own round 9. Flattening
+        // every party's rounds into one set made a round the PEER had submitted look like
+        // ours, so once the peer was fully done this verb found nothing outstanding, uploaded
+        // nothing, and returned `published: []` alongside a success - leaving rotation stuck
+        // at 'combining' forever with no error anywhere. guide.ts already scoped this
+        // correctly; this did not.
+        const perm = await api.get(`/api/fhe-permissions/${p.permissionId}`) as Record<string, unknown>;
+        const myParty: 'owner' | 'consumer' = perm.role === 'dataOwner' ? 'owner' : 'consumer';
+        const participants = (ks.participants as Record<string, { collaborationId?: string }>) || {};
+        const myCollab = participants[myParty]?.collaborationId;
+        const allContribs = (ks.contributions as Record<string, number[]>) || {};
+        const contributed = new Set<number>((myCollab && allContribs[myCollab]) || []);
         const outstanding = steps.filter(([mt]) => !contributed.has(roundFor(mt)!));
 
         const signingPath = resolveInWorkdir(p.signingKey);
@@ -608,7 +618,13 @@ export function registerPipelineTools(server: McpServer, api: JulennyApiClient) 
             ? `Published round ${published[0]?.round}. ${remaining.length} rotation round(s) still to publish: ${remaining.map((r) => `${r.round} (${r.messageType})`).join(', ')}. Call publish_rotation_key again to send the next one. Each call uploads one ~320MB payload, which is why they are not batched.`
             : status === 'complete'
             ? 'Rotation key setup is COMPLETE. The permission can now run.'
-            : `Rotation key setup reports '${status}', not 'complete'. Do NOT trigger an execution yet: it would spend a credit and fail inside the engine. Call get_rotation_status again, and if it does not reach 'complete', report that rather than retrying.`,
+            : published.length === 0
+            // Nothing published AND nothing outstanding means THIS side has already sent all
+            // three rounds, so the gap is the peer's. Say that, rather than reporting a bare
+            // success: an empty publish list used to read as "done" and stalled a whole
+            // collaboration with no error on either side.
+            ? `Nothing left to publish from this side: all three rotation rounds have already been submitted by you. Rotation still reports '${status}', so the OTHER party has not submitted theirs. TELL THE USER to ask them to complete their rotation augmentation, naming the round. Triggering now is refused by the platform with a 409 and costs nothing, but it will not run.`
+            : `Rotation key setup reports '${status}', not 'complete'. Do not trigger an execution yet; the platform refuses it with a 409 and no credit is charged, but it will not run. Call get_rotation_status again, and if it does not reach 'complete', report that rather than retrying.`,
         });
       } catch (e) {
         return fail(e instanceof Error ? e.message : 'publish_rotation_key failed');
