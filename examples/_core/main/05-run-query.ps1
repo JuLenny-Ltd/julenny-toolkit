@@ -181,10 +181,21 @@ while (-not $execId) {
             -ContentType 'application/json' -ErrorAction Stop
     } catch {
         $errMsg = $_.Exception.Message
-        try {
-            $r = $_.Exception.Response
-            if ($r) { $errMsg = (New-Object System.IO.StreamReader($r.GetResponseStream())).ReadToEnd() }
-        } catch { }
+        # PowerShell 5.1 puts the response BODY in ErrorDetails.Message. Invoke-RestMethod
+        # has usually already consumed the raw stream by the time we get here, so reading
+        # it returns '' - and overwriting a good message with that empty string is why an
+        # insufficient-credits rejection printed a blank line.
+        if ($_.ErrorDetails -and $_.ErrorDetails.Message) {
+            $errMsg = $_.ErrorDetails.Message
+        } else {
+            try {
+                $r = $_.Exception.Response
+                if ($r) {
+                    $bodyText = (New-Object System.IO.StreamReader($r.GetResponseStream())).ReadToEnd()
+                    if ($bodyText) { $errMsg = $bodyText }
+                }
+            } catch { }
+        }
     }
 
     if ($resp -and ((Test-JlHasProperty $resp 'error')) -and $resp.error) {
