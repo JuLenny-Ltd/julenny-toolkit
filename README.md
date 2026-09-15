@@ -72,7 +72,14 @@ It installs per-user; no administrator rights are required. The app appears as *
 
 `julenny-mcp` is a standard MCP server speaking the protocol over stdin/stdout. It works with **any MCP client**: Claude Desktop, Claude Code, Cursor, Windsurf, Zed, Continue, VS Code, and anything else that supports MCP.
 
-Only Claude Desktop is configured for you, by the Windows installer. Every other client needs one entry in its own config, using the same shape:
+**You never run `julenny-mcp` yourself.** Your MCP client starts it and passes its
+configuration in as environment variables. Running it from a terminal prints
+`JULENNY_API_KEY environment variable is required` and exits, which is expected rather
+than a fault.
+
+On Windows the installer wires up Claude Desktop for you. On Linux nothing is configured
+automatically, and every other client on either platform needs one entry in its own
+config, using the same shape:
 
 ```json
 {
@@ -91,13 +98,27 @@ Only Claude Desktop is configured for you, by the Windows installer. Every other
 
 On Linux the command is simply `julenny-mcp`, since the `.deb` puts it on your `PATH`.
 
-| Client | Config file |
+| Client | What to do |
 |---|---|
-| Claude Desktop | configured by the installer. Appears under **Settings → Developer**, not Connectors |
-| Cursor | `~/.cursor/mcp.json` (global) or `.cursor/mcp.json` (per project) |
-| Claude Code | `claude mcp add julenny -- <path-to>/julenny-mcp` |
-| VS Code | `.vscode/mcp.json`, which uses a `servers` key rather than `mcpServers` |
-| Windsurf, Zed, Continue | their own MCP config; the `mcpServers` shape above applies |
+| Claude Code | Run `claude mcp add julenny --scope user --env JULENNY_API_KEY=sk_live_... --env JULENNY_WORKDIR=<folder> -- julenny-mcp` |
+| Claude Desktop, Windows | Nothing. The installer does it. Appears under **Settings → Developer**, not Connectors |
+| Cursor | Edit `~/.cursor/mcp.json` (global) or `.cursor/mcp.json` (per project), using the shape above |
+| VS Code, GitHub Copilot | Edit `.vscode/mcp.json`, which uses a `servers` key rather than `mcpServers` |
+| Claude Desktop, Linux (beta) | Run `/usr/share/julenny-toolkit/merge-claude-config.sh <api-key>` (needs `jq`, and Claude Desktop must be closed) |
+| Windsurf, Zed, Continue | Edit their own MCP config; the `mcpServers` shape above applies |
+
+Claude Code running inside VS Code uses the `claude mcp` configuration above, not the
+Copilot `.vscode/mcp.json` file. They are separate systems.
+
+> **Two config files on Windows.** Claude Desktop keeps its configuration in a different
+> place depending on how it was installed, and the installer writes to both so that either
+> works:
+>
+> - Standalone `.exe` install: `%APPDATA%\Claude\claude_desktop_config.json`
+> - Microsoft Store install: `%LOCALAPPDATA%\Packages\Claude_*\LocalCache\Roaming\Claude\claude_desktop_config.json`
+>
+> A Store install ignores the `%APPDATA%` file completely. If you edit your API key by hand
+> and nothing changes, check which file your install actually reads.
 
 `JULENNY_WORKDIR` is the folder the server reads and writes. It is confined to that folder by design: absolute paths, `..` segments and symlinks pointing outside are all rejected, so the server cannot read anything else on your machine. Put the files you want encrypted inside it and refer to them by name. If the variable is omitted, the default is `%LOCALAPPDATA%\julenny-toolkit\workdir` on Windows and `$XDG_DATA_HOME/julenny-toolkit/workdir` on Linux.
 
