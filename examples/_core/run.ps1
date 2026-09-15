@@ -399,6 +399,22 @@ switch -Regex ($ksState) {
     }
 }
 
+# If the state is STILL in-progress after our bundles, the peer owes a round. Falling
+# through from here is what produced the 2026-09-15 failure: phase 4.5 ran with no joint
+# public key, could not refetch it (the platform has none until finalize), and 404'd on a
+# loop that looked like a platform fault. Wait for the peer here instead, where the message
+# says who we are waiting for.
+if ($ksState -eq 'pending-keysetup' -or $ksState -eq 'in-progress') {
+    Invoke-JlGate "$($script:JL_PEER_LABEL) to finish their remaining keysetup rounds" {
+        $p2 = Get-JlPermission
+        $s2 = "$($p2.keysetupState)"
+        ($s2 -eq 'awaiting-finalization' -or $s2 -eq 'complete')
+    }
+    $perm = Get-JlPermission
+    $ksState = "$($perm.keysetupState)"
+    Write-JlInfo "Permission keysetup state (after peer): $ksState"
+}
+
 # Phase 3: finalize when needed (fresh keysetup, or a reused joint key whose
 # finalKeys row for THIS permission is not populated yet). 03 is idempotent.
 if ($ksState -eq 'awaiting-finalization' -or $ksState -eq 'complete') {

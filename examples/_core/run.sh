@@ -431,6 +431,22 @@ case "$KS_STATE" in
         ;;
 esac
 
+# If the state is STILL in-progress after our bundles, the peer owes a round. Falling
+# through from here is what produced the 2026-09-15 failure: phase 4.5 ran with no joint
+# public key, could not refetch it (the platform has none until finalize), and 404'd on a
+# loop that looked like a platform fault. Wait for the peer here instead, where the message
+# says who we are waiting for.
+if [[ "$KS_STATE" == "pending-keysetup" || "$KS_STATE" == "in-progress" ]]; then
+    peer_finished_rounds() {
+        local st
+        st="$(get_permission | jq -r '.keysetupState // empty')"
+        [[ "$st" == "awaiting-finalization" || "$st" == "complete" ]]
+    }
+    gate "${JL_PEER_LABEL} to finish their remaining keysetup rounds" peer_finished_rounds
+    KS_STATE="$(get_permission | jq -r '.keysetupState // empty')"
+    info "Permission keysetup state (after peer): $KS_STATE"
+fi
+
 # Phase 3: finalize if needed (fresh keysetup, or a reused joint key whose
 # finalKeys row for THIS permission isn't populated yet). 03 is idempotent.
 if [[ "$KS_STATE" == "awaiting-finalization" || "$KS_STATE" == "complete" ]]; then
