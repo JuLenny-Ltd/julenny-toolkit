@@ -412,8 +412,8 @@ export function registerToolkitTools(server: McpServer) {
       secretKey: z.string().describe('Workdir-relative secret-share file name'),
       indices: z.string().describe('Rotation slot indices (CLI-format string, e.g. comma-separated)'),
       output: z.string().describe('Workdir-relative output contribution file name'),
-      peerShare: z.string().optional().describe('Workdir-relative peer share file name'),
-      jointPk: z.string().optional().describe('Workdir-relative joint public key file name'),
+      peerShare: z.string().optional().describe("Workdir-relative peer share file name. role='main' ONLY; ignored for 'lead'."),
+      jointPk: z.string().optional().describe("Workdir-relative joint public key file name. role='main' ONLY; ignored for 'lead'."),
       contextSpec: z.string().optional().describe('Crypto context spec'),
     },
     async (p) => {
@@ -425,8 +425,13 @@ export function registerToolkitTools(server: McpServer) {
           '--indices', p.indices,
           '--output', resolveInWorkdir(p.output),
         ];
-        if (p.peerShare) args.push('--peer-share', resolveInWorkdir(p.peerShare));
-        if (p.jointPk) args.push('--joint-pk', resolveInWorkdir(p.jointPk));
+        // The lead goes FIRST and so has neither of these. The CLI rejects them outright
+        // ("--peer-share and --joint-pk must NOT be set for role=lead"), which cost a live
+        // run a failed call on 2026-09-15. Drop them rather than forwarding a hard error:
+        // the caller supplying them has simply misread whose turn it is.
+        const isLead = p.role === 'lead';
+        if (!isLead && p.peerShare) args.push('--peer-share', resolveInWorkdir(p.peerShare));
+        if (!isLead && p.jointPk) args.push('--joint-pk', resolveInWorkdir(p.jointPk));
         if (p.contextSpec) args.push('--context-spec', p.contextSpec);
         args.push('--json');
         const r = await runCli(args);

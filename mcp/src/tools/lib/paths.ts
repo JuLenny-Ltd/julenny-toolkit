@@ -85,5 +85,14 @@ export function resolveInWorkdir(name: string): string {
     throw new Error(`path resolves (via symlink) outside the working directory: ${name}`);
   }
 
+  // 3) Create the parent directory. A caller naming an output like
+  // 'keysetup/peer-pk-share.bin' is asking for a subfolder, and every write verb used to
+  // fail with a bare ENOENT because nothing created it. Containment is proven above, so
+  // this can only ever create directories inside the workdir.
+  const parent = dirname(candidate);
+  if (parent !== wd) {
+    try { mkdirSync(parent, { recursive: true }); } catch { /* a genuinely bad path still fails at the write */ }
+  }
+
   return candidate;
 }

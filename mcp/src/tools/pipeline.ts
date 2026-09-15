@@ -150,7 +150,7 @@ export function registerPipelineTools(server: McpServer, api: JulennyApiClient) 
   // joint public key is NOT secret; this is a plain read to a workdir file.
   server.tool(
     'fetch_joint_public_key',
-    "Fetch the collaboration's joint PUBLIC key for a permission into a workdir file, so you can encrypt inputs under it without having run this keysetup yourself (reused keysetup, or the consumer side). Returns the file path; the key is public, never secret.",
+    "Fetch the collaboration's joint PUBLIC key for a permission into a workdir file, so you can encrypt inputs under it without having run this keysetup yourself (reused keysetup, or the consumer side). Returns the file path; the key is public, never secret. ONLY WORKS AFTER KEYSETUP IS COMPLETE. During keysetup the joint public key has not been published yet: it IS the CONSUMER's round-1 'pk-share', so get it with download_keysetup_message(messageType='pk-share') and pass that file wherever a jointPk is wanted. Do not call this verb mid-ceremony.",
     {
       permissionId: z.string().describe('Permission id whose joint key to fetch'),
       output: z.string().describe('Workdir-relative output file for the joint public key'),
@@ -170,8 +170,18 @@ export function registerPipelineTools(server: McpServer, api: JulennyApiClient) 
             if (perm?.jointKeyId) { jointKeyId = perm.jointKeyId as string; break; }
           }
         }
-        if (!jointKeyId) return fail(`could not resolve jointKeyId for permission ${p.permissionId} (pass jointKeyId explicitly, or keysetup may be incomplete)`);
-        const bytes = await api.getBytes(`/api/fhe-joint-keys/${jointKeyId}/public-key`);
+        if (!jointKeyId) return fail(`could not resolve jointKeyId for permission ${p.permissionId}. If keysetup is still running this is EXPECTED: the joint public key is not published until finalization. Mid-ceremony the joint public key IS the consumer's round-1 'pk-share' - call download_keysetup_message(messageType='pk-share') and use that file as jointPk. Only pass jointKeyId explicitly if keysetup really is complete and auto-resolution failed.`);
+        let bytes: Uint8Array | null = null;
+        try {
+          bytes = await api.getBytes(`/api/fhe-joint-keys/${jointKeyId}/public-key`);
+        } catch (err) {
+          // "Joint public key not yet available" is a 404 until finalization. On
+          // 2026-09-15 this verb was called 15 times in one session and failed 14 of them,
+          // each time mid-ceremony, because its name is the obvious answer to "where do I
+          // get the joint public key". Point at the real source instead of repeating 404.
+          const msg = err instanceof Error ? err.message : String(err);
+          return fail(`${msg}. If keysetup is still running this is EXPECTED: the joint public key is not published until finalization. Mid-ceremony it IS the consumer's round-1 'pk-share' - call download_keysetup_message(messageType='pk-share') and use that file as jointPk.`);
+        }
         if (!bytes || bytes.length === 0) return fail('joint public key download returned no bytes');
         const out = resolveInWorkdir(p.output);
         await writeFile(out, bytes);
