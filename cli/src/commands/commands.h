@@ -101,6 +101,20 @@ struct CryptoEncryptArgs {
     std::string columns = "all";       // "all" or comma-separated 1-based indices like "1,2"
     bool skip_header = false;
 
+    // schema 'signature-table' (exact PSI; design 2.2, Q2c). Both parties must encode with the
+    // same cells, tables, limbs and count groups, and with opposite roles.
+    std::string   psi_role;                 // "A" or "B"; mode A defaults to the input's position
+    unsigned      signature_bits = 128;     // the guarantee; limbs are derived from it
+    std::uint64_t cells = 0;                // 0 = let the solver choose
+    unsigned      tables = 0;               // 0 = let the solver choose
+    unsigned      limbs = 0;                // 0 = derive from signature_bits (advanced override)
+    std::uint64_t count_groups = 0;         // 0 = the solver's choice
+    std::uint64_t shards = 1;               // > 1 is step F1
+    std::uint64_t capacity = 0;             // size for this many records (0 = the ones read)
+    double        target_overflow = 1e-6;   // expected dropped records / records
+    std::string   on_overflow = "fail";     // "fail" or "drop"
+    std::string   domain_separator;         // hashed in front of every record; both parties must match
+
     std::string context_spec;          // optional override; if empty, read from function-def or default
     bool emit_json = false;
 };

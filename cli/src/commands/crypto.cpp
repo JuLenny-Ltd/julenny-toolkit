@@ -8,6 +8,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <optional>
 #include <set>
 #include <span>
 #include <sstream>
@@ -25,6 +26,10 @@
 #include "crypto/ciphertext.h"
 #include "crypto/eval_keys.h"
 #include "crypto/signing.h"
+#include "psi/bundle.h"
+#include "psi/digest.h"
+#include "psi/solver.h"
+#include "psi/table.h"
 #include "registry/envelope.h"
 #include "registry/signature.h"
 #include "registry/trust_root.h"
@@ -768,6 +773,225 @@ int encrypt_bundle(const std::string& input_path,
                    const std::string& context_spec_id,
                    bool emit_json);
 
+// ---------------------------------------------------------------------------
+// signature-table: the exact-PSI encoder (design 2.2-2.3; steps B1-B4, D2).
+//
+// Rows -> record digests (psi/digest) -> T associative tables with sentinel
+// fill (psi/table) -> one ciphertext per (position block, limb) behind the
+// header the wrapper's psi-signature-match ops parse (psi/bundle). The output
+// is a bundle of many ciphertexts rather than one vector, so this path reads,
+// encrypts and writes on its own instead of joining the single-vector schemas.
+// ---------------------------------------------------------------------------
+static int encrypt_signature_table(const CryptoEncryptArgs& args,
+                                   const fhe_toolkit::crypto::CryptoContextSpec& spec,
+                                   std::int64_t slot_count, const std::string& sep_str,
+                                   const std::string& cols_spec, bool skip_header,
+                                   const std::string& role_str, const std::string& domain,
+                                   const std::string& fn_slug, const std::string& fn_version) {
+    namespace fs = std::filesystem;
+    namespace psi = fhe_toolkit::psi;
+
+    // The circuit tests one 16-bit limb per slot with Fermat's theorem, so it needs an exact
+    // scheme and a modulus above the limbs; the wrapper refuses anything else.
+    if (spec.scheme != "BFV") {
+        std::cerr << "error: schema 'signature-table' requires a BFV context spec; got '"
+                  << spec.id << "' (" << spec.scheme << ")\n";
+        return 2;
+    }
+    if (spec.plaintext_modulus <= 65536) {
+        std::cerr << "error: schema 'signature-table' needs a plaintext modulus above 65536 (limbs are "
+                  << "16 bits); '" << spec.id << "' has t = " << spec.plaintext_modulus << "\n";
+        return 2;
+    }
+    if (role_str != "A" && role_str != "B") {
+        std::cerr << "error: --role must be A or B (it decides which sentinel fills the empty cells, "
+                  << "and the two parties must differ)\n";
+        return 2;
+    }
+    const psi::Role role = role_str == "A" ? psi::Role::A : psi::Role::B;
+    if (args.shards > 1) {
+        std::cerr << "error: --shards " << args.shards << ": sharding is not implemented yet (step F1)\n";
+        return 2;
+    }
+    psi::OverflowPolicy policy;
+    if (args.on_overflow == "fail") policy = psi::OverflowPolicy::fail;
+    else if (args.on_overflow == "drop") policy = psi::OverflowPolicy::drop;
+    else {
+        std::cerr << "error: --on-overflow must be 'fail' or 'drop', not '" << args.on_overflow << "'\n";
+        return 2;
+    }
+
+    std::ifstream in_file(args.input_path);
+    if (!in_file) {
+        std::cerr << "error: cannot open input file: " << args.input_path << "\n";
+        return 1;
+    }
+    const char sep_char = sep_str.empty() ? '\0' : sep_str[0];
+    const auto cols = parse_columns_spec(cols_spec);
+    std::vector<psi::Digest> digests;
+    std::size_t lines_seen = 0, lines_skipped = 0, records_read = 0;
+    bool header_pending = skip_header;
+    std::string line;
+    while (std::getline(in_file, line)) {
+        ++lines_seen;
+        auto trimmed = trim_inplace(line);
+        if (trimmed.empty() || trimmed[0] == '#') { ++lines_skipped; continue; }
+        if (header_pending) { header_pending = false; ++lines_skipped; continue; }
+        digests.push_back(psi::record_digest(domain, compose_record(trimmed, sep_char, cols)));
+        ++records_read;
+    }
+    if (digests.empty()) {
+        std::cerr << "error: no records found in input (read " << lines_seen << " lines, "
+                  << lines_skipped << " skipped as blank/comment/header)\n";
+        return 1;
+    }
+
+    // Size the tables: the solver picks what the user did not pin (steps B4, D3).
+    psi::Request req;
+    req.records          = args.capacity > 0 ? args.capacity : static_cast<std::uint64_t>(records_read);
+    req.signature_bits   = args.signature_bits;
+    req.target_drop_rate = args.target_overflow;
+    req.context.slots    = static_cast<std::uint64_t>(slot_count);
+    psi::Plan plan;
+    psi::Estimate estimate;
+    try {
+        if (args.cells > 0 && args.tables > 0) {
+            plan.cells_total  = args.cells;
+            plan.shards       = 1;
+            plan.levels       = args.tables;
+            plan.count_groups = args.count_groups > 0 ? args.count_groups : 1;
+        } else {
+            plan = psi::solve(req).plan;
+            if (args.cells > 0)  plan.cells_total = args.cells;
+            if (args.tables > 0) plan.levels = args.tables;
+            if (args.count_groups > 0) plan.count_groups = args.count_groups;
+        }
+        plan.limbs = args.limbs > 0
+            ? args.limbs
+            : psi::limbs_for(req.signature_bits, plan.cells_total, req.context.max_limbs);
+        estimate = psi::estimate(req, plan);
+    } catch (const std::exception& e) {
+        std::cerr << "error: cannot size the signature tables: " << e.what() << "\n";
+        return 1;
+    }
+
+    const psi::TableParams table_params = plan.table_params();
+    std::optional<psi::Table> table;
+    try {
+        table.emplace(psi::build_table(std::move(digests), table_params, role, policy));
+    } catch (const psi::TableOverflow& e) {
+        const auto& r = e.report();
+        std::cerr << "error: " << e.what() << "\n"
+                  << "       records " << r.records << ", cells " << table_params.cells << ", tables "
+                  << table_params.levels << "; the fullest cell held " << r.cell_max_load << " records, "
+                  << r.overflowed_cells << " cells overflowed, " << r.dropped << " records did not fit\n"
+                  << "       re-encode with --cells " << table_params.cells * 2 << " or --tables "
+                  << table_params.levels + 2 << " (both parties must use the same values)\n";
+        return 1;
+    } catch (const std::exception& e) {
+        std::cerr << "error: cannot build the signature tables: " << e.what() << "\n";
+        return 1;
+    }
+
+    psi::BundleLayout layout;
+    try {
+        layout = psi::bundle_layout(table_params, plan.count_groups, static_cast<std::uint64_t>(slot_count));
+    } catch (const std::exception& e) {
+        std::cerr << "error: " << e.what() << "\n";
+        return 1;
+    }
+
+    // Encode + encrypt under a context built from the spec, for the reason the flat path records:
+    // a freshly built context embeds itself into the ciphertext, which is what the wrapper needs.
+    auto pk_bytes = read_bytes(args.joint_public_key_path);
+    fhe_toolkit::crypto::Context ctx(spec);
+    auto pk = fhe_toolkit::crypto::PublicKey::deserialize(ctx, pk_bytes);
+    std::vector<fhe_toolkit::crypto::Ciphertext> cts;
+    cts.reserve(layout.ciphertexts);
+    std::vector<std::int64_t> slots(static_cast<std::size_t>(layout.slots));
+    for (std::uint64_t i = 0; i < layout.ciphertexts; ++i) {
+        psi::bundle_slots(*table, layout, i, std::span<std::int64_t>(slots));
+        cts.push_back(ctx.encrypt(pk, ctx.encode_packed(slots)));
+    }
+    const auto payload = ctx.serialize_ciphertext_vector(cts);
+    const std::string header = psi::bundle_header(layout, role);
+
+    const fs::path out_path(args.output_path);
+    if (out_path.has_parent_path()) fs::create_directories(out_path.parent_path());
+    {
+        std::ofstream out(out_path, std::ios::binary | std::ios::trunc);
+        if (!out) { std::cerr << "error: cannot open for writing: " << out_path.string() << "\n"; return 1; }
+        out.write(header.data(), static_cast<std::streamsize>(header.size()));
+        out.write(reinterpret_cast<const char*>(payload.data()), static_cast<std::streamsize>(payload.size()));
+        if (!out) { std::cerr << "error: write failed: " << out_path.string() << "\n"; return 1; }
+    }
+    const std::uint64_t bytes = header.size() + payload.size();
+    const auto& report = table->report();
+
+    if (args.emit_json) {
+        json out;
+        out["status"]        = "ok";
+        out["schema"]        = "signature-table";
+        out["role"]          = role_str;
+        out["mode"]          = fn_slug.empty() ? "explicit-flag" : "function-def";
+        if (!fn_slug.empty()) {
+            out["functionSlug"]    = fn_slug;
+            out["functionVersion"] = fn_version;
+            out["inputName"]       = args.input_name;
+        }
+        out["contextSpec"]     = spec.id;
+        out["slotCount"]       = slot_count;
+        out["domainSeparator"] = domain;
+        out["recordsRead"]     = records_read;
+        out["duplicateRows"]   = report.duplicates;
+        out["linesSkipped"]    = lines_skipped;
+        out["records"]         = report.records;
+        out["cells"]           = layout.cells;
+        out["tables"]          = layout.tables;
+        out["limbs"]           = layout.limbs;
+        out["signatureBits"]          = args.signature_bits;
+        out["signatureBitsDelivered"] = estimate.signature_bits_delivered;
+        out["countGroups"]     = layout.groups;
+        out["layout"]          = layout.layout_name();
+        out["cellMaxLoad"]     = report.cell_max_load;
+        out["overflows"]       = report.overflowed_cells;
+        out["recordsDropped"]  = report.dropped;
+        out["impliedDropRate"] = report.drop_rate();
+        out["remappedSignatures"]   = report.remapped;
+        out["expectedDropRate"]     = estimate.expected_drop_rate;
+        out["expectedFalseMatches"] = estimate.expected_false_matches;
+        out["chunks"]          = layout.chunks;
+        out["ciphertexts"]     = layout.ciphertexts;
+        out["bytes"]           = bytes;
+        out["outputPath"]      = out_path.string();
+        json warnings = json::array();
+        for (const auto& w : estimate.warnings) warnings.push_back(w.message);
+        out["warnings"] = warnings;
+        std::cout << out.dump(2) << "\n";
+    } else {
+        std::cout << "Encoded " << report.records << " distinct records into a signature table.\n";
+        std::cout << "  Role:            " << role_str << " (empty cells hold this role's sentinel)\n";
+        std::cout << "  Records read:    " << records_read << " (" << report.duplicates
+                  << " repeated, counted once; " << lines_skipped << " lines skipped)\n";
+        std::cout << "  Table:           " << layout.cells << " cells x " << layout.tables
+                  << " tables, " << layout.limbs << " limbs of 16 bits\n";
+        std::cout << "  Signature:       " << args.signature_bits << " bits asked, "
+                  << estimate.signature_bits_delivered << " delivered (cell address included)\n";
+        std::cout << "  Fullest cell:    " << report.cell_max_load << " records ("
+                  << report.overflowed_cells << " cells overflowed, " << report.dropped << " dropped, "
+                  << report.drop_rate() * 100.0 << " %)\n";
+        std::cout << "  Bundle:          " << layout.ciphertexts << " ciphertexts, " << layout.chunks
+                  << " comparisons, " << layout.layout_name() << " layout, " << bytes << " bytes\n";
+        std::cout << "  Output:          " << out_path.string() << "\n";
+        std::cout << "  Context:         " << spec.id << " (BFV, slots=" << slot_count
+                  << ", t=" << spec.plaintext_modulus << ")\n";
+        std::cout << "  The other party MUST encode with the same cells, tables, limbs and groups,\n";
+        std::cout << "  the opposite role, and the same domain separator '" << domain << "'.\n";
+        for (const auto& w : estimate.warnings) std::cout << "  warning: " << w.message << "\n";
+    }
+    return 0;
+}
+
 int run_crypto_encrypt(const CryptoEncryptArgs& args) {
     namespace fs = std::filesystem;
 
@@ -795,6 +1019,10 @@ int run_crypto_encrypt(const CryptoEncryptArgs& args) {
     std::string cols_spec = "all";
     // Provenance fields, populated only in mode A for the result summary.
     std::string fn_slug, fn_version, fn_role;
+    // signature-table: which sentinel this party fills with, and the digest's domain separator.
+    // Mode A takes the role from the input's position in the signed definition, so the two parties
+    // cannot both encode as A without disagreeing about the definition itself.
+    std::string psi_role_from_def, domain_from_def;
 
     if (has_fn_def) {
         // Mode A: function-def-driven.
@@ -836,12 +1064,16 @@ int run_crypto_encrypt(const CryptoEncryptArgs& args) {
         }
 
         json input_def;
+        std::size_t input_index = 0;
         if (fn_def.contains("inputs") && fn_def["inputs"].is_array()) {
+            std::size_t idx = 0;
             for (const auto& in : fn_def["inputs"]) {
                 if (in.value("name", "") == args.input_name) {
                     input_def = in;
+                    input_index = idx;
                     break;
                 }
+                ++idx;
             }
         }
         if (input_def.is_null()) {
@@ -869,6 +1101,8 @@ int run_crypto_encrypt(const CryptoEncryptArgs& args) {
         layout      = input_def.value("layout", std::string{});
 
         json params = input_def.value("schemaParams", json::object());
+        if (input_index < 2) psi_role_from_def = input_index == 0 ? "A" : "B";
+        domain_from_def = params.value("domainSeparator", std::string{});
         sep_str     = params.value("separator", std::string{});
         skip_header = params.value("skipHeader", false);
         cols_spec   = params.value("columns", std::string{"all"});
@@ -900,6 +1134,17 @@ int run_crypto_encrypt(const CryptoEncryptArgs& args) {
     }
     const std::int64_t slot_count = resolve_slot_count(spec->id);
 
+    // The exact-PSI encoder emits a bundle of many ciphertexts rather than one vector, so it is
+    // dispatched before the flat schemas and returns on its own.
+    if (schema_name == "signature-table") {
+        const std::string role_str = args.psi_role.empty() ? psi_role_from_def : args.psi_role;
+        std::string domain = args.domain_separator;
+        if (domain.empty()) domain = domain_from_def;
+        if (domain.empty()) domain = "julenny-psi-v1";
+        return encrypt_signature_table(args, *spec, slot_count, sep_str, cols_spec, skip_header,
+                                       role_str, domain, fn_slug, fn_version);
+    }
+
     // Dispatch on schema.
     // 'packed-real' is the function-def schema name for plain real-vector
     // inputs (e.g. decision-tree 'features': feature j in slot j). It encodes
@@ -910,7 +1155,7 @@ int run_crypto_encrypt(const CryptoEncryptArgs& args) {
     if (schema_name != "indicator-hash" && !is_weight_vector && !is_binary_indicator) {
         std::cerr << "error: unsupported schema '" << schema_name
                   << "' (this version supports 'indicator-hash', 'weight-vector',"
-                  << " 'packed-real', and 'binary-indicator')\n";
+                  << " 'packed-real', 'binary-indicator', and 'signature-table')\n";
         return 2;
     }
     if (is_weight_vector && spec->scheme != "CKKS") {
@@ -2773,6 +3018,35 @@ void register_crypto(CLI::App& app,
                         "indices like '1,2'. Default 'all'. Mode B only.");
     encrypt->add_flag  ("--skip-header", encrypt_args.skip_header,
                         "Skip the first non-blank line of the input. Mode B only.");
+    // schema 'signature-table' (exact PSI). Both parties must pass the same cells/tables/limbs and
+    // opposite roles; the wrapper refuses the execution if the two bundles disagree.
+    encrypt->add_option("--role", encrypt_args.psi_role,
+                        "signature-table: this party's role, A or B (decides which sentinel fills "
+                        "empty cells). Defaults in mode A to the input's position in the function-def.");
+    encrypt->add_option("--signature-bits", encrypt_args.signature_bits,
+                        "signature-table: the false-match guarantee in bits (default 128). Limbs are "
+                        "derived from it and the cell address.");
+    encrypt->add_option("--cells", encrypt_args.cells,
+                        "signature-table: number of cells m, a power of two (default: solved)");
+    encrypt->add_option("--tables", encrypt_args.tables,
+                        "signature-table: number of parallel tables T (default: solved)");
+    encrypt->add_option("--limbs", encrypt_args.limbs,
+                        "signature-table: 16-bit limbs per signature (advanced; default: derived "
+                        "from --signature-bits)");
+    encrypt->add_option("--count-groups", encrypt_args.count_groups,
+                        "signature-table: partial sums the count comes back as (default: solved)");
+    encrypt->add_option("--shards", encrypt_args.shards,
+                        "signature-table: number of shards (only 1 is implemented)");
+    encrypt->add_option("--capacity", encrypt_args.capacity,
+                        "signature-table: size the tables for this many records (default: the ones read)");
+    encrypt->add_option("--target-overflow", encrypt_args.target_overflow,
+                        "signature-table: expected fraction of records dropped to size for (default 1e-6)");
+    encrypt->add_option("--on-overflow", encrypt_args.on_overflow,
+                        "signature-table: 'fail' (default) or 'drop' - drop the surplus in a full cell "
+                        "and report it, up to a 1 % ceiling");
+    encrypt->add_option("--domain-separator", encrypt_args.domain_separator,
+                        "signature-table: hashed in front of every record; both parties must match "
+                        "(default: the function-def's, else 'julenny-psi-v1')");
     encrypt->add_option("--context-spec", encrypt_args.context_spec,
                         "Crypto context spec override (default: read from function-def in mode A, "
                         "or 'bfv-default-v1' in mode B)");

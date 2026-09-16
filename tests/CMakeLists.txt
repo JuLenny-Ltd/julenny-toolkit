@@ -9,6 +9,7 @@ set(FHE_TOOLKIT_TEST_SOURCES
     psi/table_test.cpp
     psi/reference_test.cpp
     psi/solver_test.cpp
+    psi/bundle_test.cpp
 )
 
 if(FHE_TOOLKIT_USE_OPENFHE)
