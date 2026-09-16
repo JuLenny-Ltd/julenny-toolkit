@@ -7,6 +7,7 @@ set(FHE_TOOLKIT_TEST_SOURCES
     registry/signature_test.cpp
     psi/digest_test.cpp
     psi/table_test.cpp
+    psi/reference_test.cpp
 )
 
 if(FHE_TOOLKIT_USE_OPENFHE)

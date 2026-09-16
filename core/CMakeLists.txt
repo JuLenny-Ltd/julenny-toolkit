@@ -10,6 +10,7 @@ set(FHE_TOOLKIT_CORE_SOURCES
     src/crypto/signing.cpp
     src/psi/digest.cpp
     src/psi/table.cpp
+    src/psi/reference.cpp
 )
 
 if(FHE_TOOLKIT_USE_OPENFHE)
