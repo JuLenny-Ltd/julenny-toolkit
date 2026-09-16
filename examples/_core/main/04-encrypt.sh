@@ -357,15 +357,8 @@ for ((i = 0; i < MY_INPUT_COUNT; i++)); do
             # Map originating CSV for this ciphertext input. Plaintext inputs
             # don't need this — 06-decrypt's resolve-indicator only looks
             # up encrypted indicators, not plaintext attachments.
-            CSV_MAP_FILE="$JL_WORKDIR/dataset_csv_map.json"
-            EXISTING_MAP='{}'
-            [[ -f "$CSV_MAP_FILE" ]] && EXISTING_MAP="$(cat "$CSV_MAP_FILE")"
-            echo "$EXISTING_MAP" \
-                | jq --arg id "$PICKED_ID" --arg p "$INPUT_FILE" '. + {($id): $p}' \
-                > "$CSV_MAP_FILE.tmp" \
-                && mv "$CSV_MAP_FILE.tmp" "$CSV_MAP_FILE"
-            info "Mapped dataset $PICKED_ID -> $INPUT_FILE in $CSV_MAP_FILE."
-            remember_column_choice "$PICKED_ID" "${COL_CHOICE:-}"
+            remember_dataset_csv "$PICKED_ID" "$INPUT_FILE"
+            remember_column_choice "$PICKED_ID" "${COL_CHOICE:-all}"
         fi
     fi
 

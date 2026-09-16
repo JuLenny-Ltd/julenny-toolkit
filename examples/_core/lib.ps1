@@ -1885,7 +1885,10 @@ function Invoke-JlEncryptAndUploadInputs {
 
     $functionDefPath = Join-Path $script:JL_WORKDIR 'function-def.json'
     $pickFile        = Join-Path $script:JL_WORKDIR 'my_dataset_picks.json'
-    $csvMapFile      = Join-Path $script:JL_WORKDIR 'dataset_csv_map.json'
+    # At the ROOT, not in the per-collaboration folder: the connector shares these two
+    # maps and does not know the joint key id when it uploads. Dataset ids are unique
+    # platform-wide, so one file at the top serves every collaboration.
+    $csvMapFile      = Join-Path $script:JL_ROOT 'dataset_csv_map.json'
     $ptSidecar       = Join-Path $script:JL_WORKDIR 'my_plaintext_paths.json'
 
     $def = Get-JlFunctionDefObject $functionDefPath
@@ -2087,11 +2090,13 @@ function Invoke-JlEncryptAndUploadInputs {
                 # version only writes this on the consumer side.)
                 Set-JlJsonMapEntry -Path $csvMapFile -Key $pickedId -Value $inputFile
                 Write-JlInfo "Mapped dataset $pickedId -> $inputFile in $csvMapFile."
-                if ($colChoice) {
-                    Set-JlJsonMapEntry -Path (Join-Path $script:JL_WORKDIR 'dataset_columns.json') `
-                                       -Key $pickedId -Value $colChoice
-                    Write-JlInfo "Remembered column choice '$colChoice' for dataset $pickedId."
-                }
+                # Record the choice EVEN WHEN it was all columns. That is what lets the
+                # resolve step tell "all columns, deliberately" apart from "nothing is
+                # known about this dataset", and ask only in the second case.
+                $recordedCols = if ($colChoice) { $colChoice } else { 'all' }
+                Set-JlJsonMapEntry -Path (Join-Path $script:JL_ROOT 'dataset_columns.json') `
+                                   -Key $pickedId -Value $recordedCols
+                Write-JlInfo "Remembered column choice '$recordedCols' for dataset $pickedId."
             }
         }
 
@@ -3017,7 +3022,7 @@ function Invoke-JlViewerFlow {
                     Write-JlInfo "Your dataset for this execution: '$myDsetName' ($myDsetId)"
                 }
 
-                $csvMapFile = Join-Path $script:JL_WORKDIR 'dataset_csv_map.json'
+                $csvMapFile = Join-Path $script:JL_ROOT 'dataset_csv_map.json'
                 $inputCsv = ''
                 if ($myDsetId -and (Test-Path -LiteralPath $csvMapFile)) {
                     $csvMap = Get-Content -LiteralPath $csvMapFile -Raw | ConvertFrom-Json
@@ -3056,7 +3061,7 @@ function Invoke-JlViewerFlow {
                 # Rehash EXACTLY as encrypt did. The column choice was recorded at encrypt
                 # time; without it a subset-encrypted file rehashes over every column, matches
                 # nothing, and reports zero matches with no error anywhere.
-                $colsFile = Join-Path $script:JL_WORKDIR 'dataset_columns.json'
+                $colsFile = Join-Path $script:JL_ROOT 'dataset_columns.json'
                 $savedCols = ''
                 if ($myDsetId -and (Test-Path -LiteralPath $colsFile)) {
                     try {
@@ -3067,9 +3072,14 @@ function Invoke-JlViewerFlow {
                 if ($savedCols) {
                     Write-JlInfo "Using the column choice recorded at encrypt time: $savedCols"
                 } else {
-                    Write-JlInfo "No column choice recorded for this dataset; using the function's default (all columns)."
-                    Write-JlInfo "  If this file was encrypted on a subset of columns, say so now or nothing will match."
+                    # Every encrypt records its choice, 'all' included, so getting here means
+                    # this dataset was encrypted somewhere else. Ask rather than assume:
+                    # guessing wrong prints "no matches", which reads like an answer.
+                    Write-JlWarn "Nothing is recorded about how this dataset was encrypted."
+                    Write-JlWarn "  It was encrypted on another machine, or by another tool."
+                    Write-JlWarn "  Answer with the SAME columns that were used then, or nothing will match."
                     $savedCols = Read-JlColumnChoice -InputName $inputName -FilePath $inputCsv
+                    if (-not $savedCols) { $savedCols = 'all' }
                 }
 
                 $resolveArgs = @(

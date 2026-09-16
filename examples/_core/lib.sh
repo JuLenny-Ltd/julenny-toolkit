@@ -139,10 +139,19 @@ ask_column_choice() {
 }
 
 # Remember the choice so resolve can rehash identically, possibly days later.
+#
+# Recorded at the ROOT of the working folder, not inside collabs/<jointKeyId>/, because
+# the connector shares these two files and does not know the joint key id when it
+# uploads. Dataset ids are unique platform-wide, so one file at the top is enough.
+#
+# EVERY encrypt is recorded, 'all' included. That is what lets recall tell "all columns,
+# deliberately" apart from "nothing is known about how this was encrypted": the first can
+# be used, the second has to be asked about.
 remember_column_choice() {
-    local dataset_id="$1" cols="$2"
-    [[ -n "$dataset_id" && -n "$cols" ]] || return 0
-    local f="$JL_WORKDIR/dataset_columns.json"
+    local dataset_id="$1" cols="${2:-all}"
+    [[ -n "$dataset_id" ]] || return 0
+    [[ -n "$cols" ]] || cols="all"
+    local f="$JL_ROOT/dataset_columns.json"
     local existing='{}'
     [[ -f "$f" ]] && existing="$(cat "$f")"
     echo "$existing" | jq --arg id "$dataset_id" --arg c "$cols" '. + {($id): $c}'         > "$f.tmp" && mv "$f.tmp" "$f"
@@ -152,9 +161,23 @@ remember_column_choice() {
 # Read back what was chosen at encrypt time. Prints '' when nothing was recorded.
 recall_column_choice() {
     local dataset_id="$1"
-    local f="$JL_WORKDIR/dataset_columns.json"
+    local f="$JL_ROOT/dataset_columns.json"
     [[ -n "$dataset_id" && -f "$f" ]] || { echo ""; return 0; }
     jq -r --arg id "$dataset_id" '.[$id] // empty' "$f"
+}
+
+# Remember which local file a dataset was made from, so a later resolve can find it
+# without asking. Shares its location and its shape with the connector, same as the
+# column map above.
+remember_dataset_csv() {
+    local dataset_id="$1" csv_path="$2"
+    [[ -n "$dataset_id" && -n "$csv_path" ]] || return 0
+    local f="$JL_ROOT/dataset_csv_map.json"
+    local existing='{}'
+    [[ -f "$f" ]] && existing="$(cat "$f")"
+    echo "$existing" | jq --arg id "$dataset_id" --arg p "$csv_path" '. + {($id): $p}' \
+        > "$f.tmp" && mv "$f.tmp" "$f"
+    info "Mapped dataset $dataset_id -> $csv_path in $f."
 }
 err()     { echo "[$(_ts)] $(_red '[err]')   $*" >&2; }
 die()     { err "$*"; exit 1; }
@@ -1572,7 +1595,7 @@ viewer_flow() {
                     my_datasets_json="$(my_datasets_in_project)"
                     [[ -n "$my_dset_id" ]] && my_dset_name="$(echo "$my_datasets_json" | jq -r --arg id "$my_dset_id" '.[] | select(.id == $id) | .name // empty')"
 
-                    local csv_map_file="$JL_WORKDIR/dataset_csv_map.json"
+                    local csv_map_file="$JL_ROOT/dataset_csv_map.json"
                     local input_csv=""
                     if [[ -n "$my_dset_id" && -f "$csv_map_file" ]]; then
                         input_csv="$(jq -r --arg id "$my_dset_id" '.[$id] // empty' "$csv_map_file")"
@@ -1590,14 +1613,7 @@ viewer_flow() {
                         fi
                         input_csv="$(pick_data_file "Originating CSV for dataset '${my_dset_name:-?}'" "${JULENNY_INPUT_CSV:-}")"
                         [[ -f "$input_csv" ]] || die "CSV not found: $input_csv"
-                        if [[ -n "$my_dset_id" ]]; then
-                            local existing_map='{}'
-                            [[ -f "$csv_map_file" ]] && existing_map="$(cat "$csv_map_file")"
-                            echo "$existing_map" \
-                                | jq --arg id "$my_dset_id" --arg p "$input_csv" '. + {($id): $p}' \
-                                > "$csv_map_file.tmp" && mv "$csv_map_file.tmp" "$csv_map_file"
-                            info "Mapped dataset $my_dset_id -> $input_csv in $csv_map_file."
-                        fi
+                        remember_dataset_csv "$my_dset_id" "$input_csv"
                     fi
 
                     local slots_csv; slots_csv="$(echo "$combine_json" | jq -r '(.significantValues // .nonZeroValues) | keys | join(",")')"
@@ -1610,9 +1626,14 @@ viewer_flow() {
                     if [[ -n "$saved_cols" ]]; then
                         info "Using the column choice recorded at encrypt time: $saved_cols"
                     else
-                        info "No column choice recorded for this dataset; using the default (all columns)."
-                        info "  If this file was encrypted on a subset of columns, say so now or nothing will match."
+                        # Every encrypt records its choice, 'all' included, so getting here
+                        # means this dataset was encrypted somewhere else. Ask rather than
+                        # assume: guessing wrong prints "no matches" and looks like an answer.
+                        warn "Nothing is recorded about how this dataset was encrypted."
+                        warn "  It was encrypted on another machine, or by another tool."
+                        warn "  Answer with the SAME columns that were used then, or nothing will match."
                         saved_cols="$(ask_column_choice "$input_name")"
+                        [[ -n "$saved_cols" ]] || saved_cols="all"
                     fi
                     RESOLVE_ARGS=(--context-spec "$JULENNY_CRYPTO_CONTEXT_SPEC" --slots "$slots_csv"
                                   --input "$input_csv" --function-def "$function_def"

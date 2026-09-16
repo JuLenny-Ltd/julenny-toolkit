@@ -42,6 +42,7 @@ import { createReadStream } from 'node:fs';
 import { JulennyApiClient } from '../api-client.js';
 import { runCli } from './lib/cli.js';
 import { resolveInWorkdir } from './lib/paths.js';
+import { promotePendingColumns } from './lib/columns.js';
 import { runRecipe, verifyFunctionDefSignature } from './lib/recipe.js';
 
 const ok = (obj: Record<string, unknown>) => ({
@@ -254,7 +255,8 @@ export function registerPipelineTools(server: McpServer, api: JulennyApiClient) 
           if (p.retentionDays !== undefined) form.append('retentionDays', String(p.retentionDays));
           const data = await api.postMultipart('/api/fhe-data-upload', form) as Record<string, unknown>;
           if (!data.datasetId) return fail('upload succeeded but no datasetId returned');
-          return ok({ datasetId: data.datasetId, via: 'multipart', bytes: size });
+          const columns = await promotePendingColumns(p.file, data.datasetId as string);
+          return ok({ datasetId: data.datasetId, via: 'multipart', bytes: size, ...(columns ? { columns: columns.columns } : {}) });
         }
 
         // Large dataset: signed-URL flow (upload-url -> PUT to object storage -> confirm).
@@ -277,7 +279,12 @@ export function registerPipelineTools(server: McpServer, api: JulennyApiClient) 
         if (p.permissionId) confirmBody.permissionId = p.permissionId;
         if (p.projectId) confirmBody.projectId = p.projectId;
         const confirmResp = await api.post('/api/fhe-data-upload/confirm', confirmBody) as Record<string, unknown>;
-        return ok({ datasetId: (confirmResp.datasetId as string) || datasetId, via: 'signed-url', bytes: size });
+        const finalId = (confirmResp.datasetId as string) || datasetId;
+        // Carry the column choice made at encrypt time across to the dataset id the
+        // platform just assigned. resolve_matches looks it up by that id; without this
+        // step the choice is stranded under a ciphertext filename nobody asks about.
+        const columns = await promotePendingColumns(p.file, finalId);
+        return ok({ datasetId: finalId, via: 'signed-url', bytes: size, ...(columns ? { columns: columns.columns } : {}) });
       } catch (e) {
         return fail(e instanceof Error ? e.message : 'upload failed');
       }

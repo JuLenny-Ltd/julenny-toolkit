@@ -252,7 +252,10 @@ for ((i = 0; i < MY_INPUT_COUNT; i++)); do
             # The owner can be the result viewer too, in which case it resolves and so needs
             # the same column choice it encrypted with. bash historically recorded this only
             # on the consumer side; the column choice must be recorded on BOTH.
-            remember_column_choice "$PICKED_ID" "${COL_CHOICE:-}"
+            remember_column_choice "$PICKED_ID" "${COL_CHOICE:-all}"
+            # And which local file it came from, so resolving days later finds it without
+            # asking. The connector reads the same two files.
+            remember_dataset_csv "$PICKED_ID" "$INPUT_FILE"
         fi
     fi
 

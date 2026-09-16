@@ -175,7 +175,7 @@ export function registerGuideTools(server: McpServer, api: JulennyApiClient) {
         let def: any;
         try { def = await api.get(`/api/functions/${perm.fheFunction}/${v}/definition`); }
         catch (e) { return fail(`could not load function definition for ${perm.fheFunction} ${v}: ${(e as Error).message}`); }
-        const inputs: Array<{ name: string; role: string; layout?: string; encodingRecipe?: unknown }> = def.inputs || [];
+        const inputs: Array<{ name: string; role: string; layout?: string; encoding?: string; encodingRecipe?: unknown }> = def.inputs || [];
 
         // Rotation state lives on the keysetup document, not the permission, and nothing
         // else in the MCP surfaced it - an agent that had submitted all three rounds had
@@ -210,6 +210,20 @@ export function registerGuideTools(server: McpServer, api: JulennyApiClient) {
               : `encrypt (or upload as-is if plaintext) -> upload -> declare_input_dataset`;
             return `input '${i.name}' (layout ${i.layout || 'n/a'}): ${steps}`;
           });
+          // Hash-matched inputs need one question answered before anything is encrypted,
+          // and the encoding is the only place it is visible. Asked afterwards it is too
+          // late in the worst way: the run completes and reports no matches, because
+          // every row was hashed with fields the other side does not hold.
+          const hashed = myInputs.some(i => i.encoding === 'indicator-hash');
+          if (hashed) {
+            actions.push(
+              "BEFORE encrypting, ASK THE USER which columns of each file identify a record: the whole line "
+              + "('all', the default), or specific columns like '1,3'. Pass the answer to encrypt as `columns`. "
+              + 'Both sides must hash the SAME FIELDS in the SAME ORDER; a file carrying extra fields the '
+              + 'other party does not hold will match nothing, and the run will report that as no overlap. '
+              + 'Do not read the file to decide, and do not ask for its contents.',
+            );
+          }
           return ok({ ...base, stage: 'provide-inputs', summary: `Provide your ${missingMine.length} undeclared input(s). Get the signed def first with get_function_definition(saveAs) if you have not.`, yourUndeclaredInputs: missingMine.map(i => i.name), nextActions: actions });
         }
 
