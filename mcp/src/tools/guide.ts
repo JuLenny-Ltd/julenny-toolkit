@@ -175,7 +175,7 @@ export function registerGuideTools(server: McpServer, api: JulennyApiClient) {
         let def: any;
         try { def = await api.get(`/api/functions/${perm.fheFunction}/${v}/definition`); }
         catch (e) { return fail(`could not load function definition for ${perm.fheFunction} ${v}: ${(e as Error).message}`); }
-        const inputs: Array<{ name: string; role: string; layout?: string; encoding?: string; encodingRecipe?: unknown }> = def.inputs || [];
+        const inputs: Array<{ name: string; role: string; layout?: string; schema?: string; encodingRecipe?: unknown }> = def.inputs || [];
 
         // Rotation state lives on the keysetup document, not the permission, and nothing
         // else in the MCP surfaced it - an agent that had submitted all three rounds had
@@ -214,7 +214,11 @@ export function registerGuideTools(server: McpServer, api: JulennyApiClient) {
           // and the encoding is the only place it is visible. Asked afterwards it is too
           // late in the worst way: the run completes and reports no matches, because
           // every row was hashed with fields the other side does not hold.
-          const hashed = myInputs.some(i => i.encoding === 'indicator-hash');
+          // `schema`, NOT `encoding`. They are different fields with different vocabularies:
+          // the overlap family is encoding 'integer-packed' and schema 'indicator-hash'.
+          // Comparing a schema name against an encoding name matches nothing, so the
+          // question would never be raised.
+          const hashed = myInputs.some(i => i.schema === 'indicator-hash');
           if (hashed) {
             actions.push(
               "BEFORE encrypting, ASK THE USER which columns of each file identify a record: the whole line "

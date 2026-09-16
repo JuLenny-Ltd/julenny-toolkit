@@ -1950,6 +1950,12 @@ function Invoke-JlEncryptAndUploadInputs {
     foreach ($inp in $myInputs) {
         $inputName = $inp.name
         $inputEnc  = "$($inp.encoding)"
+        # The hashing choice lives in `schema`, NOT `encoding`. They are different fields
+        # with different vocabularies: the overlap family is encoding 'integer-packed' and
+        # schema 'indicator-hash'. Gating the column question on `encoding` compared a
+        # schema name against an encoding name, so it matched nothing and the question was
+        # never asked.
+        $inputSchema = "$($inp.schema)"
         $inputLay  = "$($inp.layout)"
         $isBundle    = ($inputLay -eq 'encrypted-bundle')
         $isPlaintext = ($inputEnc.StartsWith('plaintext-') -and -not $isBundle)
@@ -2067,7 +2073,7 @@ function Invoke-JlEncryptAndUploadInputs {
                 # remember it: resolve must rehash exactly the same way or it matches nothing
                 # and reports zero with no error.
                 $colChoice = ''
-                if ($inputEnc -eq 'indicator-hash') {
+                if ($inputSchema -eq 'indicator-hash') {
                     $colChoice = Read-JlColumnChoice -InputName $inputName -FilePath $inputFile
                 }
 

@@ -80,6 +80,11 @@ mkdir -p "$JL_WORKDIR"
 for ((i = 0; i < MY_INPUT_COUNT; i++)); do
     INPUT_NAME="$(echo "$MY_INPUTS_JSON" | jq -r ".[$i].name")"
     INPUT_ENC="$(echo "$MY_INPUTS_JSON" | jq -r ".[$i].encoding // \"\"")"
+    # The hashing choice lives in `schema`, NOT `encoding`. They are different fields with
+    # different vocabularies: the overlap family is encoding "integer-packed" and schema
+    # "indicator-hash". Gating the column question on `encoding` compared a schema name
+    # against an encoding name, so it matched nothing and the question was never asked.
+    INPUT_SCHEMA="$(echo "$MY_INPUTS_JSON" | jq -r ".[$i].schema // \"\"")"
     IS_PLAINTEXT=false
     [[ "$INPUT_ENC" == plaintext-* ]] && IS_PLAINTEXT=true
     # encrypted-bundle: structured client-side by the encodingRecipe executor,
@@ -295,7 +300,7 @@ for ((i = 0; i < MY_INPUT_COUNT; i++)); do
             # remember it below: resolve must rehash exactly the same way or it matches
             # nothing and reports zero with no error at all.
             COL_CHOICE=""
-            if [[ "$INPUT_ENC" == "indicator-hash" ]]; then
+            if [[ "$INPUT_SCHEMA" == "indicator-hash" ]]; then
                 COL_CHOICE="$(ask_column_choice "$INPUT_NAME")"
                 [[ -n "$COL_CHOICE" ]] && info "Matching on column(s): $COL_CHOICE"
             fi
