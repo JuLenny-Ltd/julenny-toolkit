@@ -8,6 +8,7 @@ set(FHE_TOOLKIT_CORE_SOURCES
     src/registry/signature.cpp
     src/registry/trust_root.cpp
     src/crypto/signing.cpp
+    src/psi/digest.cpp
 )
 
 if(FHE_TOOLKIT_USE_OPENFHE)
