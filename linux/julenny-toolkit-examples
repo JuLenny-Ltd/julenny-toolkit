@@ -196,5 +196,7 @@ info "you can confirm the result is correct. $DEST/README.md has the full phase 
 if [[ "$ROLE" == "both" ]]; then
     echo
     info "You installed both sides. To drive them from one host, give each shell"
-    info "its own workdir (export JL_WORKDIR=...); see README.md."
+    info "its own root: export JL_ROOT=\$HOME/julenny-workdir-acme (and -beta in the"
+    info "other shell). NOT JL_WORKDIR - that one is derived per collaboration and is"
+    info "overwritten as soon as a joint key is selected. See README.md."
 fi
