@@ -775,6 +775,36 @@ function Save-JlPeerShare {
     }
 }
 
+# Ask which columns of a CSV should be matched on.
+#
+# Each party chooses independently: the two files may hold the same fields in DIFFERENT
+# positions, and an id can be column 1 here and column 3 there and still match. What the two
+# sides must agree on is the ORDER of the chosen fields when more than one is picked, because
+# they are joined in that order before hashing.
+#
+# Only meaningful for hash-based matching (indicator-hash). Returns '' for "use the default",
+# which leaves the function-def's own setting alone.
+function Read-JlColumnChoice {
+    param([Parameter(Mandatory = $true)][string] $InputName,
+          [Parameter(Mandatory = $true)][string] $FilePath)
+
+    Write-Host ""
+    Write-Host "  Which columns of this file should be matched on?"
+    Write-Host "    ENTER     all columns (default)"
+    Write-Host "    1         just column 1"
+    Write-Host "    1,3       columns 1 and 3, in that order"
+    Write-Host "  Columns are numbered from 1. The other party picks their own columns, so the"
+    Write-Host "  same field may sit in a different position on their side. If you pick more than"
+    Write-Host "  one, both sides must list the SAME FIELDS IN THE SAME ORDER or nothing will match."
+    $ans = (Read-JlValue "  Columns for '$InputName'" 'all').Trim()
+    if ($ans -eq '' -or $ans -eq 'all') { return '' }
+    if ($ans -notmatch '^[0-9]+(\s*,\s*[0-9]+)*$') {
+        Write-JlWarn "  '$ans' is not a column list. Using all columns."
+        return ''
+    }
+    return ($ans -replace '\s', '')
+}
+
 # Polls until the peer submits the named share. Backoff matches lib.sh so the
 # two sides produce comparable logs.
 function Wait-JlPeerShare {
@@ -1996,8 +2026,16 @@ function Invoke-JlEncryptAndUploadInputs {
                 Write-Host "    encoding=$inputEnc, $((Get-Item -LiteralPath $inputFile).Length) bytes"
                 Write-Host "============================================================"
 
+                # Hash-based inputs can match on a subset of columns. Ask once, here, and
+                # remember it: resolve must rehash exactly the same way or it matches nothing
+                # and reports zero with no error.
+                $colChoice = ''
+                if ($inputEnc -eq 'indicator-hash') {
+                    $colChoice = Read-JlColumnChoice -InputName $inputName -FilePath $inputFile
+                }
+
                 $ciphertext = Join-Path $script:JL_KEYS_DIR "$base.$inputName.enc.bin"
-                Invoke-JlCli @(
+                $encryptArgs = @(
                     'crypto', 'encrypt',
                     '--input',            $inputFile,
                     '--joint-public-key', $jointPk,
@@ -2005,6 +2043,11 @@ function Invoke-JlEncryptAndUploadInputs {
                     '--function-def',     $functionDefPath,
                     '--input-name',       $inputName
                 )
+                if ($colChoice) {
+                    $encryptArgs += @('--columns', $colChoice)
+                    Write-JlInfo "Matching on column(s): $colChoice"
+                }
+                Invoke-JlCli $encryptArgs
                 Write-JlSuccess "Encrypted: $ciphertext ($((Get-Item -LiteralPath $ciphertext).Length) bytes)"
 
                 $pickedId = Send-JlDataset -FilePath $ciphertext -DatasetName $datasetName -Kind 'ciphertext' -InputName $inputName
@@ -2017,6 +2060,11 @@ function Invoke-JlEncryptAndUploadInputs {
                 # version only writes this on the consumer side.)
                 Set-JlJsonMapEntry -Path $csvMapFile -Key $pickedId -Value $inputFile
                 Write-JlInfo "Mapped dataset $pickedId -> $inputFile in $csvMapFile."
+                if ($colChoice) {
+                    Set-JlJsonMapEntry -Path (Join-Path $script:JL_WORKDIR 'dataset_columns.json') `
+                                       -Key $pickedId -Value $colChoice
+                    Write-JlInfo "Remembered column choice '$colChoice' for dataset $pickedId."
+                }
             }
         }
 
@@ -2978,7 +3026,26 @@ function Invoke-JlViewerFlow {
                 $slotsCsv = (Get-JlNonZeroSlots $combine) -join ','
                 Write-Host ""
                 Write-JlStep "Resolving $nonZero non-zero slot(s) against $inputCsv..."
-                $resolved = Invoke-JlCli -PassThru @(
+                # Rehash EXACTLY as encrypt did. The column choice was recorded at encrypt
+                # time; without it a subset-encrypted file rehashes over every column, matches
+                # nothing, and reports zero matches with no error anywhere.
+                $colsFile = Join-Path $script:JL_WORKDIR 'dataset_columns.json'
+                $savedCols = ''
+                if ($myDsetId -and (Test-Path -LiteralPath $colsFile)) {
+                    try {
+                        $cm = Get-Content -LiteralPath $colsFile -Raw | ConvertFrom-Json
+                        if (Test-JlHasProperty $cm $myDsetId) { $savedCols = "$($cm.$myDsetId)" }
+                    } catch { }
+                }
+                if ($savedCols) {
+                    Write-JlInfo "Using the column choice recorded at encrypt time: $savedCols"
+                } else {
+                    Write-JlInfo "No column choice recorded for this dataset; using the function's default (all columns)."
+                    Write-JlInfo "  If this file was encrypted on a subset of columns, say so now or nothing will match."
+                    $savedCols = Read-JlColumnChoice -InputName $inputName -FilePath $inputCsv
+                }
+
+                $resolveArgs = @(
                     'crypto', 'resolve-indicator',
                     '--context-spec', $script:JULENNY_CRYPTO_CONTEXT_SPEC,
                     '--slots',        $slotsCsv,
@@ -2986,6 +3053,8 @@ function Invoke-JlViewerFlow {
                     '--function-def', $functionDefPath,
                     '--input-name',   $inputName
                 )
+                if ($savedCols) { $resolveArgs += @('--columns', $savedCols) }
+                $resolved = Invoke-JlCli -PassThru $resolveArgs
                 Write-Host $resolved
             }
         }

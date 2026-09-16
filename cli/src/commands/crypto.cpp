@@ -869,7 +869,13 @@ int run_crypto_encrypt(const CryptoEncryptArgs& args) {
         json params = input_def.value("schemaParams", json::object());
         sep_str     = params.value("separator", std::string{});
         skip_header = params.value("skipHeader", false);
-        cols_spec   = params.value("columns", std::string{"all"});
+        // --columns overrides the function-def here too, not just in schema mode. The column
+        // choice is a property of THIS party's file, not of the shared function: the two
+        // sides may hold the same fields in different positions, and each selects its own.
+        // The function-def default stays "all", so nothing changes unless a caller asks.
+        cols_spec   = args.columns.empty()
+            ? params.value("columns", std::string{"all"})
+            : args.columns;
     } else {
         // Mode B: explicit-flag.
         schema_name = args.schema;
@@ -2242,7 +2248,13 @@ int run_crypto_resolve_indicator(const CryptoResolveIndicatorArgs& args) {
     const json params = input_def.value("schemaParams", json::object());
     const std::string sep_str = params.value("separator", std::string{});
     const bool skip_header    = params.value("skipHeader", false);
-    const std::string cols_spec = params.value("columns", std::string{"all"});
+    // An explicit --columns wins over the function-def, because the party may have encrypted
+    // a subset. Each side chooses its own columns: the two CSVs can hold the same fields in
+    // different positions. What must agree between the sides is the ORDER of the chosen
+    // columns, since they are joined in the order given before hashing.
+    const std::string cols_spec = args.columns.empty()
+        ? params.value("columns", std::string{"all"})
+        : args.columns;
 
     const char sep_char = sep_str.empty() ? '\0' : sep_str[0];
     auto cols = parse_columns_spec(cols_spec);
@@ -2768,7 +2780,10 @@ void register_crypto(CLI::App& app,
                         "empty/omitted means hash the whole line. Mode B only.");
     encrypt->add_option("--columns", encrypt_args.columns,
                         "Columns to include in indicator-hash: 'all' or comma-separated 1-based "
-                        "indices like '1,2'. Default 'all'. Mode B only.");
+                        "indices like '1,3'. Default: whatever the function-def says ('all'). "
+                        "Overrides the function-def, so each party can pick the columns that "
+                        "suit ITS file. Pass the SAME spec to 'crypto resolve-indicator' later, "
+                        "or the rehash will match nothing.");
     encrypt->add_flag  ("--skip-header", encrypt_args.skip_header,
                         "Skip the first non-blank line of the input. Mode B only.");
     encrypt->add_option("--context-spec", encrypt_args.context_spec,
@@ -3066,6 +3081,10 @@ void register_crypto(CLI::App& app,
                         "Which input in the function-def this CSV is for (e.g. 'dataset_a')")->required();
     resolve->add_option("--context-spec", resolve_indicator_args.context_spec,
                         "Crypto context spec (default: bfv-default-v1)");
+    resolve->add_option("--columns", resolve_indicator_args.columns,
+                        "Columns that were hashed at encrypt time: 'all' or comma-separated "
+                        "1-based indices like '1,3'. MUST match what --columns was at encrypt, "
+                        "or nothing will match. Default: whatever the function-def says.");
     resolve->add_flag  ("--json", resolve_indicator_args.emit_json, "Emit JSON output");
     resolve->callback([&resolve_indicator_args, exit_code]() {
         *exit_code = run_crypto_resolve_indicator(resolve_indicator_args);

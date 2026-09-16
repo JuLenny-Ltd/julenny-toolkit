@@ -69,6 +69,57 @@ _ts()     { date '+%H:%M:%S'; }
 info()    { echo "[$(_ts)] $(_blue '[info]')   $*" >&2; }
 success() { echo "[$(_ts)] $(_green '[ok]')    $*" >&2; }
 warn()    { echo "[$(_ts)] $(_yellow '[warn]')  $*" >&2; }
+
+# ---- column selection for hash-based matching (twins in lib.ps1) ----
+#
+# Each party chooses independently: the two files may hold the same fields in DIFFERENT
+# positions, so an id can be column 1 here and column 3 there and still match. What both
+# sides must agree on is the ORDER of the chosen fields when more than one is picked,
+# because they are joined in that order before hashing.
+#
+# Prints '' for "use the function-def default", which leaves current behaviour alone.
+ask_column_choice() {
+    local input_name="$1"
+    local ans=""
+    {
+        echo
+        echo "  Which columns of this file should be matched on?"
+        echo "    ENTER     all columns (default)"
+        echo "    1         just column 1"
+        echo "    1,3       columns 1 and 3, in that order"
+        echo "  Columns are numbered from 1. The other party picks their own columns, so the"
+        echo "  same field may sit in a different position on their side. If you pick more than"
+        echo "  one, both sides must list the SAME FIELDS IN THE SAME ORDER or nothing will match."
+        printf "  Columns for '%s' [all]: " "$input_name"
+    } >&2
+    read -r ans < /dev/tty || ans=""
+    ans="$(echo "$ans" | tr -d '[:space:]')"
+    if [[ -z "$ans" || "$ans" == "all" ]]; then echo ""; return 0; fi
+    if [[ ! "$ans" =~ ^[0-9]+(,[0-9]+)*$ ]]; then
+        warn "  '$ans' is not a column list. Using all columns."
+        echo ""; return 0
+    fi
+    echo "$ans"
+}
+
+# Remember the choice so resolve can rehash identically, possibly days later.
+remember_column_choice() {
+    local dataset_id="$1" cols="$2"
+    [[ -n "$dataset_id" && -n "$cols" ]] || return 0
+    local f="$JL_WORKDIR/dataset_columns.json"
+    local existing='{}'
+    [[ -f "$f" ]] && existing="$(cat "$f")"
+    echo "$existing" | jq --arg id "$dataset_id" --arg c "$cols" '. + {($id): $c}'         > "$f.tmp" && mv "$f.tmp" "$f"
+    info "Remembered column choice '$cols' for dataset $dataset_id."
+}
+
+# Read back what was chosen at encrypt time. Prints '' when nothing was recorded.
+recall_column_choice() {
+    local dataset_id="$1"
+    local f="$JL_WORKDIR/dataset_columns.json"
+    [[ -n "$dataset_id" && -f "$f" ]] || { echo ""; return 0; }
+    jq -r --arg id "$dataset_id" '.[$id] // empty' "$f"
+}
 err()     { echo "[$(_ts)] $(_red '[err]')   $*" >&2; }
 die()     { err "$*"; exit 1; }
 
@@ -1516,12 +1567,22 @@ viewer_flow() {
                     local slots_csv; slots_csv="$(echo "$combine_json" | jq -r '(.significantValues // .nonZeroValues) | keys | join(",")')"
                     echo
                     step "Resolving $non_zero non-zero slot(s) against $input_csv..."
-                    julenny-toolkit crypto resolve-indicator \
-                        --context-spec "$JULENNY_CRYPTO_CONTEXT_SPEC" \
-                        --slots "$slots_csv" \
-                        --input "$input_csv" \
-                        --function-def "$function_def" \
-                        --input-name "$input_name"
+                    # Rehash EXACTLY as encrypt did, using the column choice recorded then. Without
+                    # it a subset-encrypted file rehashes over every column, matches nothing, and
+                    # reports zero matches with no error anywhere.
+                    saved_cols="$(recall_column_choice "$my_dset_id")"
+                    if [[ -n "$saved_cols" ]]; then
+                        info "Using the column choice recorded at encrypt time: $saved_cols"
+                    else
+                        info "No column choice recorded for this dataset; using the default (all columns)."
+                        info "  If this file was encrypted on a subset of columns, say so now or nothing will match."
+                        saved_cols="$(ask_column_choice "$input_name")"
+                    fi
+                    RESOLVE_ARGS=(--context-spec "$JULENNY_CRYPTO_CONTEXT_SPEC" --slots "$slots_csv"
+                                  --input "$input_csv" --function-def "$function_def"
+                                  --input-name "$input_name")
+                    [[ -n "$saved_cols" ]] && RESOLVE_ARGS+=(--columns "$saved_cols")
+                    julenny-toolkit crypto resolve-indicator "${RESOLVE_ARGS[@]}"
                 fi
             fi
             ;;

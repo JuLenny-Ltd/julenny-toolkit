@@ -291,13 +291,19 @@ for ((i = 0; i < MY_INPUT_COUNT; i++)); do
             echo "============================================================"
 
             CIPHERTEXT="$JL_KEYS_DIR/$(basename "$INPUT_FILE").$INPUT_NAME.enc.bin"
-            julenny-toolkit crypto encrypt \
-                --input "$INPUT_FILE" \
-                --joint-public-key "$JOINT_PK" \
-                --output "$CIPHERTEXT" \
-                --function-def "$FUNCTION_DEF" \
-                --input-name "$INPUT_NAME" \
-                > /dev/null
+            # Hash-based inputs can match on a subset of columns. Ask once, here, and
+            # remember it below: resolve must rehash exactly the same way or it matches
+            # nothing and reports zero with no error at all.
+            COL_CHOICE=""
+            if [[ "$INPUT_ENC" == "indicator-hash" ]]; then
+                COL_CHOICE="$(ask_column_choice "$INPUT_NAME")"
+                [[ -n "$COL_CHOICE" ]] && info "Matching on column(s): $COL_CHOICE"
+            fi
+            ENC_ARGS=(--input "$INPUT_FILE" --joint-public-key "$JOINT_PK"
+                      --output "$CIPHERTEXT" --function-def "$FUNCTION_DEF"
+                      --input-name "$INPUT_NAME")
+            [[ -n "$COL_CHOICE" ]] && ENC_ARGS+=(--columns "$COL_CHOICE")
+            julenny-toolkit crypto encrypt "${ENC_ARGS[@]}" > /dev/null
             success "Encrypted: $CIPHERTEXT ($(stat -c%s "$CIPHERTEXT") bytes)"
 
             UPLOAD_SIZE="$(stat -c%s "$CIPHERTEXT")"
@@ -359,6 +365,7 @@ for ((i = 0; i < MY_INPUT_COUNT; i++)); do
                 > "$CSV_MAP_FILE.tmp" \
                 && mv "$CSV_MAP_FILE.tmp" "$CSV_MAP_FILE"
             info "Mapped dataset $PICKED_ID -> $INPUT_FILE in $CSV_MAP_FILE."
+            remember_column_choice "$PICKED_ID" "${COL_CHOICE:-}"
         fi
     fi
 

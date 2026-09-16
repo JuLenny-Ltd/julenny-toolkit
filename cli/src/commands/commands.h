@@ -230,6 +230,12 @@ struct CryptoResolveIndicatorArgs {
     std::string function_def_path;  // function-def JSON for schema params
     std::string input_name;         // which input in the function-def is this dataset for
     std::string context_spec;          // no default; callers must pass --context-spec (or --function-def for encrypt)
+    // Column override, matching encrypt's --columns. Resolve RE-HASHES the local CSV, so it
+    // must compose each row exactly as encrypt did. Reading the spec from the function-def
+    // alone is wrong the moment a party encrypts a subset of columns: the rehash would use
+    // every column, match nothing, and report zero matches with no error at all.
+    // Empty means "use whatever the function-def says", preserving old behaviour.
+    std::string columns;
     bool emit_json = false;
 };
 
