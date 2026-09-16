@@ -11,6 +11,7 @@ set(FHE_TOOLKIT_CORE_SOURCES
     src/psi/digest.cpp
     src/psi/table.cpp
     src/psi/reference.cpp
+    src/psi/solver.cpp
 )
 
 if(FHE_TOOLKIT_USE_OPENFHE)
