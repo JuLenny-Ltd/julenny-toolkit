@@ -1,0 +1,11 @@
+{
+  "name": "bfv-exact-psi-v1",
+  "scheme": "BFV",
+  "ringDimension": 32768,
+  "securityLevel": 128,
+  "multiplicativeDepth": 19,
+  "plaintextModulus": 65537,
+  "keySwitchTechnique": "BV",
+  "multipartyMode": "NOISE_FLOODING_MULTIPARTY",
+  "notes": "Exact PSI over signature tables (plans/exact-psi-signature-tables.md). Depth 19 = 16 squarings for the Fermat zero test (t - 1 = 2^16) + ceil(log2 8) = 3 for the AND over k <= 8 limbs of 16 bits (128-bit signatures). Key switching MUST be BV: under HYBRID, OpenFHE 1.5 lands this depth at ring 65536, where t = 65537 has no packed slots (2N does not divide t - 1); under BV it lands at 32768 with 32768 slots, 14 towers, logQ 840, ciphertext 7342363 bytes (scratch/psi-spike/A1-RESULTS.md). ringDimension is pinned so that a library change that needs a larger ring fails loudly instead of silently moving to a ring with no slots. Measured headroom after the depth-19 circuit is about 4 levels (A2-RESULTS.md); depth 20 does not fit this ring, so k > 8 needs a different context. EvalSum keys under BV cost about 1.47 GiB. OpenFHE 1.5.0 and 1.5.1 produce byte-identical parameters. MUST match the toolkit's get_crypto_context_spec entry field for field (step D1)."
+}

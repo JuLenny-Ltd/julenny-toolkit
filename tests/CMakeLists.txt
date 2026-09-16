@@ -12,6 +12,7 @@ if(FHE_TOOLKIT_USE_OPENFHE)
         crypto/keys_test.cpp
         crypto/ciphertext_test.cpp
         crypto/multiparty_test.cpp
+        crypto/context_spec_test.cpp
     )
 endif()
 

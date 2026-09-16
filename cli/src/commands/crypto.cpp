@@ -179,11 +179,13 @@ std::string compose_record(const std::string& line,
 constexpr std::int64_t BFV_DEFAULT_V1_SLOTS  = 16384;
 constexpr std::int64_t CKKS_DEFAULT_V1_SLOTS = 8192;   // ringDim/2 for CKKS
 constexpr std::int64_t CKKS_TREE_V1_SLOTS    = 32768;  // ringDim/2 for ckks-tree-v1 (ring 65536)
+constexpr std::int64_t BFV_EXACT_PSI_V1_SLOTS = 32768; // ringDim for bfv-exact-psi-v1 (65537 = 1 mod 65536)
 
 std::int64_t resolve_slot_count(std::string_view context_spec_id) {
     if (context_spec_id == "bfv-default-v1")  return BFV_DEFAULT_V1_SLOTS;
     if (context_spec_id == "ckks-default-v1") return CKKS_DEFAULT_V1_SLOTS;
     if (context_spec_id == "ckks-tree-v1")    return CKKS_TREE_V1_SLOTS;
+    if (context_spec_id == "bfv-exact-psi-v1") return BFV_EXACT_PSI_V1_SLOTS;
     throw std::runtime_error("unknown context spec: " + std::string(context_spec_id));
 }
 

@@ -165,6 +165,24 @@ std::optional<CryptoContextSpec> get_crypto_context_spec(std::string_view id) {
         s.noise_estimate = 30.0;  // must match wrapper's ckks-tree-v1 SetNoiseEstimate
         return s;
     }
+    if (id == "bfv-exact-psi-v1") {
+        // Exact PSI over signature tables: depth 19 = 16 Fermat squarings +
+        // a 3-level AND over k <= 8 limbs. MUST match the platform's
+        // backend/schemas/seed-data/bfv-exact-psi-v1.json field for field.
+        // BV is load-bearing: under HYBRID this depth lands at ring 65536,
+        // where t = 65537 has no packed slots. The ring is pinned so a
+        // library change fails loudly rather than moving rings.
+        CryptoContextSpec s;
+        s.id = "bfv-exact-psi-v1";
+        s.scheme = "BFV";
+        s.plaintext_modulus = 65537;
+        s.security_level = "HEStd_128_classic";
+        s.multiplicative_depth = 19;
+        s.ring_dimension = 32768;
+        s.key_switch_technique = "BV";
+        s.multiparty_mode = "NOISE_FLOODING_MULTIPARTY";
+        return s;
+    }
     return std::nullopt;
 }
 
