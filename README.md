@@ -104,7 +104,7 @@ On Linux the command is simply `julenny-mcp`, since the `.deb` puts it on your `
 | Claude Desktop, Windows | Nothing. The installer does it. Appears under **Settings → Developer**, not Connectors |
 | Cursor | Edit `~/.cursor/mcp.json` (global) or `.cursor/mcp.json` (per project), using the shape above |
 | VS Code, GitHub Copilot | Edit `.vscode/mcp.json`, which uses a `servers` key rather than `mcpServers` |
-| Claude Desktop, Linux (beta) | Run `/usr/share/julenny-toolkit/merge-claude-config.sh <api-key>` (needs `jq`, and Claude Desktop must be closed) |
+| Claude Desktop, Linux (beta) | Run `/usr/share/julenny-toolkit/merge-claude-config.sh <api-key> /usr/bin/julenny-mcp https://julenny.net JuLenny ~/julenny-workdir` (needs `jq`, and Claude Desktop must be closed). The last argument is the working folder; it is recorded so the example scripts use the same one |
 | Windsurf, Zed, Continue | Edit their own MCP config; the `mcpServers` shape above applies |
 
 Claude Code running inside VS Code uses the `claude mcp` configuration above, not the
@@ -120,7 +120,14 @@ Copilot `.vscode/mcp.json` file. They are separate systems.
 > A Store install ignores the `%APPDATA%` file completely. If you edit your API key by hand
 > and nothing changes, check which file your install actually reads.
 
-`JULENNY_WORKDIR` is the folder the server reads and writes. It is confined to that folder by design: absolute paths, `..` segments and symlinks pointing outside are all rejected, so the server cannot read anything else on your machine. Put the files you want encrypted inside it and refer to them by name. If the variable is omitted, the default is `%LOCALAPPDATA%\julenny-toolkit\workdir` on Windows and `$XDG_DATA_HOME/julenny-toolkit/workdir` on Linux.
+`JULENNY_WORKDIR` is the folder the server reads and writes. It is confined to that folder by design: absolute paths, `..` segments and symlinks pointing outside are all rejected, so the server cannot read anything else on your machine. Put the files you want encrypted inside it and refer to them by name.
+
+It is also **the same folder the example scripts use**, so a collaboration can be started with the scripts and continued from Claude, or the other way round. When the variable is not set, both resolve the folder the same way:
+
+1. the path recorded at install time: `HKCU\Software\JuLenny\Toolkit\WorkDir` on Windows, `~/.config/julenny/workdir` on Linux
+2. otherwise `%USERPROFILE%\julenny-workdir` on Windows, `~/julenny-workdir` on Linux
+
+Your own data files sit flat at the top of it. Below that, `signing/` holds your account signing keys and `collabs/<jointKeyId>/` holds one folder of state per collaboration.
 
 The MCP server never performs cryptography itself. It shells out to the `julenny-toolkit` CLI for every key operation and only ever transports ciphertext, so your keys and plaintext stay on your machine regardless of which client drives it.
 

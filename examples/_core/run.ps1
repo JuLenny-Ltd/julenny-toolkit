@@ -353,7 +353,7 @@ switch -Regex ($ksState) {
             Write-JlErr "That secret share was produced by the original keysetup. Without it, this"
             Write-JlErr "machine can't contribute partial decryptions, so we can't proceed."
             Write-Host ""
-            Write-JlErr "Recovery: restore ~\.julenny-collab from the machine that participated in"
+            Write-JlErr "Recovery: restore your working folder from the machine that participated in"
             Write-JlErr "the keysetup, or create a NEW collaboration so a fresh keysetup generates"
             Write-JlErr "a new secret share on this machine."
             Stop-JlWithError "Cannot proceed."

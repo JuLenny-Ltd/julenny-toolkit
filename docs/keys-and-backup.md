@@ -6,10 +6,17 @@ this once before you run anything important.
 
 ## Where the toolkit keeps things
 
-Each collaboration gets its own folder under your home directory:
+Everything lives in **one working folder**, shared by the example scripts, the
+connector (the MCP server) and the CLI. By default that is `~/julenny-workdir`
+(`%USERPROFILE%\julenny-workdir` on Windows). If you chose a different folder
+when you installed, that choice was recorded and all three use it.
+
+Your own data files sit flat at the top. Each collaboration gets a folder of its
+own below that:
 
 ```
-~/.julenny-collab/
+~/julenny-workdir/
+  customers.csv                 # your own files, at the top level
   signing/
     signing_secret_key.bin      # your company signing identity (per company)
     signing_public_key.bin
@@ -45,11 +52,11 @@ joint key**, and it never leaves your machine.
 
 ## Back up the irreplaceable parts
 
-Back up the whole `~/.julenny-collab/` directory (or at minimum the `signing/`
-folder and every `keys/` folder's secret share) somewhere safe and private:
+Back up the whole working folder (or at minimum the `signing/` folder and every
+`keys/` folder's secret share) somewhere safe and private:
 
 ```bash
-tar czf julenny-collab-backup-$(date +%Y%m%d).tgz -C "$HOME" .julenny-collab
+tar czf julenny-backup-$(date +%Y%m%d).tgz -C "$HOME" julenny-workdir
 # store the .tgz on encrypted, access-controlled storage
 ```
 
@@ -64,7 +71,7 @@ collaboration was completed on a **different machine** (or a machine that was
 since wiped) and this one does not have your secret share. The share cannot be
 downloaded - it only ever existed on the machine that ran keysetup. Recover by:
 
-1. **Restore** `~/.julenny-collab/` from your backup (or copy the secret share
+1. **Restore** your working folder from your backup (or copy the secret share
    from the machine that participated in the keysetup), or
 2. **Create a new collaboration** so a fresh keysetup generates a new secret
    share on this machine.

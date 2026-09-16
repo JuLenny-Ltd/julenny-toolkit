@@ -22,7 +22,7 @@
 # permission. If zero permissions are found under a Beta-side collaboration,
 # the script tells Beta to wait for Acme to add one.
 #
-# Saves everything to ~/.julenny-collab/config.env so later scripts pick
+# Saves everything to <workdir>/collabs/<jointKeyId>/config.env so later scripts pick
 # it up automatically.
 
 set -euo pipefail

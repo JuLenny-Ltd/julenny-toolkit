@@ -115,8 +115,13 @@ Root: HKCU; Subkey: "Environment"; ValueType: expandsz; ValueName: "Path"; \
 ; Remember the working folder. Without this an upgrade silently reverted it to the default,
 ; and since the [Run] step rewrites JULENNY_WORKDIR in the Claude Desktop config, the user's
 ; existing keys and datasets became invisible to the MCP with nothing to indicate why.
+;
+; Written for EVERY component since v0.7.5, not only the MCP. This value is now the single
+; source of truth for the working folder and the example scripts read it too (lib.ps1's
+; Get-JlResolvedRoot). Writing it only when the MCP was selected left a scripts-only
+; install falling back to the default folder while the user had chosen another one here.
 Root: HKCU; Subkey: "Software\JuLenny\Toolkit"; ValueType: string; ValueName: "WorkDir"; \
-  ValueData: "{code:GetWorkdir}"; Flags: uninsdeletevalue; Components: mcp
+  ValueData: "{code:GetWorkdir}"; Flags: uninsdeletevalue
 
 ; Same for the examples page. An upgrade used to reset the side back to "Data owner" and
 ; the folder back to Documents, quietly copying a different layout over an existing setup.
@@ -307,13 +312,14 @@ begin
     'Claude Desktop''s configuration. (Only used if you install the MCP server.)');
   ApiKeyPage.Add('API key:', False);
 
-  // Folder picker with a Browse... button. Prefilled with the MCP's default so
-  // the value is always valid; the user can Browse to a different folder.
+  // Folder picker with a Browse... button. Prefilled with a valid default so the
+  // value is always usable; the user can Browse to a different folder.
   WorkdirPage := CreateInputDirPage(ApiKeyPage.ID,
     'JuLenny working folder',
-    'Where should the MCP store keys, datasets and results?',
-    'The default is filled in below. Click Browse to choose a different folder.' + #13#10 +
-    '(Only used if you install the MCP server.)',
+    'Where should JuLenny keep your keys, datasets and results?',
+    'One folder is shared by everything: the connector, the example scripts and the' + #13#10 +
+    'command line. Put your own data files in it and all three can see them.' + #13#10 +
+    'The default is filled in below. Click Browse to choose a different folder.',
     False, '');
   WorkdirPage.Add('');
   // Prefer the folder chosen by a previous install; fall back to the default only on a first
@@ -323,7 +329,10 @@ begin
   if PrevWorkdir <> '' then
     WorkdirPage.Values[0] := PrevWorkdir
   else
-    WorkdirPage.Values[0] := ExpandConstant('{localappdata}\julenny-toolkit\workdir');
+    // v0.7.5: a folder the user can find, not a hidden one under AppData. The example
+    // scripts share it now, and a folder people are told to drop CSV files into has to
+    // be somewhere they can reach in Explorer.
+    WorkdirPage.Values[0] := ExpandConstant('{userprofile}\julenny-workdir');
   // Swap the legacy folder-tree Browse for the modern IFileDialog picker.
   WorkdirPage.Buttons[0].OnClick := @BrowseClick;
 

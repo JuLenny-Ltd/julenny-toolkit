@@ -25,7 +25,8 @@ set -euo pipefail
 : "${JL_SECRET_SHARE_FILE:?side profile not sourced; JL_SECRET_SHARE_FILE unset}"
 
 # -------- Path layout --------
-# Root workdir on this machine. Holds:
+# ONE working folder on this machine, shared with the connector. Holds:
+#   <your data files>           CSVs and other inputs, flat at the top.
 #   signing/                    Ed25519 signing keys (account-scoped, scheme-agnostic).
 #                               Reused across every collaboration.
 #   collabs/<jointKeyId>/       Per-collaboration state: config.env, keys/,
@@ -35,8 +36,43 @@ set -euo pipefail
 #                               the default when load_session is called by a
 #                               numbered script.
 #
-# Set JL_ROOT in the environment to point at a different root (handy for tests).
-JL_ROOT="${JL_ROOT:-$HOME/.julenny-collab}"
+# Until v0.7.5 the scripts kept all of this under ~/.julenny-collab while the connector
+# (the MCP server) used a folder of its own, so a collaboration started on one surface
+# could not be continued on the other and key material had to be copied by hand. There is
+# now ONE root, resolved the SAME WAY by the scripts, the connector and the installers:
+#
+#   1. JL_ROOT             - test override; keeps two sides apart on one machine
+#   2. JULENNY_WORKDIR     - the folder the user picked at install time (also the
+#                            variable the connector has always read)
+#   3. the saved setting   - $XDG_CONFIG_HOME/julenny/workdir here; the registry value
+#                            HKCU\Software\JuLenny\Toolkit\WorkDir on Windows
+#   4. $HOME/julenny-workdir
+#
+# Your own data files live flat at the top of this folder: the connector accepts plain
+# file names only, so that is where it looks for them.
+#
+# Keep this list in step with mcp/src/tools/lib/paths.ts and examples/_core/lib.ps1. A
+# mismatch does not fail loudly - each surface simply works in a different folder and
+# reports that the other one's files are not there.
+_jl_settings_file() {
+    printf '%s/julenny/workdir' "${XDG_CONFIG_HOME:-$HOME/.config}"
+}
+
+_jl_resolve_root() {
+    if [[ -n "${JL_ROOT:-}" ]]; then printf '%s' "$JL_ROOT"; return; fi
+    if [[ -n "${JULENNY_WORKDIR:-}" ]]; then printf '%s' "$JULENNY_WORKDIR"; return; fi
+    local settings saved
+    settings="$(_jl_settings_file)"
+    if [[ -f "$settings" ]]; then
+        # One line of text. Tolerate CRLF, surrounding blanks and a trailing newline:
+        # this file is written by a package postinst and edited by hand.
+        saved="$(tr -d '\r' < "$settings" | head -n 1 | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')"
+        if [[ -n "$saved" ]]; then printf '%s' "$saved"; return; fi
+    fi
+    printf '%s/julenny-workdir' "$HOME"
+}
+
+JL_ROOT="$(_jl_resolve_root)"
 JL_SIGNING_DIR="$JL_ROOT/signing"
 JL_SIGNING_SECRET="$JL_SIGNING_DIR/signing_secret_key.bin"
 JL_SIGNING_PUBLIC="$JL_SIGNING_DIR/signing_public_key.bin"

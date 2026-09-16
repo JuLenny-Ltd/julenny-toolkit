@@ -386,7 +386,7 @@ case "$KS_STATE" in
             err "That secret share was produced by the original keysetup. Without it, this"
             err "machine can't contribute partial decryptions, so we can't proceed."
             echo
-            err "Recovery: restore ~/.julenny-collab from the machine that participated in"
+            err "Recovery: restore your working folder from the machine that participated in"
             err "the keysetup, or create a NEW collaboration so a fresh keysetup generates"
             err "a new secret share on this machine."
             die "Cannot proceed."

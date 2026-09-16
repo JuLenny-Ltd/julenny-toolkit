@@ -20,7 +20,7 @@
 #      collaboration. Same scheme/function picker as the new-collaboration
 #      branch.
 #
-# Saves everything to ~/.julenny-collab/config.env so later scripts pick
+# Saves everything to <workdir>/collabs/<jointKeyId>/config.env so later scripts pick
 # it up automatically.
 
 set -euo pipefail

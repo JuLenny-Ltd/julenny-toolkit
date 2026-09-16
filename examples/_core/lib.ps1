@@ -61,7 +61,8 @@ if (-not (Get-Variable -Name JULENNY_OUR_SIDE -Scope Script -ErrorAction Silentl
 # Used to locate recipe\recipe-encode.mjs.
 $script:JL_CORE_DIR = $PSScriptRoot
 
-# Root workdir on this machine. Holds:
+# ONE working folder on this machine, shared with the connector. Holds:
+#   <your data files>           CSVs and other inputs, flat at the top.
 #   signing\                    Ed25519 signing keys (account-scoped,
 #                               scheme-agnostic). Reused across collaborations.
 #   collabs\<jointKeyId>\       Per-collaboration state: config.env, keys\,
@@ -69,12 +70,38 @@ $script:JL_CORE_DIR = $PSScriptRoot
 #   CURRENT                     Plain text file holding the joint key id of the
 #                               most recently activated collab.
 #
-# Set JL_WORKDIR_ROOT (or the JL_ROOT env var, matching lib.sh) to relocate it.
-if ($env:JL_ROOT) {
-    $script:JL_ROOT = $env:JL_ROOT
-} else {
-    $script:JL_ROOT = Join-Path ([Environment]::GetFolderPath('UserProfile')) '.julenny-collab'
+# Until v0.7.5 the scripts kept all of this under ~\.julenny-collab while the connector
+# (the MCP server) used a folder of its own, so a collaboration started on one surface
+# could not be continued on the other and key material had to be copied by hand. There is
+# now ONE root, resolved the SAME WAY by the scripts, the connector and the installers:
+#
+#   1. JL_ROOT             - test override; keeps two sides apart on one machine
+#   2. JULENNY_WORKDIR     - the folder the user picked at install time (also the
+#                            variable the connector has always read)
+#   3. the saved setting   - HKCU\Software\JuLenny\Toolkit\WorkDir, written by the
+#                            installer ($XDG_CONFIG_HOME/julenny/workdir on Linux)
+#   4. %USERPROFILE%\julenny-workdir
+#
+# Your own data files live flat at the top of this folder: the connector accepts plain
+# file names only, so that is where it looks for them.
+#
+# Keep this list in step with mcp/src/tools/lib/paths.ts and examples/_core/lib.sh. A
+# mismatch does not fail loudly - each surface simply works in a different folder and
+# reports that the other one's files are not there.
+function Get-JlResolvedRoot {
+    if ($env:JL_ROOT)         { return $env:JL_ROOT }
+    if ($env:JULENNY_WORKDIR) { return $env:JULENNY_WORKDIR }
+    try {
+        $saved = (Get-ItemProperty -Path 'HKCU:\Software\JuLenny\Toolkit' `
+                                   -Name 'WorkDir' -ErrorAction Stop).WorkDir
+        if ($saved -and "$saved".Trim()) { return "$saved".Trim() }
+    } catch {
+        # No installer has run on this machine, or the value was removed. Fall through
+        # to the default rather than failing: the scripts must work from a git checkout.
+    }
+    return (Join-Path ([Environment]::GetFolderPath('UserProfile')) 'julenny-workdir')
 }
+$script:JL_ROOT = Get-JlResolvedRoot
 $script:JL_SIGNING_DIR    = Join-Path $script:JL_ROOT 'signing'
 $script:JL_SIGNING_SECRET = Join-Path $script:JL_SIGNING_DIR 'signing_secret_key.bin'
 $script:JL_SIGNING_PUBLIC = Join-Path $script:JL_SIGNING_DIR 'signing_public_key.bin'
@@ -1054,7 +1081,7 @@ function Get-JlFunctionDefObject {
     if ([string]::IsNullOrWhiteSpace($Path)) {
         # On a first run there is no collaboration store yet, so JL_WORKDIR is empty and
         # Join-Path THROWS rather than returning a path that simply does not exist - which
-        # killed run.ps1 before its first prompt on any machine without ~/.julenny-collab.
+        # killed run.ps1 before its first prompt on any machine without a working folder.
         # No workdir means no function definition, which is what every caller expects.
         if ([string]::IsNullOrWhiteSpace($script:JL_WORKDIR)) { return $null }
         $Path = Join-Path $script:JL_WORKDIR 'function-def.json'

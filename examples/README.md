@@ -163,8 +163,12 @@ On each party's machine:
 - Your partner's collaboration ID (`XXXX-XXXX`) if you're creating a new
   collaboration.
 
-Per-collaboration state (config, key shares, downloaded artifacts) lives under
-`~/.julenny-collab/`. Your secret key share never leaves your machine.
+Per-collaboration state (config, key shares, downloaded artifacts) lives in your
+working folder, under `collabs/<jointKeyId>/`. That folder is `~/julenny-workdir`
+(`%USERPROFILE%\julenny-workdir` on Windows) unless you chose another one when you
+installed, and it is **the same folder the connector uses**, so a collaboration can
+be started here and continued from Claude. Your secret key share never leaves your
+machine.
 
 ## Platform UI prep
 
@@ -192,13 +196,13 @@ overwritten as soon as a joint key is selected.
 
 ```bash
 # Shell 1 (data owner)
-export JL_ROOT=$HOME/.julenny-collab-acme
+export JL_ROOT=$HOME/julenny-workdir-acme
 cd examples/<scenario>/acme && ./run.sh
 ```
 
 ```bash
 # Shell 2 (data consumer)
-export JL_ROOT=$HOME/.julenny-collab-beta
+export JL_ROOT=$HOME/julenny-workdir-beta
 cd examples/<scenario>/beta && ./run.sh
 ```
 
@@ -206,13 +210,13 @@ On Windows:
 
 ```powershell
 # Shell 1 (data owner)
-$env:JL_ROOT = "$env:USERPROFILE\.julenny-collab-acme"
+$env:JL_ROOT = "$env:USERPROFILE\julenny-workdir-acme"
 cd examples\<scenario>\acme; .\run.ps1
 ```
 
 ```powershell
 # Shell 2 (data consumer)
-$env:JL_ROOT = "$env:USERPROFILE\.julenny-collab-beta"
+$env:JL_ROOT = "$env:USERPROFILE\julenny-workdir-beta"
 cd examples\<scenario>\beta; .\run.ps1
 ```
 

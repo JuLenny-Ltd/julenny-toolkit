@@ -1,6 +1,12 @@
 #!/bin/sh
-# Debian post-install. dpkg has no interactive flow, so this only points the
-# operator at the helper that does the asking (julenny-toolkit-examples).
+# Debian post-install. dpkg has no interactive flow and runs as root, so nothing here
+# may ask a question or write into a user's home. It prints the two commands that do
+# the asking: julenny-toolkit-examples (copies the scripts) and merge-claude-config.sh
+# (adds the connector to Claude Desktop).
+#
+# Until v0.7.5 this text never mentioned the connector merge at all, so the script
+# shipped in the package and was never run: the .deb installed an MCP server that no
+# client was ever told about.
 set -e
 
 case "$1" in
@@ -11,6 +17,26 @@ JuLenny FHE Toolkit installed.
 
   julenny-toolkit --version    offline crypto CLI (no networking)
   julenny-mcp                  MCP server, for driving the flow from Claude
+
+ONE WORKING FOLDER
+
+Keys, datasets and results all live in a single folder, shared by the connector,
+the example scripts and the CLI. Put your own data files in it and all three can
+see them. The default is ~/julenny-workdir. To use a different one, put its path
+in ~/.config/julenny/workdir, or let the next command record it for you.
+
+CONNECTOR (Claude Desktop, Claude Code, Cursor, VS Code)
+
+To drive the flow from Claude Desktop, add the connector with your API key:
+
+  /usr/share/julenny-toolkit/merge-claude-config.sh <api-key> \
+      /usr/bin/julenny-mcp https://julenny.net JuLenny ~/julenny-workdir
+
+Close Claude Desktop first: it rewrites its configuration when it exits and
+would erase the entry. It needs jq. Run it as the user who will use Claude, not
+as root, or the connector lands in root's configuration.
+
+EXAMPLE SCRIPTS
 
 The example scripts are the reference for integrating the toolkit into your own
 pipelines. They ship read-only under /usr/share/julenny-toolkit/examples. For a
