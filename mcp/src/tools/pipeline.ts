@@ -316,6 +316,139 @@ export function registerPipelineTools(server: McpServer, api: JulennyApiClient) 
     },
   );
 
+  // ---- verify_keys (are my local public keys still the agreed ones?) ----
+  //
+  // Local key files were trusted blindly until now. A rotation key built for an index set
+  // that has since changed looks exactly like a current one on disk, and nothing compared
+  // the two, so the divergence surfaced much later as a rotation round that never
+  // completed. This verb makes that comparison.
+  //
+  // It handles ONLY public material. The FHE secret share and the signing secret are never
+  // uploaded anywhere, by design, so there is nothing to compare them against and nothing
+  // to re-fetch if they are lost.
+  server.tool(
+    'verify_keys',
+    'Check the local public key files for a permission against the platform, and re-download any that are missing or out of date. '
+    + 'Use it before a run on a collaboration that has been idle, after a function or its rule list changed, or whenever a run fails '
+    + 'for no visible reason. Compares checksums; a key that differs is stale, not corrupt, and is replaced. '
+    + 'Returns which keys were checked and what happened to each, never key bytes. '
+    + 'It cannot check your secret share or signing key: those exist only on your machine, which is the point of them.',
+    {
+      permissionId: z.string().describe('Permission id'),
+      dir: z.string().optional().describe(
+        "Workdir-relative folder holding the key files. Defaults to the collaboration's own "
+        + "'collabs/<jointKeyId>/keys' when jointKeyId is given, otherwise 'keys'.",
+      ),
+      jointKeyId: z.string().optional().describe(
+        'Joint key id, when the keys live in the per-collaboration folder the example scripts use.',
+      ),
+      repair: z.boolean().optional().describe(
+        'Re-download anything missing or stale (default true). Pass false to report without touching any file.',
+      ),
+    },
+    async (p) => {
+      try {
+        // The example scripts keep keys in collabs/<jointKeyId>/keys inside the same
+        // working folder. Since v0.7.5 that folder is shared, so verifying the scripts'
+        // files is just a matter of looking in the right place.
+        const dir = p.dir ?? (p.jointKeyId ? `collabs/${p.jointKeyId}/keys` : 'keys');
+        const repair = p.repair !== false;
+
+        // Local file names, as the scripts write them. Nothing derives these from the key
+        // type: 'joint_relin_key' is stored as final_relin_key.bin, and guessing would
+        // report a perfectly good key as missing and then overwrite it.
+        const FILE_FOR_KEY_TYPE: Record<string, string> = {
+          joint_public_key: 'joint_public_key.bin',
+          joint_relin_key: 'final_relin_key.bin',
+          eval_sum_key: 'final_sum_key.bin',
+          rotation: 'rotation-combined.bin',
+        };
+        const manifest = await api.get(`/api/fhe-permissions/${p.permissionId}/key-manifest`) as {
+          keysetupState?: string;
+          keys?: Record<string, { sha256Hex: string | null; sizeBytes: number | null; verified: string; downloadUrl?: string }>;
+          rotation?: { status?: string; indices?: number[] } | null;
+        };
+        const entries = Object.entries(manifest.keys ?? {});
+        if (entries.length === 0) {
+          return ok({
+            permissionId: p.permissionId,
+            keysetupState: manifest.keysetupState,
+            checked: 0,
+            summary: 'The platform holds no final keys for this permission yet, so there is nothing to check. '
+              + 'Finish keysetup first.',
+          });
+        }
+
+        const results: Array<{ key: string; status: string; note?: string }> = [];
+        for (const [keyType, entry] of entries) {
+          const fileName = `${dir}/${FILE_FOR_KEY_TYPE[keyType] ?? `${keyType}.bin`}`;
+          const localPath = resolveInWorkdir(fileName);
+          let localSha: string | undefined;
+          try {
+            localSha = await sha256OfFile(localPath);
+          } catch {
+            localSha = undefined;   // not on this machine
+          }
+
+          if (!entry.sha256Hex) {
+            // The submitting client predates the digest. Say so rather than implying a
+            // check happened: a false "verified" is worse than an honest "cannot tell".
+            results.push({
+              key: keyType,
+              status: localSha ? 'present-unverifiable' : 'missing-unverifiable',
+              note: 'The platform holds no checksum for this key, so it cannot be compared. '
+                + 'It was registered by an older toolkit.',
+            });
+            continue;
+          }
+
+          if (localSha === entry.sha256Hex) {
+            results.push({ key: keyType, status: 'ok' });
+            continue;
+          }
+
+          const wasMissing = localSha === undefined;
+          if (!repair || !entry.downloadUrl) {
+            results.push({
+              key: keyType,
+              status: wasMissing ? 'missing' : 'stale',
+              note: wasMissing
+                ? `Not found at '${fileName}'.`
+                : `The copy at '${fileName}' is not the key this collaboration agreed on.`,
+            });
+            continue;
+          }
+
+          const bytes = await api.getBytesFromUrl(entry.downloadUrl);
+          await writeFile(localPath, bytes);
+          const after = await sha256OfFile(localPath);
+          results.push({
+            key: keyType,
+            // Verify what was just written. A download that silently truncates would
+            // otherwise be recorded as a repair and leave the same broken run behind.
+            status: after === entry.sha256Hex ? (wasMissing ? 'downloaded' : 'replaced') : 'download-mismatch',
+            note: after === entry.sha256Hex
+              ? `Written to '${fileName}'.`
+              : 'The downloaded file does not match the expected checksum. Do not run with it; try again.',
+          });
+        }
+
+        const bad = results.filter(r => ['stale', 'missing', 'download-mismatch'].includes(r.status));
+        return ok({
+          permissionId: p.permissionId,
+          keysetupState: manifest.keysetupState,
+          rotationIndexCount: manifest.rotation?.indices?.length ?? null,
+          results,
+          summary: bad.length === 0
+            ? 'Every public key on this machine matches the platform.'
+            : `${bad.length} key(s) need attention. TELL THE USER which ones and what the note says.`,
+        });
+      } catch (e) {
+        return fail(e instanceof Error ? e.message : 'verify_keys failed');
+      }
+    },
+  );
+
   // ---- download_partial (viewer flow: the releaser's partial decryption) ----
   // Mirrors viewer_flow step 3: GET /api/executions/{id}/partial -> the peer
   // (releaser) side's partial-decryption bytes. The viewer needs BOTH partials
@@ -362,6 +495,19 @@ export function registerPipelineTools(server: McpServer, api: JulennyApiClient) 
   // only exists after the upload-url step (a pre-wrapped envelope can't reference it).
   const INLINE_THRESHOLD_BYTES = 15 * 1024 * 1024;
 
+  // sha256 of a file, by streaming. Key material runs to hundreds of megabytes - a
+  // rotation key of 320MB is ordinary - and there is no reason to hold one whole.
+  async function sha256OfFile(path: string): Promise<string> {
+    const { createHash } = await import('node:crypto');
+    return new Promise<string>((resolve, reject) => {
+      const h = createHash('sha256');
+      const rs = createReadStream(path);
+      rs.on('data', (c) => h.update(c));
+      rs.on('end', () => resolve(h.digest('hex')));
+      rs.on('error', reject);
+    });
+  }
+
   // One keysetup message: wrap (inline or by reference), upload if large, register.
   // Shared by publish_keysetup_message and publish_rotation_key so the two cannot drift.
   async function publishMessage(
@@ -398,7 +544,19 @@ export function registerPipelineTools(server: McpServer, api: JulennyApiClient) 
       // went out. That stall, not the network, is what ran the call past the
       // client's timeout.
       await api.putSignedUrlFromFile(uploadUrl, payloadPath);
-      const r = await runCli(['crypto', 'wrap-envelope', '--object-key', objectKey, '--size-bytes', String(size), ...common]);
+      // Sign a digest of the payload too. The platform keeps it and serves it in the key
+      // manifest, which is how a client later tells a stale local key from a current one.
+      // Done HERE rather than in each caller so every reference-mode message carries one,
+      // the combined rotation key included - that being the key most likely to go stale
+      // and the one nothing could previously detect.
+      const sha256Hex = await sha256OfFile(payloadPath);
+      const r = await runCli([
+        'crypto', 'wrap-envelope',
+        '--object-key', objectKey,
+        '--size-bytes', String(size),
+        '--sha256', sha256Hex,
+        ...common,
+      ]);
       if (!r.ok) return { ok: false, error: `wrap-envelope (reference) failed: ${r.error ?? 'unknown error'}` };
     }
     const envelope = JSON.parse(await readFile(envPath, 'utf8'));

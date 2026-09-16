@@ -363,6 +363,7 @@ int run_crypto_wrap_envelope(const CryptoWrapEnvelopeArgs& args) {
             fhe_toolkit::registry::PayloadRef ref;
             ref.object_key = args.object_key;
             ref.size_bytes = args.size_bytes;
+            ref.sha256_hex = args.sha256_hex;
             payload_size = args.size_bytes;
             body = fhe_toolkit::registry::make_signed_envelope_from_ref(
                 ref, fields, sk);
@@ -394,6 +395,7 @@ int run_crypto_wrap_envelope(const CryptoWrapEnvelopeArgs& args) {
         j["permissionId"]   = fields.permission_id;
         j["timestamp"]      = fields.timestamp;
         if (ref_mode) j["objectKey"] = args.object_key;
+        if (ref_mode && !args.sha256_hex.empty()) j["sha256Hex"] = args.sha256_hex;
         std::cout << j.dump(2) << "\n";
     } else {
         std::cout << "Signed envelope written (" << (ref_mode ? "payloadRef" : "payloadB64") << " mode).\n";
@@ -2977,6 +2979,12 @@ void register_crypto(CLI::App& app,
                          "Requires --size-bytes; pairs with the platform's keysetup-messages/upload-url endpoint.");
     wrap_env->add_option("--size-bytes", wrap_envelope_args.size_bytes,
                          "Raw payload size in bytes (required with --object-key).");
+    wrap_env->add_option("--sha256", wrap_envelope_args.sha256_hex,
+                         "sha256 of the payload, 64 lowercase hex characters (optional, "
+                         "large-payload mode). Signed with the envelope and kept by the platform, "
+                         "so a client can later check whether the copy on its own disk is still "
+                         "the key the collaboration is computing with. Omit it and the envelope "
+                         "signs exactly as before.");
     wrap_env->add_option("--secret-key", wrap_envelope_args.secret_key_path,
                          "Ed25519 signing secret key (32-byte seed; from signing-keygen)")
             ->required();

@@ -422,6 +422,14 @@ if ($ksState -eq 'awaiting-finalization' -or $ksState -eq 'complete') {
     Invoke-JlPhase '03-finalize-keysetup.ps1'
 }
 
+# Keysetup is finished, so the platform now knows what every public key should be. Check
+# the copies on this machine before anything is encrypted or computed with them. Placed
+# here because it is the first moment the comparison is possible and the last one before
+# the keys are used. A stale key found any later costs a whole run, and can go unnoticed
+# for far longer than that.
+Write-JlStep "$($script:JL_OUR_LABEL): check local keys against the platform"
+Invoke-JlVerifyLocalKeys
+
 # Phase 4: encrypt + upload/declare this side's dataset(s).
 # Gate on whether THIS permission's required inputs for OUR role are declared,
 # NOT on a project-wide dataset count. In a multi-function collaboration,

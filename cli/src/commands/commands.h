@@ -323,6 +323,11 @@ struct CryptoWrapEnvelopeArgs {
     // place of payloadB64. --size-bytes is required; --payload is ignored.
     std::string object_key;         // GCS objectKey returned by the upload-url endpoint
     std::size_t size_bytes = 0;     // raw payload size (bytes); required in Mode B
+    // Optional sha256 of the payload, 64 lowercase hex chars. Signed with the rest of
+    // the envelope and recorded by the platform, so a client can later ask whether the
+    // key sitting on its disk is still the one the collaboration agreed on. Omitted
+    // entirely when empty, which keeps the signed bytes identical to the older shape.
+    std::string sha256_hex;
 };
 
 struct CryptoPartialDecryptArgs {

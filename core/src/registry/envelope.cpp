@@ -294,6 +294,8 @@ std::string make_signed_envelope_from_ref(
     require(fields.round >= 1,                 "envelope round must be >= 1");
     require(!fields.message_type.empty(),      "envelope messageType is empty");
     require(!fields.timestamp.empty(),         "envelope timestamp is empty");
+    require(payload_ref.sha256_hex.empty() || is_lower_hex_64(payload_ref.sha256_hex),
+            "payloadRef sha256Hex must be 64 lowercase hex chars");
 
     // Build the nested payloadRef object. Note: nlohmann::json preserves
     // insertion order, but our canonical_json() sorts keys lexicographically,
@@ -302,6 +304,12 @@ std::string make_signed_envelope_from_ref(
         {"objectKey", payload_ref.object_key},
         {"sizeBytes", static_cast<std::uint64_t>(payload_ref.size_bytes)},
     };
+    // ABSENT rather than empty when no digest was given. An empty string would change
+    // the signed bytes, so every envelope built without a digest would stop verifying
+    // against a platform that still reconstructs the two-field shape - and vice versa.
+    if (!payload_ref.sha256_hex.empty()) {
+        payload_ref_obj["sha256Hex"] = payload_ref.sha256_hex;
+    }
 
     // Signed canonical JSON: the five signed envelope fields, but payloadRef replaces
     // payloadB64. The platform reconstructs this exact shape and verifies.

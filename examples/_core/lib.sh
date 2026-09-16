@@ -596,9 +596,17 @@ wrap_and_upload() {
             || die "object storage PUT returned HTTP $put_code"
         success "  Uploaded to object storage"
 
+        # Sign a digest of the payload alongside the reference. The platform keeps it and
+        # serves it in the key manifest, which is how a client later tells a stale local
+        # key from a current one - the check that was missing when both sides spent days
+        # computing with rotation keys built from an outdated index set.
+        local payload_sha
+        payload_sha="$(sha256sum "$bin_path" | cut -d' ' -f1)"
+
         julenny-toolkit crypto wrap-envelope \
             --object-key "$object_key" \
             --size-bytes "$size_bytes" \
+            --sha256 "$payload_sha" \
             --secret-key "$JULENNY_SIGNING_SECRET" \
             --output "$json_path" \
             --permission-id "$JULENNY_PERMISSION_ID" \
@@ -910,6 +918,99 @@ function_requires_relin_keys() {
 get_pending_rotation_keysetup() {
     local state; state="$(get_keysetup_state)"
     echo "$state" | jq -c '.pendingRotationKeySetup // null'
+}
+
+# ---- verify the local public keys against the platform (twin in lib.ps1) ----
+#
+# Local key files used to be trusted blindly. A rotation key built for an index set that
+# has since changed looks exactly like a current one on disk, and nothing compared the two,
+# so the divergence only showed up much later as a rotation round that never completed.
+# This asks the platform what each public key SHOULD be and replaces anything that differs.
+#
+# PUBLIC KEYS ONLY. The secret share and the signing secret are never uploaded anywhere, so
+# there is nothing to compare them with and nothing to re-fetch. Losing one of those is a
+# different problem, and docs/keys-and-backup.md is where it is answered.
+#
+# Never fatal. A stale key that is fixed here saves a failed run; a manifest that cannot be
+# read must not stop a run that would otherwise work.
+verify_local_keys() {
+    # Deliberately NOT curl_jl: that helper dies on a 404, and a platform that predates
+    # this endpoint answers exactly that. A missing manifest must skip the check, never
+    # end the run.
+    local manifest
+    manifest="$(curl -sS -H "x-api-key: $JULENNY_API_KEY" \
+        "$JULENNY_API_BASE/api/fhe-permissions/$JULENNY_PERMISSION_ID/key-manifest" 2>/dev/null || echo '')"
+    if [[ -z "$manifest" ]] || ! echo "$manifest" | jq -e '.keys' > /dev/null 2>&1; then
+        info "Key manifest unavailable; skipping the local key check."
+        return 0
+    fi
+
+    # Key type -> the name the scripts store it under. Not derived: 'joint_relin_key' is
+    # written as final_relin_key.bin, and a guess would report a good key as missing and
+    # then overwrite it.
+    local -A key_files=(
+        [joint_public_key]="joint_public_key.bin"
+        [joint_relin_key]="final_relin_key.bin"
+        [eval_sum_key]="final_sum_key.bin"
+        [rotation]="rotation-combined.bin"
+    )
+
+    local checked=0 repaired=0
+    local key_type
+    for key_type in $(echo "$manifest" | jq -r '.keys | keys[]'); do
+        local file="${key_files[$key_type]:-$key_type.bin}"
+        local path="$JL_KEYS_DIR/$file"
+        local want; want="$(echo "$manifest" | jq -r --arg k "$key_type" '.keys[$k].sha256Hex // empty')"
+        local url;  url="$(echo "$manifest"  | jq -r --arg k "$key_type" '.keys[$k].downloadUrl // empty')"
+
+        if [[ -z "$want" ]]; then
+            # Registered by a toolkit that predates the digest. Say so rather than implying
+            # a check happened.
+            info "  $key_type: no checksum on the platform, cannot be checked."
+            continue
+        fi
+
+        checked=$((checked + 1))
+        local have=""
+        [[ -f "$path" ]] && have="$(sha256sum "$path" | cut -d' ' -f1)"
+        if [[ "$have" == "$want" ]]; then
+            continue
+        fi
+
+        if [[ -z "$url" ]]; then
+            warn "  $key_type: local copy differs from the platform and no download URL was offered."
+            continue
+        fi
+        if [[ -z "$have" ]]; then
+            info "  $key_type: not on this machine, fetching..."
+        else
+            warn "  $key_type: the local copy is NOT the key this collaboration agreed on. Replacing it."
+        fi
+        mkdir -p "$JL_KEYS_DIR"
+        if ! curl -sSf -o "$path.tmp" "$url"; then
+            warn "  $key_type: download failed; leaving the existing file alone."
+            rm -f "$path.tmp"
+            continue
+        fi
+        local got; got="$(sha256sum "$path.tmp" | cut -d' ' -f1)"
+        if [[ "$got" != "$want" ]]; then
+            # A truncated download replacing a good key is worse than no repair at all.
+            warn "  $key_type: the downloaded file does not match its checksum; keeping the old one."
+            rm -f "$path.tmp"
+            continue
+        fi
+        mv "$path.tmp" "$path"
+        repaired=$((repaired + 1))
+        success "  $key_type: refreshed from the platform."
+    done
+
+    if (( checked == 0 )); then
+        info "No checksums available yet; nothing to check."
+    elif (( repaired == 0 )); then
+        success "All $checked public key(s) on this machine match the platform."
+    else
+        success "$repaired of $checked public key(s) refreshed."
+    fi
 }
 
 get_pending_rotation_indices_csv() {

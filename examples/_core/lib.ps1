@@ -925,10 +925,17 @@ function Publish-JlEnvelope {
         }
         Write-JlSuccess "  Uploaded to object storage"
 
+        # Sign a digest of the payload alongside the reference. The platform keeps it and
+        # serves it in the key manifest, which is how a client later tells a stale local
+        # key from a current one - the check that was missing when both sides spent days
+        # computing with rotation keys built from an outdated index set.
+        $payloadSha = Get-JlSha256 $BinPath
+
         Invoke-JlCli @(
             'crypto', 'wrap-envelope',
             '--object-key',    $target.ObjectKey,
             '--size-bytes',    "$sizeBytes",
+            '--sha256',        $payloadSha,
             '--secret-key',    $script:JULENNY_SIGNING_SECRET,
             '--output',        $jsonPath,
             '--permission-id', $script:JULENNY_PERMISSION_ID,
@@ -2163,6 +2170,97 @@ function Send-JlBlobToStorage {
 function Get-JlSha256 {
     param([Parameter(Mandatory = $true)][string] $Path)
     return (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLower()
+}
+
+# ---- verify the local public keys against the platform (twin in lib.sh) ----
+#
+# Local key files used to be trusted blindly. A rotation key built for an index set that
+# has since changed looks exactly like a current one on disk, and nothing compared the two,
+# so the divergence only showed up much later as a rotation round that never completed.
+# This asks the platform what each public key SHOULD be and replaces anything that differs.
+#
+# PUBLIC KEYS ONLY. The secret share and the signing secret are never uploaded anywhere, so
+# there is nothing to compare them with and nothing to re-fetch. Losing one of those is a
+# different problem, answered in docs/keys-and-backup.md.
+#
+# Never fatal. A stale key fixed here saves a failed run; a manifest that cannot be read
+# must not stop a run that would otherwise work.
+function Invoke-JlVerifyLocalKeys {
+    # -AllowFailure matters here: a platform that predates this endpoint answers 404, and
+    # without it Invoke-JlApi would stop the run over a check that is meant to help it.
+    $manifest = Invoke-JlApi GET "/api/fhe-permissions/$($script:JULENNY_PERMISSION_ID)/key-manifest" -AllowFailure
+    if (-not $manifest -or -not $manifest.keys) {
+        Write-JlInfo "Key manifest unavailable; skipping the local key check."
+        return
+    }
+
+    # Key type -> the name the scripts store it under. Not derived: 'joint_relin_key' is
+    # written as final_relin_key.bin, and a guess would report a good key as missing and
+    # then overwrite it.
+    $keyFiles = @{
+        joint_public_key = 'joint_public_key.bin'
+        joint_relin_key  = 'final_relin_key.bin'
+        eval_sum_key     = 'final_sum_key.bin'
+        rotation         = 'rotation-combined.bin'
+    }
+
+    $checked = 0
+    $repaired = 0
+    foreach ($keyType in $manifest.keys.PSObject.Properties.Name) {
+        $entry = $manifest.keys.$keyType
+        $file  = if ($keyFiles.ContainsKey($keyType)) { $keyFiles[$keyType] } else { "$keyType.bin" }
+        $path  = Join-Path $script:JL_KEYS_DIR $file
+        $want  = "$($entry.sha256Hex)"
+        $url   = "$($entry.downloadUrl)"
+
+        if (-not $want) {
+            # Registered by a toolkit that predates the digest. Say so rather than implying
+            # a check happened.
+            Write-JlInfo "  $keyType`: no checksum on the platform, cannot be checked."
+            continue
+        }
+
+        $checked++
+        $have = ''
+        if (Test-Path -LiteralPath $path) { $have = Get-JlSha256 $path }
+        if ($have -eq $want) { continue }
+
+        if (-not $url) {
+            Write-JlWarn "  $keyType`: local copy differs from the platform and no download URL was offered."
+            continue
+        }
+        if (-not $have) {
+            Write-JlInfo "  $keyType`: not on this machine, fetching..."
+        } else {
+            Write-JlWarn "  $keyType`: the local copy is NOT the key this collaboration agreed on. Replacing it."
+        }
+        New-Item -ItemType Directory -Force -Path $script:JL_KEYS_DIR | Out-Null
+        $tmp = "$path.tmp"
+        try {
+            Invoke-WebRequest -Uri $url -OutFile $tmp -UseBasicParsing -ErrorAction Stop | Out-Null
+        } catch {
+            Write-JlWarn "  $keyType`: download failed; leaving the existing file alone."
+            Remove-Item -LiteralPath $tmp -ErrorAction SilentlyContinue
+            continue
+        }
+        if ((Get-JlSha256 $tmp) -ne $want) {
+            # A truncated download replacing a good key is worse than no repair at all.
+            Write-JlWarn "  $keyType`: the downloaded file does not match its checksum; keeping the old one."
+            Remove-Item -LiteralPath $tmp -ErrorAction SilentlyContinue
+            continue
+        }
+        Move-Item -LiteralPath $tmp -Destination $path -Force
+        $repaired++
+        Write-JlSuccess "  $keyType`: refreshed from the platform."
+    }
+
+    if ($checked -eq 0) {
+        Write-JlInfo "No checksums available yet; nothing to check."
+    } elseif ($repaired -eq 0) {
+        Write-JlSuccess "All $checked public key(s) on this machine match the platform."
+    } else {
+        Write-JlSuccess "$repaired of $checked public key(s) refreshed."
+    }
 }
 
 function Invoke-JlFinalizeKeysetup {
