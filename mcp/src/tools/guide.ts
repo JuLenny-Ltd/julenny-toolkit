@@ -69,6 +69,37 @@ export function registerGuideTools(server: McpServer, api: JulennyApiClient) {
           return ok({ ...base, stage: 'expired', summary: 'This permission has expired; no further actions are possible.', nextActions: [] });
         }
 
+        // ---- A key the COLLABORATION does not have ----
+        //
+        // Reached with keysetup COMPLETE and the permission active, so every stage below
+        // would happily walk past it: the joint key genuinely exists, it was just built for
+        // a function needing fewer evaluation keys than this one needs. The rounds that make
+        // the missing key have to be run first, by BOTH parties, and until they are every
+        // run is refused.
+        //
+        // Checked before the keysetup stage because that stage only fires when keysetup is
+        // unfinished, which this is not.
+        const readiness = perm.runReadiness as { canRun?: boolean; code?: string; reason?: string; missingEvalKeys?: string[] } | undefined;
+        if (readiness && readiness.code === 'missing-eval-key') {
+          const missing = readiness.missingEvalKeys ?? [];
+          const rounds = missing.includes('sum')
+            ? "sum-round1 (owner, round 5) then sum-round1-continue (consumer, round 6)"
+            : "the rounds this key needs, from the keysetup round manifest";
+          return ok({
+            ...base,
+            stage: 'keysetup-augment',
+            missingEvalKeys: missing,
+            summary: readiness.reason
+              ?? `This collaboration is missing: ${missing.join(', ')}. Both parties must build it before this permission can run.`,
+            nextActions: [
+              `sum_contribute / the matching contribute verb for: ${missing.join(', ')}, using the secret share you ALREADY have. Do not run keysetup_contribute again - it would make a new share that does not match this collaboration's joint key.`,
+              `publish_keysetup_message for ${rounds}.`,
+              'publish_final_keys with the newly built key once both sides have contributed. It is merged into the collaboration, so every later permission gets it too.',
+              'TELL THE USER the other party has to do their half as well; this cannot complete from one side.',
+            ],
+          });
+        }
+
         // ---- STAGE 1: keysetup (permission not active, OR keysetup unfinished) ----
         //
         // Gate on keysetupState as well as status. A permission can be
