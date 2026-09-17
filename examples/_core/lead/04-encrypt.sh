@@ -120,6 +120,24 @@ for ((i = 0; i < MY_INPUT_COUNT; i++)); do
             PICKED_ID="$(echo "$EXISTING"   | jq -r ".[$((CHOICE - 1))].id")"
             PICKED_NAME="$(echo "$EXISTING" | jq -r ".[$((CHOICE - 1))].name")"
             success "Selected existing '$PICKED_NAME' ($PICKED_ID) for '$INPUT_NAME'."
+
+            # The column choice belongs to the DATASET, decided when it was encrypted, so
+            # reusing one must not ask again: a different answer here would describe bytes
+            # that were hashed another way. A dataset encrypted on another machine has no
+            # record on this one though, and the owner can be the result viewer, so ask
+            # exactly once and only then.
+            if [[ "$INPUT_SCHEMA" == "indicator-hash" ]]; then
+                RECALLED="$(recall_column_choice "$PICKED_ID")"
+                if [[ -n "$RECALLED" ]]; then
+                    info "Columns recorded for this dataset at encrypt time: $RECALLED"
+                else
+                    warn "Nothing is recorded about which columns this dataset was hashed on."
+                    warn "  It was encrypted on another machine, or by another tool."
+                    warn "  Answer with the SAME columns that were used then, or nothing will match."
+                    REUSE_COLS="$(ask_column_choice "$INPUT_NAME")"
+                    remember_column_choice "$PICKED_ID" "${REUSE_COLS:-all}"
+                fi
+            fi
         fi
     fi
 

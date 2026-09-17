@@ -2052,6 +2052,32 @@ function Invoke-JlEncryptAndUploadInputs {
                 }
                 $pickedId = $existing[$n - 1].id
                 Write-JlSuccess "Selected existing '$($existing[$n - 1].name)' ($pickedId) for '$inputName'."
+
+                # The column choice belongs to the DATASET, decided when it was encrypted,
+                # so reusing one must not ask again: a different answer here would describe
+                # bytes that were hashed another way. A dataset encrypted on another machine
+                # has no record on this one though, so ask exactly once and only then.
+                if ($inputSchema -eq 'indicator-hash') {
+                    $colsFile = Join-Path $script:JL_ROOT 'dataset_columns.json'
+                    $recalled = ''
+                    if (Test-Path -LiteralPath $colsFile) {
+                        try {
+                            $cm = Get-Content -LiteralPath $colsFile -Raw | ConvertFrom-Json
+                            if (Test-JlHasProperty $cm $pickedId) { $recalled = "$($cm.$pickedId)" }
+                        } catch { }
+                    }
+                    if ($recalled) {
+                        Write-JlInfo "Columns recorded for this dataset at encrypt time: $recalled"
+                    } else {
+                        Write-JlWarn "Nothing is recorded about which columns this dataset was hashed on."
+                        Write-JlWarn "  It was encrypted on another machine, or by another tool."
+                        Write-JlWarn "  Answer with the SAME columns that were used then, or nothing will match."
+                        $reuseCols = Read-JlColumnChoice -InputName $inputName -FilePath ''
+                        if (-not $reuseCols) { $reuseCols = 'all' }
+                        Set-JlJsonMapEntry -Path $colsFile -Key $pickedId -Value $reuseCols
+                        Write-JlInfo "Remembered column choice '$reuseCols' for dataset $pickedId."
+                    }
+                }
             }
         }
 

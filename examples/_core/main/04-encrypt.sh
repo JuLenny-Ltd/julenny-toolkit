@@ -134,10 +134,14 @@ for ((i = 0; i < MY_INPUT_COUNT; i++)); do
             # Plaintext attachments don't go through resolve-indicator at
             # decrypt time, so there's no map to maintain for them.
             if ! $IS_PLAINTEXT; then
-                CSV_MAP_FILE="$JL_WORKDIR/dataset_csv_map.json"
-                EXISTING_MAP='{}'
-                [[ -f "$CSV_MAP_FILE" ]] && EXISTING_MAP="$(cat "$CSV_MAP_FILE")"
-                MAPPED_CSV="$(echo "$EXISTING_MAP" | jq -r --arg id "$PICKED_ID" '.[$id] // empty')"
+                # Both maps live at the ROOT of the working folder, shared with the
+                # connector. This branch used to write the CSV map into the per-collaboration
+                # folder instead, so a dataset reused here was invisible to every other
+                # surface and to any other collaboration.
+                CSV_MAP_FILE="$JL_ROOT/dataset_csv_map.json"
+                MAPPED_CSV=""
+                [[ -f "$CSV_MAP_FILE" ]] \
+                    && MAPPED_CSV="$(jq -r --arg id "$PICKED_ID" '.[$id] // empty' "$CSV_MAP_FILE")"
 
                 if [[ -n "$MAPPED_CSV" && -f "$MAPPED_CSV" ]]; then
                     info "Originating CSV (from map): $MAPPED_CSV"
@@ -151,13 +155,27 @@ for ((i = 0; i < MY_INPUT_COUNT; i++)); do
                     prompt_for CSV_FOR_DSET "Originating CSV for '$PICKED_NAME' (blank to skip)" "${JULENNY_INPUT_CSV:-}"
                     if [[ -n "$CSV_FOR_DSET" ]]; then
                         [[ -f "$CSV_FOR_DSET" ]] || die "CSV not found: $CSV_FOR_DSET"
-                        echo "$EXISTING_MAP" \
-                            | jq --arg id "$PICKED_ID" --arg p "$CSV_FOR_DSET" '. + {($id): $p}' \
-                            > "$CSV_MAP_FILE.tmp" \
-                            && mv "$CSV_MAP_FILE.tmp" "$CSV_MAP_FILE"
-                        success "Mapped dataset $PICKED_ID -> $CSV_FOR_DSET in $CSV_MAP_FILE."
+                        remember_dataset_csv "$PICKED_ID" "$CSV_FOR_DSET"
                     else
                         warn "Skipped CSV mapping. 06-decrypt will re-prompt for this dataset."
+                    fi
+                fi
+
+                # The column choice belongs to the DATASET, decided when it was encrypted.
+                # Reusing a dataset must not ask again - answering differently here would
+                # describe bytes that were hashed another way. But a dataset encrypted on
+                # another machine has no record on this one, and resolve would then have
+                # nothing to go on, so ask exactly once and only then.
+                if [[ "$INPUT_SCHEMA" == "indicator-hash" ]]; then
+                    RECALLED="$(recall_column_choice "$PICKED_ID")"
+                    if [[ -n "$RECALLED" ]]; then
+                        info "Columns recorded for this dataset at encrypt time: $RECALLED"
+                    else
+                        warn "Nothing is recorded about which columns this dataset was hashed on."
+                        warn "  It was encrypted on another machine, or by another tool."
+                        warn "  Answer with the SAME columns that were used then, or nothing will match."
+                        REUSE_COLS="$(ask_column_choice "$INPUT_NAME")"
+                        remember_column_choice "$PICKED_ID" "${REUSE_COLS:-all}"
                     fi
                 fi
             fi
