@@ -213,6 +213,10 @@ KeyPair Context::generate_keypair() const {
     return kp;
 }
 
+std::size_t Context::tower_count() const {
+    return impl_->cc->GetElementParams()->GetParams().size();
+}
+
 PlaintextPacked Context::encode_packed(const std::vector<int64_t>& values) const {
     PlaintextPacked pt;
     pt.impl_ = std::make_unique<PlaintextPacked::Impl>();

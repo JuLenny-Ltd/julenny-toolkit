@@ -95,10 +95,10 @@ struct CountResult {
     bool group_wrapped = false;
 };
 
-// Compare party A's table with party B's, all T^2 level pairs at every cell, and
+// Compare party A's table with party B's, all T_A * T_B level pairs at every cell, and
 // return the count as `groups` partial sums (a power of two, at most the cell
 // count; 1 is the single-slot form). Throws std::invalid_argument unless the two
-// tables have identical (m, T, k) and different roles - two tables of the same
+// tables have identical (m, k) and different roles - T may differ (dynamic T) - two tables of the same
 // role share a sentinel, so every aligned pair of empty cells would match - or
 // if `groups` is not a valid grouping.
 CountResult reference_count(const Table& a, const Table& b, unsigned groups = 1);

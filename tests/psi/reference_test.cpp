@@ -527,12 +527,12 @@ TEST_CASE("tables that cannot be compared are refused", "[psi][reference]") {
         // Partial sums must be residues: a raw centered slot value is refused.
         CHECK_THROWS_AS(count_from_groups({ plaintext_modulus }), std::invalid_argument);
     }
-    SECTION("mismatched (m, T, k) is a hard error, never a count") {
+    SECTION("mismatched m or k is a hard error, never a count; T may differ (dynamic T)") {
         for (const TableParams q : { TableParams{ .cells = 128, .levels = 5, .limbs = 8 },
-                                     TableParams{ .cells = 64, .levels = 6, .limbs = 8 },
                                      TableParams{ .cells = 64, .levels = 5, .limbs = 7 } }) {
             CHECK_THROWS_AS(reference_count(a, build(rows, q, Role::B)), std::invalid_argument);
         }
+        CHECK_NOTHROW(reference_count(a, build(rows, TableParams{ .cells = 64, .levels = 6, .limbs = 8 }, Role::B)));
     }
     SECTION("malformed masks are refused, not decoded") {
         const auto it = reference_itemized(a, b);
@@ -554,5 +554,43 @@ TEST_CASE("tables that cannot be compared are refused", "[psi][reference]") {
         auto too_wide = it.masks;
         too_wide[0][0] = 1u << 16;
         CHECK_THROWS_AS(resolve_matches(a, too_wide), std::runtime_error);
+    }
+}
+
+// Dynamic T: each party keeps only the levels its data fills. Levels a party does not
+// have could only ever have held its sentinel, which matches nothing - so comparing
+// T_A x T_B pairs must give exactly what padding both sides to the larger T gives.
+TEST_CASE("unequal level counts count exactly what equal ones do", "[psi][reference]") {
+    std::mt19937_64 rng(20260917);
+    for (unsigned trial = 0; trial < 40; ++trial) {
+        const std::uint64_t cells = std::uint64_t{1} << (4 + trial % 5);
+        const std::uint64_t shared = rng() % (cells * 2), only_a = rng() % (cells * 3), only_b = rng() % cells;
+        auto rows_a = hashed("s" + std::to_string(trial) + "-", 0, shared);
+        auto rows_b = rows_a;
+        const auto extra_a = hashed("a" + std::to_string(trial) + "-", 0, only_a);
+        const auto extra_b = hashed("b" + std::to_string(trial) + "-", 0, only_b);
+        rows_a.insert(rows_a.end(), extra_a.begin(), extra_a.end());
+        rows_b.insert(rows_b.end(), extra_b.begin(), extra_b.end());
+
+        const auto ta = static_cast<unsigned>(std::max<std::uint64_t>(1, fullest_cell(rows_a, cells)));
+        const auto tb = static_cast<unsigned>(std::max<std::uint64_t>(1, fullest_cell(rows_b, cells)));
+        const unsigned tmax = std::max(ta, tb);
+        CAPTURE(trial, cells, shared, ta, tb);
+        const auto a = build(rows_a, { .cells = cells, .levels = ta, .limbs = 3 }, Role::A);
+        const auto b = build(rows_b, { .cells = cells, .levels = tb, .limbs = 3 }, Role::B);
+        const auto a_full = build(rows_a, { .cells = cells, .levels = tmax, .limbs = 3 }, Role::A);
+        const auto b_full = build(rows_b, { .cells = cells, .levels = tmax, .limbs = 3 }, Role::B);
+
+        const auto asym = reference_count(a, b, 2);
+        const auto sym = reference_count(a_full, b_full, 2);
+        REQUIRE(asym.per_cell == sym.per_cell);
+        REQUIRE(asym.group_sums == sym.group_sums);
+        REQUIRE(asym.matches == shared);  // no drops: each side has exactly the levels it needs
+
+        // Itemized, in each viewer's own layout: its own T, masks for its own levels.
+        const auto it_a = reference_itemized(a, b), it_a_full = reference_itemized(a, b_full);
+        REQUIRE(it_a.masks == it_a_full.masks);
+        REQUIRE(it_a.masks.size() == (ta + 15) / 16);
+        REQUIRE(resolve_matches(b, reference_itemized(b, a).masks).size() == shared);
     }
 }

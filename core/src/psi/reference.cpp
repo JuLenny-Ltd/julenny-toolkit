@@ -29,11 +29,12 @@ std::uint32_t sub_mod(std::uint16_t a, std::uint16_t b) {
 void check_compatible(const Table& x, const Table& y) {
     const auto& p = x.params();
     const auto& q = y.params();
-    if (p.cells != q.cells || p.levels != q.levels || p.limbs != q.limbs) {
+    // Level counts may differ (dynamic T): every (x level, y level) pair is compared, and a
+    // level one side lacks holds nothing that could match. Cells and limbs may not.
+    if (p.cells != q.cells || p.limbs != q.limbs) {
         throw std::invalid_argument(
-            "PSI tables disagree on (cells, levels, limbs): (" + std::to_string(p.cells) + ", "
-            + std::to_string(p.levels) + ", " + std::to_string(p.limbs) + ") vs ("
-            + std::to_string(q.cells) + ", " + std::to_string(q.levels) + ", "
+            "PSI tables disagree on (cells, limbs): (" + std::to_string(p.cells) + ", "
+            + std::to_string(p.limbs) + ") vs (" + std::to_string(q.cells) + ", "
             + std::to_string(q.limbs) + "); comparing them would give a meaningless count");
     }
     if (x.role() == y.role()) {
@@ -62,7 +63,7 @@ void for_each_equal_pair(const Table& x, const Table& y, Fn fn) {
     const auto rx = limb0_rows(x);
     const auto ry = limb0_rows(y);
     for (unsigned jx = 0; jx < p.levels; ++jx) {
-        for (unsigned jy = 0; jy < p.levels; ++jy) {
+        for (unsigned jy = 0; jy < y.params().levels; ++jy) {
             const auto& ax = rx[jx];
             const auto& ay = ry[jy];
             for (std::uint64_t cell = 0; cell < p.cells; ++cell) {

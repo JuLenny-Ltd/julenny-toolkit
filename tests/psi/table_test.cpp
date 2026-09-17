@@ -555,3 +555,24 @@ TEST_CASE("table parameters are validated", "[psi][table]") {
     CHECK_THROWS_AS(t.fill_limb_row(0, 0, short_row), std::invalid_argument);
     CHECK_THROWS_AS(sentinel(Role::A, 0), std::invalid_argument);
 }
+
+TEST_CASE("fullest_cell is the load build_table reports, and the smallest T that places everything",
+          "[psi][table]") {
+    for (std::uint64_t cells : { std::uint64_t{1}, std::uint64_t{8}, std::uint64_t{64}, std::uint64_t{1024} }) {
+        for (unsigned n : { 0u, 1u, 7u, 200u, 3000u }) {
+            std::vector<Digest> rows;
+            for (unsigned i = 0; i < n; ++i) rows.push_back(record_digest("fullest", std::to_string(i % 180)));  // repeats
+            const auto fullest = fullest_cell(rows, cells);
+            CAPTURE(cells, n, fullest);
+            if (n == 0) { REQUIRE(fullest == 0); continue; }
+            const TableParams p{ .cells = cells, .levels = static_cast<unsigned>(fullest), .limbs = 2 };
+            const auto t = build_table(rows, p, Role::A, OverflowPolicy::fail);  // fits: never throws
+            REQUIRE(t.report().cell_max_load == fullest);
+            if (fullest > 1) {
+                const TableParams short_one{ .cells = cells, .levels = static_cast<unsigned>(fullest - 1), .limbs = 2 };
+                REQUIRE_THROWS_AS(build_table(rows, short_one, Role::A, OverflowPolicy::fail), TableOverflow);
+            }
+        }
+    }
+    CHECK_THROWS_AS(fullest_cell({}, 3), std::invalid_argument);
+}

@@ -10,6 +10,7 @@
 #include <string>
 #include <vector>
 
+#include "psi/bundle.h"
 #include "psi/digest.h"
 #include "psi/solver.h"
 #include "psi/table.h"
@@ -99,13 +100,23 @@ TEST_CASE("the cost model reproduces A1's measured cost table", "[psi][solver]")
         // Core time from A1's measured 0.364 s per single-core multiply.
         REQUIRE_THAT(e.core_seconds / 3600, WithinRel(row.core_hours, 0.02));
 
-        // Ciphertexts: this model rounds up per limb, ceil(T*m/N)*k, which is
-        // design §2.5's stated formula and matches A1's n = 1000 row. A1's other
-        // rows pack limbs across ciphertext boundaries, ceil(T*m*k/N). The two
+        // Ciphertexts follow the wire form (psi/bundle). From one ciphertext of
+        // cells up it is per-level, ceil(T*m/N)*k - design §2.5's formula. A1's
+        // rows pack limbs across ciphertext boundaries, ceil(T*m*k/N); the two
         // differ by at most k-1 ciphertexts, and never the other way.
-        const std::uint64_t dense = ceil_div(std::uint64_t{row.levels} * cells * 8, 32768);
-        REQUIRE(e.ciphertexts_self >= dense);
-        REQUIRE(e.ciphertexts_self - dense <= 7);
+        if (cells >= 32768) {
+            const std::uint64_t dense = ceil_div(std::uint64_t{row.levels} * cells * 8, 32768);
+            REQUIRE(e.ciphertexts_self >= dense);
+            REQUIRE(e.ciphertexts_self - dense <= 7);
+        } else {
+            // A1's n = 1 000 and 10 000 rows costed ceil(T*m/N) blocks: 8 and 32
+            // ciphertexts. No encoder emits that: below N cells a bundle stores the
+            // T^2 compared positions aligned, ceil(T^2*m/N)*k - 32 and 296, T times
+            // A1's figure before rounding (step D3).
+            REQUIRE(e.prealigned);
+            REQUIRE(e.ciphertexts_self == e.chunks * 8);
+            REQUIRE(e.ciphertexts_self == (row.records == 1'000 ? 32u : 296u));
+        }
     }
 }
 
@@ -192,33 +203,92 @@ TEST_CASE("a solved plan drops at or below its target, measured", "[psi][solver]
     REQUIRE(static_cast<double>(dropped) <= bound);
 }
 
-TEST_CASE("the solver minimises the compute it claims to minimise", "[psi][solver]") {
-    const std::uint64_t records = GENERATE(std::uint64_t{100}, 10'000, 1'000'000);
+// D3-RESULTS.md §2a, rule 3: fewest ciphertexts as written; ties to the smaller drop
+// rate (rates below 2^-40 tie), then less communication (bundle plus itemized-result
+// ciphertexts), then fewer chunks, then fewer tables. Brute-forced over every m and T.
+TEST_CASE("the solver minimises ciphertexts, then drop rate, communication and chunks", "[psi][solver]") {
+    const std::uint64_t records = GENERATE(std::uint64_t{120}, 1'000, 3'000, 20'000);
     const auto e = solve(request_for(records));
-    const std::uint64_t chosen = std::uint64_t{e.plan.levels} * e.plan.levels * e.plan.cells_total;
-    CAPTURE(records, e.plan.cells_total, e.plan.levels, chosen);
+    CAPTURE(records, e.plan.cells_total, e.plan.levels, e.plan.limbs, e.ciphertexts_self,
+            e.expected_drop_rate, e.chunks);
+    REQUIRE(e.expected_drop_rate <= 1e-6);
+    const auto floored = [](double rate) { return rate < 0x1p-40 ? 0.0 : rate; };
+    const auto communication = [](const Estimate& x) { return x.ciphertexts_self + x.itemized_output_ciphertexts; };
 
-    // Brute force the same grid the solver searched.
-    for (unsigned bit = 0; bit <= 32; ++bit) {
+    for (unsigned bit = 0; bit <= 20; ++bit) {
         const std::uint64_t cells = std::uint64_t{1} << bit;
-        unsigned levels = 0;
-        for (unsigned t = 1; t <= 256; ++t) {
-            if (expected_dropped_records(records, cells, t) <= 1e-6 * static_cast<double>(records)) {
-                levels = t;
-                break;
+        const unsigned k = limbs_for(128, cells, 8);
+        for (unsigned t = 1; t <= 512; ++t) {
+            if (expected_dropped_records(records, cells, t) > 1e-6 * static_cast<double>(records)) continue;
+            Plan p{ cells, 1, t, k };
+            p.count_groups = e.plan.count_groups <= cells ? e.plan.count_groups : 1;
+            const auto other = estimate(request_for(records), p);
+            CAPTURE(bit, t, other.ciphertexts_self, other.expected_drop_rate, other.chunks);
+            REQUIRE(other.ciphertexts_self >= e.ciphertexts_self);
+            if (other.ciphertexts_self > e.ciphertexts_self) break;  // more tables only add ciphertexts
+            REQUIRE(floored(other.expected_drop_rate) >= floored(e.expected_drop_rate));
+            if (floored(other.expected_drop_rate) == floored(e.expected_drop_rate)) {
+                REQUIRE(communication(other) >= communication(e));
+                if (communication(other) == communication(e)) {
+                    REQUIRE(other.chunks >= e.chunks);
+                    if (other.chunks == e.chunks) REQUIRE(other.plan.levels >= e.plan.levels);
+                }
             }
         }
-        if (levels == 0) continue;
-        unsigned k = 0;
-        try {
-            k = limbs_for(128, cells, 8);
-        } catch (const std::invalid_argument&) {
-            continue;
-        }
-        (void)k;
-        CAPTURE(bit, levels);
-        REQUIRE(std::uint64_t{levels} * levels * cells >= chosen);
     }
+}
+
+TEST_CASE("per_level_only keeps a full ciphertext of cells, for dynamic T", "[psi][solver]") {
+    for (std::uint64_t records : { std::uint64_t{120}, std::uint64_t{1'000}, std::uint64_t{20'000} }) {
+        Request r = request_for(records);
+        r.per_level_only = true;
+        const auto e = solve(r);
+        CAPTURE(records, e.plan.cells_total, e.plan.levels);
+        REQUIRE(e.plan.cells_total >= 32768);
+        REQUIRE_FALSE(e.prealigned);
+    }
+}
+
+TEST_CASE("unequal T is costed per-level and refused prealigned", "[psi][solver]") {
+    const auto r = request_for(3'000);
+    Plan p{ 65536, 1, 2, 8, 1024 };
+    p.peer_levels = 5;
+    const auto e = estimate(r, p);
+    REQUIRE(e.chunks == 2 * 5 * 2);                 // T_A * T_B * blocks
+    REQUIRE(e.ciphertexts_self == 2 * 2 * 8);       // own T only
+    Plan small{ 1024, 1, 2, 8, 1024 };
+    small.peer_levels = 5;
+    CHECK_THROWS_AS(estimate(r, small), std::invalid_argument);
+    small.peer_levels = 2;
+    CHECK_NOTHROW(estimate(r, small));
+}
+
+TEST_CASE("the likely fullest cell brackets what build_table measures", "[psi][solver]") {
+    // 40 random datasets per point: the p50 quantile should be exceeded about half the
+    // time, the p99 quantile almost never.
+    for (const auto& [records, cells] : { std::pair<std::uint64_t, std::uint64_t>{ 120, 32768 },
+                                          { 3'000, 32768 }, { 20'000, 32768 }, { 1'000, 512 } }) {
+        const unsigned p50 = likely_fullest_cell(records, cells, 0.5);
+        const unsigned p99 = likely_fullest_cell(records, cells, 0.99);
+        unsigned above_p50 = 0, above_p99 = 0;
+        for (unsigned s = 0; s < 40; ++s) {
+            const auto rows = [&] {
+                std::vector<Digest> out;
+                for (std::uint64_t i = 0; i < records; ++i)
+                    out.push_back(record_digest(kDomain, "fc-" + std::to_string(s) + "-" + std::to_string(i)));
+                return out;
+            }();
+            const auto measured = fullest_cell(rows, cells);
+            above_p50 += measured > p50 ? 1 : 0;
+            above_p99 += measured > p99 ? 1 : 0;
+        }
+        CAPTURE(records, cells, p50, p99, above_p50, above_p99);
+        REQUIRE(p50 <= p99);
+        REQUIRE(above_p50 <= 30);
+        REQUIRE(above_p99 <= 3);
+    }
+    CHECK(likely_fullest_cell(0, 32768, 0.5) == 0);
+    CHECK_THROWS_AS(likely_fullest_cell(10, 16, 1.0), std::invalid_argument);
 }
 
 // ---------------------------------------------------------------------------
@@ -287,10 +357,20 @@ TEST_CASE("the estimate's fields hold together", "[psi][solver]") {
     REQUIRE(std::has_single_bit(e.plan.cells_total));
     REQUIRE(e.multiplications == e.chunks * (16 * e.plan.limbs + e.plan.limbs - 1));
     REQUIRE_THAT(e.core_seconds, WithinRel(static_cast<double>(e.multiplications) * 0.364, 1e-12));
-    REQUIRE(e.input_bytes_self == e.ciphertexts_self * ContextCost{}.ciphertext_bytes());
+    // Whole files: each shard's bundle is a header, archive framing and its ciphertexts.
+    const ContextCost c;
+    REQUIRE(e.input_objects == e.plan.shards);
+    REQUIRE(e.input_bytes_self > e.ciphertexts_self * c.ciphertext_bytes());
+    // What is left after the ciphertexts and the framing is one text header per shard.
+    const std::uint64_t headers = e.input_bytes_self
+        - e.ciphertexts_self * (c.ciphertext_bytes() + c.archived_ciphertext_extra)
+        - e.plan.shards * c.archive_fixed_bytes;
+    CAPTURE(headers);
+    REQUIRE(headers >= e.plan.shards * 100);
+    REQUIRE(headers <= e.plan.shards * 200);
     REQUIRE(e.input_bytes_total == e.input_bytes_self + e.input_bytes_peer);
     REQUIRE(e.peer_decrypt_bytes == e.itemized_output_bytes);
-    REQUIRE(e.count_output_bytes == ContextCost{}.ciphertext_bytes());
+    REQUIRE(e.count_output_bytes == c.single_ciphertext_file_bytes());
     // The itemized result is far smaller than the input it describes (design §2.3).
     REQUIRE(e.itemized_output_bytes < e.input_bytes_self);
     REQUIRE(e.signature_bits_delivered >= 128);
@@ -337,7 +417,7 @@ TEST_CASE("the count is grouped only when one sum could overflow, and it is disc
         REQUIRE_FALSE(e.count_exceeds_modulus);
 
         // Grouping is free: the partial sums share one ciphertext.
-        REQUIRE(e.count_output_bytes == ContextCost{}.ciphertext_bytes());
+        REQUIRE(e.count_output_bytes == ContextCost{}.single_ciphertext_file_bytes());
 
         REQUIRE(e.warnings.size() == 1);
         REQUIRE(e.warnings[0].code == WarningCode::count_group_leak);
@@ -389,4 +469,59 @@ TEST_CASE("malformed requests and plans are refused", "[psi][solver]") {
     bad = r;
     bad.context.slots = 1000;  // not a power of two
     CHECK_THROWS_AS(solve(bad), std::invalid_argument);
+}
+
+// ---------------------------------------------------------------------------
+// Predicted bytes against the artifacts (step D3)
+// ---------------------------------------------------------------------------
+
+// The estimate must describe the bundle the encoder writes, not an idealised
+// one. psi/bundle is the encoder's own layout, so every power-of-two plan is
+// replayed through it: ciphertexts, chunks and header must agree exactly.
+TEST_CASE("the estimate counts the ciphertexts and header psi/bundle emits", "[psi][solver]") {
+    const auto r = request_for(1000);
+    std::size_t plans = 0, prealigned = 0;
+    for (unsigned bit = 0; bit <= 20; ++bit) {
+        const std::uint64_t cells = std::uint64_t{1} << bit;
+        for (unsigned levels : { 1u, 2u, 3u, 4u, 7u, 16u, 17u, 33u }) {
+            for (unsigned limbs : { 1u, 4u, 8u }) {
+                const std::uint64_t groups = std::min<std::uint64_t>(cells, 1024);
+                const Plan p{ cells, 1, levels, limbs, groups };
+                const auto e = estimate(r, p);
+                const auto layout = bundle_layout(p.table_params(), groups, r.context.slots);
+                CAPTURE(cells, levels, limbs, e.ciphertexts_self, layout.ciphertexts, e.chunks, layout.chunks);
+                REQUIRE(e.ciphertexts_self == layout.ciphertexts);
+                REQUIRE(e.chunks == layout.chunks);
+                REQUIRE(e.prealigned == !layout.per_level);
+                const std::uint64_t header = bundle_header(layout, Role::B).size();
+                REQUIRE(e.input_bytes_self == r.context.archive_bytes(layout.ciphertexts, header));
+                ++plans;
+                prealigned += e.prealigned ? 1 : 0;
+            }
+        }
+    }
+    REQUIRE(prealigned > 0);
+    REQUIRE(prealigned < plans);  // both storage forms were exercised
+}
+
+// Evidence of the second kind: the files D2's run wrote (D2-RESULTS.md §3, §5),
+// byte for byte, on OpenFHE 1.5.0 and 1.5.1 alike. Bundles of 4, 8, 16 and 32
+// ciphertexts in both layouts, and the count result the wrapper wrote. Bundle
+// bytes are exact up to the archive's fixed part, which moves by a few hundred
+// bytes with the key's history (step D3) - negligible, so allowed for here.
+TEST_CASE("predicted bytes reproduce the bundles and result D2 wrote", "[psi][solver]") {
+    struct Row { std::uint64_t cells; unsigned levels; unsigned limbs; std::uint64_t groups; std::uint64_t bytes; };
+    const Row rows[] = {
+        { 32768, 2, 8, 32768, 117'459'977 },  // per-level
+        { 32768, 4, 8, 32768, 234'917'705 },  // per-level, the mismatch case's B
+        {  1024, 4, 8,  1024,  58'731'111 },  // prealigned
+        {  1024, 4, 4,  1024,  29'366'679 },  // prealigned, --signature-bits 64
+    };
+    for (const auto& row : rows) {
+        const auto e = estimate(request_for(120), Plan{ row.cells, 1, row.levels, row.limbs, row.groups });
+        CAPTURE(row.cells, row.levels, row.limbs, e.input_bytes_self, row.bytes);
+        REQUIRE(e.input_bytes_self <= row.bytes);
+        REQUIRE(row.bytes - e.input_bytes_self <= 4096);
+    }
+    REQUIRE(estimate(request_for(120), Plan{ 1024, 1, 4, 8, 1024 }).count_output_bytes == 7'342'563);
 }

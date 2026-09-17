@@ -178,3 +178,57 @@ TEST_CASE("bundle_slots refuses a table that is not the one the layout describes
     std::vector<std::int64_t> other_slots(other.slots);
     CHECK_THROWS_AS(bundle_slots(t, other, 0, std::span<std::int64_t>(other_slots)), std::invalid_argument);
 }
+
+// Dynamic T: per-level bundles whose TABLES differ. The server pairs A's level ja with B's
+// level jb, ja = pair / T_B and jb = pair % T_B, over T_A * T_B * blocks chunks.
+TEST_CASE("per-level bundles with unequal TABLES pair every level, and count what the oracle counts",
+          "[psi][bundle]") {
+    // Each side takes the levels its own data needs (fullest_cell), plus `spare` empty ones.
+    struct Case { std::uint64_t cells; unsigned spare_a, spare_b, limbs; std::uint64_t slots; unsigned shared, only_a, only_b; };
+    const std::vector<Case> cases = {
+        {512, 0, 2, 2, 512, 40, 20, 250},    // one block, B fuller and with empty levels
+        {1024, 1, 0, 3, 512, 200, 600, 40},  // two blocks, A fuller
+    };
+    for (const auto& c : cases) {
+        auto rows_a = digests_of("shared", c.shared), rows_b = rows_a;
+        const auto extra_a = digests_of("a-only", c.only_a), extra_b = digests_of("b-only", c.only_b);
+        rows_a.insert(rows_a.end(), extra_a.begin(), extra_a.end());
+        rows_b.insert(rows_b.end(), extra_b.begin(), extra_b.end());
+        const TableParams pa{.cells = c.cells, .levels = static_cast<unsigned>(fullest_cell(rows_a, c.cells)) + c.spare_a,
+                             .limbs = c.limbs};
+        const TableParams pb{.cells = c.cells, .levels = static_cast<unsigned>(fullest_cell(rows_b, c.cells)) + c.spare_b,
+                             .limbs = c.limbs};
+        const struct { unsigned ta, tb; } c2{pa.levels, pb.levels};
+        INFO("cells " << c.cells << " T_A " << c2.ta << " T_B " << c2.tb);
+        REQUIRE(c2.ta != c2.tb);
+        const Table a = build_table(rows_a, pa, Role::A, OverflowPolicy::fail);
+        const Table b = build_table(rows_b, pb, Role::B, OverflowPolicy::fail);
+        const auto la = bundle_layout(pa, 1, c.slots), lb = bundle_layout(pb, 1, c.slots);
+        REQUIRE(la.per_level);
+        REQUIRE(la.ciphertexts == c2.ta * la.blocks * c.limbs);
+        REQUIRE(lb.ciphertexts == c2.tb * lb.blocks * c.limbs);
+        const auto cts_a = encode(a, la), cts_b = encode(b, lb);
+
+        std::uint64_t matches = 0, compared = 0;
+        const std::uint64_t chunks = std::uint64_t{c2.ta} * c2.tb * la.blocks;
+        for (std::uint64_t chunk = 0; chunk < chunks; ++chunk) {
+            const std::uint64_t pair = chunk / la.blocks, block = chunk % la.blocks;
+            const std::uint64_t ja = pair / c2.tb, jb = pair % c2.tb;  // transcribed from psiOperands
+            for (std::uint64_t s = 0; s < c.slots; ++s) {
+                bool all_equal = true;
+                for (std::uint64_t j = 0; j < c.limbs; ++j) {
+                    const std::int64_t va = cts_a[(ja * la.blocks + block) * c.limbs + j][s];
+                    const std::int64_t vb = cts_b[(jb * lb.blocks + block) * c.limbs + j][s];
+                    const std::uint64_t cell = block * c.slots + s;
+                    REQUIRE(va == a.limb_at(static_cast<unsigned>(ja), static_cast<unsigned>(j), cell));
+                    REQUIRE(vb == b.limb_at(static_cast<unsigned>(jb), static_cast<unsigned>(j), cell));
+                    if (va != vb) all_equal = false;
+                }
+                ++compared;
+                if (all_equal) ++matches;
+            }
+        }
+        CHECK(compared == std::uint64_t{c2.ta} * c2.tb * c.cells);
+        CHECK(matches == reference_count(a, b).matches);
+    }
+}

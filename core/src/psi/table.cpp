@@ -117,6 +117,15 @@ std::vector<std::uint16_t> sentinel(Role role, unsigned limbs) {
     return s;
 }
 
+std::uint64_t fullest_cell(std::vector<Digest> digests, std::uint64_t cells) {
+    (void)position(Digest{}, cells);  // the same refusal build_table gives a bad cell count
+    dedupe(digests);
+    std::vector<std::uint32_t> load(static_cast<std::size_t>(cells), 0);
+    std::uint64_t fullest = 0;
+    for (const auto& d : digests) fullest = std::max<std::uint64_t>(fullest, ++load[position(d, cells)]);
+    return fullest;
+}
+
 Table build_table(std::vector<Digest> digests, const TableParams& params, Role role,
                   OverflowPolicy policy) {
     validate(params);

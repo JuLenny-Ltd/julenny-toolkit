@@ -1,5 +1,6 @@
 #include "psi/solver.h"
 
+#include "psi/bundle.h"     // bundle_header: the input files begin with it
 #include "psi/reference.h"  // plaintext_modulus: the ceiling on a single-slot count
 
 #include <algorithm>
@@ -7,12 +8,15 @@
 #include <cmath>
 #include <stdexcept>
 #include <string>
+#include <tuple>
 
 namespace fhe_toolkit::psi {
 
 namespace {
 
 constexpr unsigned max_levels_searched = 256;  // T beyond this is never the cheap answer
+constexpr unsigned max_levels_tied = 4096;     // the bundle header's TABLES ceiling (psi/bundle)
+constexpr double   drop_rate_floor = 0x1p-40;   // drop rates below this tie (decided 2026-09-17)
 
 std::uint64_t ceil_div(std::uint64_t a, std::uint64_t b) { return (a + b - 1) / b; }
 
@@ -44,6 +48,14 @@ void validate_request(const Request& r) {
     if (r.max_shard_bytes == 0) throw std::invalid_argument("PSI max shard bytes must be positive");
 }
 
+// Ciphertexts one shard's bundle holds, in the wire form psi/bundle emits:
+// per-level from one ciphertext of cells up, prealigned below it.
+std::uint64_t bundle_ciphertexts(std::uint64_t levels, std::uint64_t cells, std::uint64_t slots,
+                                 std::uint64_t limbs) {
+    const std::uint64_t positions = cells < slots ? levels * levels * cells : levels * cells;
+    return ceil_div(positions, slots) * limbs;
+}
+
 // Partial sums the count must be split into so no group can reach t. A group
 // holds at most the records the smaller side placed in it, so the bound is per
 // group on that side; 4x headroom absorbs the spread around the mean, and each
@@ -73,6 +85,14 @@ unsigned smallest_levels(std::uint64_t records, std::uint64_t cells_total, doubl
 
 std::uint64_t ContextCost::ciphertext_bytes() const {
     return 2 * slots * towers * 8;
+}
+
+std::uint64_t ContextCost::archive_bytes(std::uint64_t ciphertexts, std::uint64_t header_bytes) const {
+    return header_bytes + archive_fixed_bytes + ciphertexts * (ciphertext_bytes() + archived_ciphertext_extra);
+}
+
+std::uint64_t ContextCost::single_ciphertext_file_bytes() const {
+    return ciphertext_bytes() + single_ciphertext_extra;
 }
 
 TableParams Plan::table_params() const {
@@ -120,6 +140,11 @@ Estimate estimate(const Request& r, const Plan& p) {
                                     "count, got " + std::to_string(p.shards));
     }
     if (p.levels == 0) throw std::invalid_argument("PSI plan needs at least one level");
+    if (p.peer_levels != 0 && p.peer_levels != p.levels && p.cells_per_shard() < r.context.slots) {
+        throw std::invalid_argument("PSI tables below one ciphertext of cells are stored prealigned, whose "
+                                    "layout depends on both parties' T; they must use the same T, not "
+                                    + std::to_string(p.levels) + " and " + std::to_string(p.peer_levels));
+    }
     if (p.limbs == 0 || p.limbs > r.context.max_limbs) {
         throw std::invalid_argument("PSI plan needs 1.." + std::to_string(r.context.max_limbs)
                                     + " limbs, got " + std::to_string(p.limbs));
@@ -135,24 +160,41 @@ Estimate estimate(const Request& r, const Plan& p) {
     const std::uint64_t n = r.context.slots;
     const std::uint64_t m = p.cells_per_shard();
     const std::uint64_t levels = p.levels;
-    const std::uint64_t ct_bytes = r.context.ciphertext_bytes();
 
     Estimate e;
     e.plan = p;
     e.records = r.records;
     e.peer_records = peer;
 
-    e.chunks = p.shards * ceil_div(levels * levels * m, n);
+    const std::uint64_t peer_levels = p.peer_levels != 0 ? p.peer_levels : levels;
+    e.chunks = p.shards * ceil_div(levels * peer_levels * m, n);
     e.multiplications = e.chunks * (16 * p.limbs + p.limbs - 1);
     e.core_seconds = static_cast<double>(e.multiplications) * r.context.seconds_per_mult;
 
-    e.ciphertexts_self = p.shards * ceil_div(levels * m, n) * p.limbs;
-    e.input_bytes_self = e.ciphertexts_self * ct_bytes;
+    // Each shard is one bundle file: its header, then one archive of its ciphertexts.
+    // The header is the encoder's own; both roles give it the same length.
+    const std::uint64_t shard_ciphertexts = bundle_ciphertexts(levels, m, n, p.limbs);
+    BundleLayout header_layout;
+    header_layout.cells = m;
+    header_layout.tables = levels;
+    header_layout.limbs = p.limbs;
+    header_layout.groups = p.count_groups;
+    header_layout.slots = n;
+    header_layout.per_level = m >= n;
+    header_layout.ciphertexts = shard_ciphertexts;
+    const std::uint64_t header_bytes = bundle_header(header_layout, Role::A).size();
+
+    e.prealigned = m < n;
+    e.ciphertexts_self = p.shards * shard_ciphertexts;
+    e.input_bytes_self = p.shards * r.context.archive_bytes(shard_ciphertexts, header_bytes);
     e.input_bytes_peer = e.input_bytes_self;  // same pinned (m, T, k) on both sides
     e.input_bytes_total = e.input_bytes_self + e.input_bytes_peer;
+    e.input_objects = p.shards;
 
-    e.count_output_bytes = ct_bytes;  // one ciphertext, after homomorphic shard aggregation
-    e.itemized_output_bytes = p.shards * ceil_div(levels, levels_per_mask) * ceil_div(m, n) * ct_bytes;
+    // One ciphertext, after homomorphic shard aggregation, written as a result file.
+    e.count_output_bytes = r.context.single_ciphertext_file_bytes();
+    e.itemized_output_ciphertexts = p.shards * ceil_div(levels, levels_per_mask) * ceil_div(m, n);
+    e.itemized_output_bytes = e.itemized_output_ciphertexts * r.context.single_ciphertext_file_bytes();
     e.peer_decrypt_bytes = e.itemized_output_bytes;
 
     e.expected_overflowed_cells = expected_overflowed_cells(r.records, p.cells_total, p.levels);
@@ -200,11 +242,28 @@ Estimate estimate(const Request& r, const Plan& p) {
 Estimate solve(const Request& r) {
     validate_request(r);
 
-    bool found = false;
-    Plan best;
-    std::uint64_t best_compute = 0;  // T^2 * m_total
-    std::uint64_t best_bytes = 0;    // T * m_total, the tie-break
-    for (unsigned e = 0; e <= floor_log2(max_cells); ++e) {
+    // Cells and tables (D3-RESULTS.md §2a, rule 3). Every power-of-two m is searched, and
+    // ciphertexts are counted in the form the encoder writes: T^2 * m below N (prealigned),
+    // T * m from N (per-level). Among plans meeting the drop-rate target:
+    //   1. fewest ciphertexts per party - the upload;
+    //   then, between plans that tie on it (decided 2026-09-17):
+    //   2. the smaller expected drop rate - but every rate below 2^-40 counts as equal, or
+    //      the budget fills with ever more tables for no practical gain (8 x 64 at 120 records),
+    //   3. less communication - bundle plus itemized-result ciphertexts (the result grows
+    //      with T); counted in ciphertexts, so a header digit never decides,
+    //   4. less compute - chunks,
+    //   5. fewer tables.
+    // Adding tables at a fixed m never lowers the ciphertext count and never raises the
+    // drop rate, so for each m only its largest T within the winning ciphertext count
+    // can win the tie-break.
+    struct Candidate {
+        std::uint64_t cells;
+        unsigned      levels;
+        unsigned      limbs;
+    };
+    std::vector<Candidate> minimal;  // for each m, its smallest adequate T
+    std::uint64_t fewest = 0;
+    for (unsigned e = r.per_level_only ? floor_log2(r.context.slots) : 0; e <= floor_log2(max_cells); ++e) {
         const std::uint64_t cells_total = std::uint64_t{1} << e;
         unsigned limbs = 0;
         try {
@@ -214,21 +273,43 @@ Estimate solve(const Request& r) {
         }
         const unsigned levels = smallest_levels(r.records, cells_total, r.target_drop_rate);
         if (levels == 0) continue;  // no level count meets the target here
-
-        const std::uint64_t compute = std::uint64_t{levels} * levels * cells_total;
-        const std::uint64_t bytes = std::uint64_t{levels} * cells_total;
-        if (!found || compute < best_compute || (compute == best_compute && bytes < best_bytes)) {
-            found = true;
-            best_compute = compute;
-            best_bytes = bytes;
-            best = Plan{ cells_total, 1, levels, limbs };
-        }
+        const std::uint64_t cts = bundle_ciphertexts(levels, cells_total, r.context.slots, limbs);
+        if (minimal.empty() || cts < fewest) fewest = cts;
+        minimal.push_back({ cells_total, levels, limbs });
     }
-    if (!found) {
+    if (minimal.empty()) {
         throw std::invalid_argument("no PSI plan meets a " + std::to_string(r.signature_bits)
                                     + "-bit signature at a drop rate of "
                                     + std::to_string(r.target_drop_rate) + " for "
                                     + std::to_string(r.records) + " records");
+    }
+
+    const std::uint64_t smaller = r.peer_records != 0 ? std::min(r.records, r.peer_records) : r.records;
+    bool found = false;
+    Plan best;
+    Estimate best_estimate;
+    for (const auto& c : minimal) {
+        if (bundle_ciphertexts(c.levels, c.cells, r.context.slots, c.limbs) != fewest) continue;
+        unsigned levels = c.levels;
+        while (levels < max_levels_tied
+               && bundle_ciphertexts(levels + 1, c.cells, r.context.slots, c.limbs) == fewest) {
+            ++levels;
+        }
+        Plan plan{ c.cells, 1, levels, c.limbs };
+        plan.count_groups = count_groups_for(smaller, plan.cells_per_shard(), r.context.slots);
+        const Estimate e = estimate(r, plan);
+        const auto floored = [](double rate) { return rate < drop_rate_floor ? 0.0 : rate; };
+        const auto communication = [](const Estimate& x) { return x.ciphertexts_self + x.itemized_output_ciphertexts; };
+        const double drop = floored(e.expected_drop_rate), best_drop = floored(best_estimate.expected_drop_rate);
+        const auto key = [&](const Estimate& x, double d) {
+            return std::make_tuple(d, communication(x), x.chunks, x.plan.levels);
+        };
+        const bool better = !found || key(e, drop) < key(best_estimate, best_drop);
+        if (better) {
+            found = true;
+            best = plan;
+            best_estimate = e;
+        }
     }
 
     // Split until one shard's upload fits, but never past one ciphertext of
@@ -237,15 +318,34 @@ Estimate solve(const Request& r) {
     while (best.shards * 2 <= best.cells_total) {
         const std::uint64_t m = best.cells_per_shard();
         const std::uint64_t shard_bytes =
-            ceil_div(std::uint64_t{best.levels} * m, r.context.slots) * best.limbs * ct_bytes;
+            bundle_ciphertexts(best.levels, m, r.context.slots, best.limbs) * ct_bytes;
         if (shard_bytes <= r.max_shard_bytes) break;
         if (m <= r.context.slots) break;
         best.shards *= 2;
     }
 
-    const std::uint64_t smaller = r.peer_records != 0 ? std::min(r.records, r.peer_records) : r.records;
     best.count_groups = count_groups_for(smaller, best.cells_per_shard(), r.context.slots);
     return estimate(r, best);
+}
+
+unsigned likely_fullest_cell(std::uint64_t records, std::uint64_t cells, double probability) {
+    if (cells == 0) throw std::invalid_argument("PSI cell count must be positive");
+    if (!(probability > 0.0) || !(probability < 1.0)) {
+        throw std::invalid_argument("PSI fullest-cell probability must be in (0, 1)");
+    }
+    if (records == 0) return 0;
+    // P(max <= T) = F(T)^m for independent Poisson(lambda) loads: the smallest T with
+    // m * log F(T) >= log p. The pmf is walked in log space so a large lambda does not underflow.
+    const double lambda = static_cast<double>(records) / static_cast<double>(cells);
+    const double target = std::log(probability) / static_cast<double>(cells);
+    double log_pmf = -lambda;  // log P(X = 0)
+    double cdf = std::exp(log_pmf);
+    for (unsigned t = 0; t < 1u << 20; ++t) {
+        if (cdf > 0.0 && std::log(std::min(cdf, 1.0)) >= target) return t;
+        log_pmf += std::log(lambda) - std::log(static_cast<double>(t + 1));
+        cdf += std::exp(log_pmf);
+    }
+    return 1u << 20;
 }
 
 std::vector<Estimate> limb_sensitivity(const Request& r, const Plan& p,

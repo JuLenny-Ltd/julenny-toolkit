@@ -84,6 +84,12 @@ std::vector<std::uint16_t> stored_signature(const Digest& d, unsigned limbs);
 // The value an empty cell of `role`'s table holds.
 std::vector<std::uint16_t> sentinel(Role role, unsigned limbs);
 
+// The most distinct records any one of `cells` cells receives: the smallest T
+// that places every record. Dynamic T (--dynamic-tables) builds with exactly
+// this many levels - more when the data collides more than expected, fewer
+// when the levels above it would be empty. 0 for an empty set.
+std::uint64_t fullest_cell(std::vector<Digest> digests, std::uint64_t cells);
+
 class Table;
 Table build_table(std::vector<Digest> digests, const TableParams& params, Role role,
                   OverflowPolicy policy);

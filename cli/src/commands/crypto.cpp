@@ -774,6 +774,35 @@ int encrypt_bundle(const std::string& input_path,
                    bool emit_json);
 
 // ---------------------------------------------------------------------------
+// signature-table sizing, shared by the encoder and its dry run (step D3), so
+// the estimate describes the bundle the encoder will actually write rather than
+// one it could have written. The solver picks what the flags do not pin.
+//
+// One shard, always: the encoder cannot shard yet (F1), and the solver's shard
+// count is advisory. Handing it to the encoder would size one shard's table for
+// every record.
+// ---------------------------------------------------------------------------
+static fhe_toolkit::psi::Plan plan_signature_table(const fhe_toolkit::psi::Request& req,
+                                                   std::uint64_t cells, unsigned tables,
+                                                   unsigned limbs, std::uint64_t count_groups) {
+    namespace psi = fhe_toolkit::psi;
+    psi::Plan plan;
+    if (cells > 0 && tables > 0) {
+        plan.cells_total  = cells;
+        plan.levels       = tables;
+        plan.count_groups = count_groups > 0 ? count_groups : 1;
+    } else {
+        plan = psi::solve(req).plan;
+        if (cells > 0)  plan.cells_total = cells;
+        if (tables > 0) plan.levels = tables;
+        if (count_groups > 0) plan.count_groups = count_groups;
+    }
+    plan.shards = 1;
+    plan.limbs = limbs > 0 ? limbs : psi::limbs_for(req.signature_bits, plan.cells_total, req.context.max_limbs);
+    return plan;
+}
+
+// ---------------------------------------------------------------------------
 // signature-table: the exact-PSI encoder (design 2.2-2.3; steps B1-B4, D2).
 //
 // Rows -> record digests (psi/digest) -> T associative tables with sentinel
@@ -854,21 +883,26 @@ static int encrypt_signature_table(const CryptoEncryptArgs& args,
     req.context.slots    = static_cast<std::uint64_t>(slot_count);
     psi::Plan plan;
     psi::Estimate estimate;
+    unsigned solved_tables = 0;
     try {
-        if (args.cells > 0 && args.tables > 0) {
-            plan.cells_total  = args.cells;
-            plan.shards       = 1;
-            plan.levels       = args.tables;
-            plan.count_groups = args.count_groups > 0 ? args.count_groups : 1;
-        } else {
-            plan = psi::solve(req).plan;
-            if (args.cells > 0)  plan.cells_total = args.cells;
-            if (args.tables > 0) plan.levels = args.tables;
-            if (args.count_groups > 0) plan.count_groups = args.count_groups;
+        if (args.dynamic_tables) {
+            if (args.tables > 0) throw std::invalid_argument("--dynamic-tables and --tables are exclusive");
+            req.per_level_only = true;
         }
-        plan.limbs = args.limbs > 0
-            ? args.limbs
-            : psi::limbs_for(req.signature_bits, plan.cells_total, req.context.max_limbs);
+        plan = plan_signature_table(req, args.cells, args.tables, args.limbs, args.count_groups);
+        solved_tables = plan.levels;
+        if (args.dynamic_tables) {
+            // Per-level only: a prealigned bundle lays its slots out by both parties' T.
+            if (plan.cells_total < static_cast<std::uint64_t>(slot_count)) {
+                throw std::invalid_argument(
+                    "--dynamic-tables needs at least " + std::to_string(slot_count) + " cells, one ciphertext's worth, "
+                    "not " + std::to_string(plan.cells_total) + ": below that the bundle is prealigned, and its layout "
+                    "depends on the other party's table count");
+            }
+            // Exactly the levels this data fills: more when it collides more than expected,
+            // fewer when the levels above would be empty. Nothing is ever dropped.
+            plan.levels = static_cast<unsigned>(std::max<std::uint64_t>(1, psi::fullest_cell(digests, plan.cells_total)));
+        }
         estimate = psi::estimate(req, plan);
     } catch (const std::exception& e) {
         std::cerr << "error: cannot size the signature tables: " << e.what() << "\n";
@@ -948,6 +982,8 @@ static int encrypt_signature_table(const CryptoEncryptArgs& args,
         out["records"]         = report.records;
         out["cells"]           = layout.cells;
         out["tables"]          = layout.tables;
+        out["dynamicTables"]   = args.dynamic_tables;
+        if (args.dynamic_tables) out["tablesSolved"] = solved_tables;
         out["limbs"]           = layout.limbs;
         out["signatureBits"]          = args.signature_bits;
         out["signatureBitsDelivered"] = estimate.signature_bits_delivered;
@@ -974,7 +1010,10 @@ static int encrypt_signature_table(const CryptoEncryptArgs& args,
         std::cout << "  Records read:    " << records_read << " (" << report.duplicates
                   << " repeated, counted once; " << lines_skipped << " lines skipped)\n";
         std::cout << "  Table:           " << layout.cells << " cells x " << layout.tables
-                  << " tables, " << layout.limbs << " limbs of 16 bits\n";
+                  << " tables, " << layout.limbs << " limbs of 16 bits"
+                  << (args.dynamic_tables ? " (tables set by the data; the model expected "
+                                                + std::to_string(solved_tables) + ")" : "")
+                  << "\n";
         std::cout << "  Signature:       " << args.signature_bits << " bits asked, "
                   << estimate.signature_bits_delivered << " delivered (cell address included)\n";
         std::cout << "  Fullest cell:    " << report.cell_max_load << " records ("
@@ -985,10 +1024,283 @@ static int encrypt_signature_table(const CryptoEncryptArgs& args,
         std::cout << "  Output:          " << out_path.string() << "\n";
         std::cout << "  Context:         " << spec.id << " (BFV, slots=" << slot_count
                   << ", t=" << spec.plaintext_modulus << ")\n";
-        std::cout << "  The other party MUST encode with the same cells, tables, limbs and groups,\n";
+        std::cout << (args.dynamic_tables
+                          ? "  The other party MUST encode with the same cells, limbs and groups (its tables may differ),\n"
+                          : "  The other party MUST encode with the same cells, tables, limbs and groups,\n");
         std::cout << "  the opposite role, and the same domain separator '" << domain << "'.\n";
         for (const auto& w : estimate.warnings) std::cout << "  warning: " << w.message << "\n";
     }
+    return 0;
+}
+
+// ---------------------------------------------------------------------------
+// crypto psi-estimate: the signature-table dry run (design §3.8, T4b; step D3).
+//
+// Everything is predicted from a declared record count and the parameters. It
+// needs no input file, key, grant or upload, and writes nothing - it must run
+// before a grant exists, because the variant is pinned at grant creation (Q7b).
+//
+// Plan: plan_signature_table, the encoder's own sizing. Bytes: psi/solver's
+// layout-aware model over the real context's ring and towers, with the cereal
+// framing measured for this spec by archiving two throwaway ciphertexts under a
+// throwaway key. That framing differs by spec (bfv-default-v1 frames
+// differently from bfv-exact-psi-v1), so it is measured rather than assumed.
+// ---------------------------------------------------------------------------
+namespace {
+
+// Serialization framing of `ctx`, measured: one archive of one ciphertext and one
+// of two, under a throwaway key. Nothing here is written anywhere. (A key that has
+// been through a file frames a few hundred bytes larger per bundle; negligible.)
+fhe_toolkit::psi::ContextCost measure_context_cost(const fhe_toolkit::crypto::Context& ctx,
+                                                   std::uint64_t slots) {
+    namespace crypto = fhe_toolkit::crypto;
+    fhe_toolkit::psi::ContextCost cost;
+    cost.slots = slots;
+    cost.towers = static_cast<unsigned>(ctx.tower_count());
+    const auto probe = ctx.generate_keypair();
+
+    const std::vector<std::int64_t> zeros(static_cast<std::size_t>(slots), 0);
+    std::vector<crypto::Ciphertext> cts;
+    cts.push_back(ctx.encrypt(probe.public_key, ctx.encode_packed(zeros)));
+    const std::uint64_t one = ctx.serialize_ciphertext_vector(cts).size();
+    cts.push_back(ctx.encrypt(probe.public_key, ctx.encode_packed(zeros)));
+    const std::uint64_t two = ctx.serialize_ciphertext_vector(cts).size();
+    const std::uint64_t per = two - one;
+    if (per < cost.ciphertext_bytes() || one < per) {
+        throw std::runtime_error("the serialized ciphertext (" + std::to_string(per) + " bytes) is smaller "
+                                 "than its polynomials (" + std::to_string(cost.ciphertext_bytes())
+                                 + " bytes) - the size model does not fit this context");
+    }
+    cost.archived_ciphertext_extra = per - cost.ciphertext_bytes();
+    cost.archive_fixed_bytes = one - per;
+    return cost;
+}
+
+json estimate_row_json(const fhe_toolkit::psi::Estimate& e) {
+    json row;
+    row["limbs"]                  = e.plan.limbs;
+    row["signatureBitsDelivered"] = e.signature_bits_delivered;
+    row["ciphertextsSelf"]        = e.ciphertexts_self;
+    row["inputBytesSelf"]         = e.input_bytes_self;
+    row["inputBytesTotal"]        = e.input_bytes_total;
+    row["multiplications"]        = e.multiplications;
+    row["coreSeconds"]            = e.core_seconds;
+    row["expectedFalseMatches"]   = e.expected_false_matches;
+    return row;
+}
+
+std::string human_bytes(std::uint64_t bytes) {
+    const char* units[] = { "B", "KB", "MB", "GB", "TB" };
+    double v = static_cast<double>(bytes);
+    int u = 0;
+    while (v >= 1000.0 && u < 4) { v /= 1000.0; ++u; }
+    std::ostringstream out;
+    out.setf(std::ios::fixed);
+    out.precision(u == 0 ? 0 : 1);
+    out << v << " " << units[u];
+    return out.str();
+}
+
+}  // namespace
+
+int run_crypto_psi_estimate(const CryptoPsiEstimateArgs& args) {
+    namespace psi = fhe_toolkit::psi;
+
+    const auto spec = fhe_toolkit::crypto::get_crypto_context_spec(args.context_spec);
+    if (!spec) {
+        std::cerr << "error: unknown context spec: " << args.context_spec << "\n";
+        return 2;
+    }
+    // The same refusals as the encoder, so a plan this quotes is one it can encode.
+    if (spec->scheme != "BFV" || spec->plaintext_modulus <= 65536) {
+        std::cerr << "error: schema 'signature-table' requires a BFV context spec with t > 65536; got '"
+                  << spec->id << "' (" << spec->scheme << ", t = " << spec->plaintext_modulus << ")\n";
+        return 2;
+    }
+    if (args.shards > 1) {
+        std::cerr << "error: --shards " << args.shards << ": sharding is not implemented yet (step F1)\n";
+        return 2;
+    }
+    if (args.records == 0) {
+        std::cerr << "error: --records must be at least 1 (the encoder refuses an empty input)\n";
+        return 2;
+    }
+
+    const std::int64_t slot_count = resolve_slot_count(spec->id);
+    psi::Request req;
+    req.records          = args.records;
+    req.signature_bits   = args.signature_bits;
+    req.target_drop_rate = args.target_overflow;
+    req.context.slots    = static_cast<std::uint64_t>(slot_count);
+
+    psi::Plan plan;
+    psi::Estimate e;
+    std::vector<psi::Estimate> sensitivity;
+    unsigned likely_p50 = 0, likely_p99 = 0;
+    std::uint64_t bytes_at_p99 = 0;
+    try {
+        if (args.dynamic_tables) {
+            if (args.tables > 0) throw std::invalid_argument("--dynamic-tables and --tables are exclusive");
+            req.per_level_only = true;
+        }
+        // Sized exactly as the encoder sizes: from this party's count alone.
+        plan = plan_signature_table(req, args.cells, args.tables, args.limbs, args.count_groups);
+        if (args.dynamic_tables && plan.cells_total < static_cast<std::uint64_t>(slot_count)) {
+            throw std::invalid_argument("--dynamic-tables needs at least " + std::to_string(slot_count)
+                                        + " cells (per-level tables), not " + std::to_string(plan.cells_total));
+        }
+        if (args.peer_tables > 0) plan.peer_levels = args.peer_tables;
+        // Checked the way the encoder checks it, before the table is built.
+        const auto layout = psi::bundle_layout(plan.table_params(), plan.count_groups,
+                                               static_cast<std::uint64_t>(slot_count));
+        (void)layout;
+
+        const fhe_toolkit::crypto::Context ctx(*spec);
+        req.context = measure_context_cost(ctx, static_cast<std::uint64_t>(slot_count));
+        req.peer_records = args.peer_records;  // accuracy only: it never moves the plan
+        e = psi::estimate(req, plan);
+        if (args.dynamic_tables) {
+            // The data sets T. Quote the model's T (above) and how large the fullest cell is likely to be.
+            likely_p50 = psi::likely_fullest_cell(args.records, plan.cells_total, 0.5);
+            likely_p99 = psi::likely_fullest_cell(args.records, plan.cells_total, 0.99);
+            psi::Plan at_p99 = plan;
+            at_p99.levels = std::max(1u, likely_p99);
+            bytes_at_p99 = psi::estimate(req, at_p99).input_bytes_self;
+        }
+
+        std::vector<unsigned> ks;
+        for (unsigned k : { 4u, 6u, 8u, plan.limbs }) {
+            if (k <= req.context.max_limbs && std::find(ks.begin(), ks.end(), k) == ks.end()) ks.push_back(k);
+        }
+        std::sort(ks.begin(), ks.end());
+        sensitivity = psi::limb_sensitivity(req, plan, ks);
+    } catch (const std::exception& ex) {
+        std::cerr << "error: cannot estimate the signature tables: " << ex.what() << "\n";
+        return 1;
+    }
+
+    // The approximate variant (design §3.7): FNV-1a-64 mod 16384, one indicator per record.
+    const double approx_false_matches = static_cast<double>(e.records) * static_cast<double>(e.peer_records) / 16384.0;
+    const bool quota_known = args.storage_quota_bytes >= 0;
+    const bool quota_unlimited = args.storage_quota_bytes == 0;
+    const std::int64_t headroom = quota_known && !quota_unlimited
+        ? args.storage_quota_bytes - static_cast<std::int64_t>(args.storage_used_bytes)
+              - static_cast<std::int64_t>(e.input_bytes_self)
+        : 0;
+
+    if (args.emit_json) {
+        json out;
+        out["status"]         = "ok";
+        out["schema"]         = "signature-table";
+        out["contextSpec"]    = spec->id;
+        out["slotCount"]      = slot_count;
+        out["towers"]         = req.context.towers;
+        out["records"]        = e.records;
+        out["peerRecords"]    = e.peer_records;
+        out["cells"]          = plan.cells_total;
+        out["tables"]         = plan.levels;
+        if (args.peer_tables > 0) out["peerTables"] = args.peer_tables;
+        if (args.dynamic_tables) {
+            out["dynamicTables"] = { { "tablesModel", plan.levels },
+                                     { "fullestCellP50", likely_p50 },
+                                     { "fullestCellP99", likely_p99 },
+                                     { "inputBytesSelfAtP99", bytes_at_p99 },
+                                     { "note", "the encoder uses this data's fullest cell as T; bytes and chunks above "
+                                               "are at the model's T" } };
+        }
+        out["limbs"]          = plan.limbs;
+        out["shards"]         = plan.shards;
+        out["countGroups"]    = plan.count_groups;
+        out["layout"]         = e.prealigned ? "prealigned" : "per-level";
+        out["signatureBits"]          = args.signature_bits;
+        out["signatureBitsDelivered"] = e.signature_bits_delivered;
+
+        out["ciphertextsSelf"]     = e.ciphertexts_self;
+        out["inputBytesSelf"]      = e.input_bytes_self;
+        out["inputBytesPeer"]      = e.input_bytes_peer;
+        out["inputBytesTotal"]     = e.input_bytes_total;
+        out["shardManifestCount"]  = e.input_objects;
+        out["outputBytes"]         = { { "count", e.count_output_bytes }, { "itemized", e.itemized_output_bytes } };
+        out["itemizedOutputCiphertexts"] = e.itemized_output_ciphertexts;
+        out["peerDecryptBytes"]    = { { "count", e.count_output_bytes }, { "itemized", e.peer_decrypt_bytes } };
+
+        out["computeChunks"]   = e.chunks;
+        out["multiplications"] = e.multiplications;
+        out["coreSeconds"]     = e.core_seconds;
+        out["secondsPerMultiplication"] = req.context.seconds_per_mult;
+
+        if (!quota_known) {
+            out["storageQuotaHeadroom"] = nullptr;
+        } else if (quota_unlimited) {
+            out["storageQuotaHeadroom"] = "unlimited";
+        } else {
+            out["storageQuotaHeadroom"] = headroom;
+            out["fitsStorageQuota"] = headroom >= 0;
+        }
+
+        out["expectedDropRate"]        = e.expected_drop_rate;
+        out["expectedOverflowedCells"] = e.expected_overflowed_cells;
+        out["expectedFalseMatches"]    = e.expected_false_matches;
+        json rows = json::array();
+        for (const auto& row : sensitivity) rows.push_back(estimate_row_json(row));
+        out["limbSensitivity"] = rows;
+        out["approximateVariant"] = { { "contextSpec", "bfv-default-v1" },
+                                      { "expectedFalseMatches", approx_false_matches } };
+
+        out["framing"] = { { "ciphertextBytes", req.context.ciphertext_bytes() },
+                           { "archiveFixedBytes", req.context.archive_fixed_bytes },
+                           { "archivedCiphertextExtra", req.context.archived_ciphertext_extra },
+                           { "singleCiphertextExtra", req.context.single_ciphertext_extra },
+                           // Results are written by the wrapper, not here, so their framing cannot be
+                           // probed locally: this is what the wrapper wrote at bfv-exact-psi-v1.
+                           { "outputFraming", "measured from wrapper results at bfv-exact-psi-v1" } };
+        // Named rather than omitted, so nobody reads their absence as zero.
+        out["unmodelled"] = { { "timeP50Sec", "wall time needs the engine's thread budget and hardware (E4)" },
+                              { "timeP90Sec", "wall time needs the engine's thread budget and hardware (E4)" },
+                              { "credits", "pricing lives on the platform (E4)" } };
+        json warnings = json::array();
+        for (const auto& w : e.warnings) warnings.push_back(w.message);
+        out["warnings"] = warnings;
+        std::cout << out.dump(2) << "\n";
+        return 0;
+    }
+
+    std::cout << "Dry run: signature-table for " << e.records << " records (peer " << e.peer_records
+              << "), nothing encrypted or written.\n";
+    std::cout << "  Table:        " << plan.cells_total << " cells x " << plan.levels << " tables, "
+              << plan.limbs << " limbs, " << plan.count_groups << " count groups, "
+              << (e.prealigned ? "prealigned" : "per-level") << " layout\n";
+    if (args.dynamic_tables) {
+        std::cout << "  Tables:       set by the data (--dynamic-tables): the fullest cell is likely " << likely_p50
+                  << ", at most " << likely_p99 << " in 99 % of datasets (" << human_bytes(bytes_at_p99)
+                  << " upload at " << likely_p99 << "); figures below are at the model's " << plan.levels << "\n";
+    }
+    std::cout << "  Signature:    " << args.signature_bits << " bits asked, " << e.signature_bits_delivered
+              << " delivered\n";
+    std::cout << "  Upload:       " << human_bytes(e.input_bytes_self) << " (" << e.input_bytes_self
+              << " bytes, " << e.ciphertexts_self << " ciphertexts) each; " << human_bytes(e.input_bytes_total)
+              << " both parties\n";
+    std::cout << "  Result:       count " << human_bytes(e.count_output_bytes) << "; itemized "
+              << human_bytes(e.itemized_output_bytes) << " (" << e.itemized_output_ciphertexts
+              << " ciphertexts), which the other party must also partially decrypt\n";
+    std::cout << "  Compute:      " << e.chunks << " chunks, " << e.multiplications << " multiplications, ~"
+              << std::llround(e.core_seconds) << " core-seconds at " << req.context.seconds_per_mult
+              << " s per multiplication\n";
+    std::cout << "  Accuracy:     expected drop rate " << e.expected_drop_rate << ", expected false matches "
+              << e.expected_false_matches << "\n";
+    for (const auto& row : sensitivity) {
+        std::cout << "    at " << row.plan.limbs << " limbs: " << human_bytes(row.input_bytes_self)
+                  << " each, " << row.multiplications << " multiplications, "
+                  << row.signature_bits_delivered << " bits, expected false matches "
+                  << row.expected_false_matches << "\n";
+    }
+    std::cout << "  Approximate:  the bfv-default-v1 variant expects ~" << approx_false_matches
+              << " false matches at these sizes\n";
+    if (quota_known && !quota_unlimited) {
+        std::cout << "  Storage:      " << (headroom >= 0 ? "fits" : "DOES NOT FIT") << " the quota ("
+                  << headroom << " bytes of headroom after this upload)\n";
+    }
+    for (const auto& w : e.warnings) std::cout << "  warning: " << w.message << "\n";
     return 0;
 }
 
@@ -2917,6 +3229,7 @@ void register_crypto(CLI::App& app,
                      CryptoSignArgs& sign_args,
                      CryptoVerifyArgs& verify_args,
                      CryptoEncryptArgs& encrypt_args,
+                     CryptoPsiEstimateArgs& psi_estimate_args,
                      CryptoDecryptArgs& decrypt_args,
                      CryptoKeysetupContributeArgs& keysetup_contribute_args,
                      CryptoRelinContributeArgs& relin_contribute_args,
@@ -3030,6 +3343,10 @@ void register_crypto(CLI::App& app,
                         "signature-table: number of cells m, a power of two (default: solved)");
     encrypt->add_option("--tables", encrypt_args.tables,
                         "signature-table: number of parallel tables T (default: solved)");
+    encrypt->add_flag  ("--dynamic-tables", encrypt_args.dynamic_tables,
+                        "signature-table: use exactly as many tables as this data's fullest cell needs - more "
+                        "than the model expected if it collides more, fewer if tables would be empty. Needs at "
+                        "least one ciphertext of cells; the other party's table count may then differ");
     encrypt->add_option("--limbs", encrypt_args.limbs,
                         "signature-table: 16-bit limbs per signature (advanced; default: derived "
                         "from --signature-bits)");
@@ -3053,6 +3370,39 @@ void register_crypto(CLI::App& app,
     encrypt->add_flag  ("--json", encrypt_args.emit_json, "Emit JSON output");
     encrypt->callback([&encrypt_args, exit_code]() {
         *exit_code = run_crypto_encrypt(encrypt_args);
+    });
+
+    auto* psi_estimate = crypto->add_subcommand("psi-estimate",
+        "Dry run for schema 'signature-table': the parameters crypto encrypt would pick for these flags, "
+        "and what it would cost in bytes, compute and accuracy. Needs no input, key or grant; writes nothing.");
+    psi_estimate->add_option("--records", psi_estimate_args.records,
+                             "Records this party will encode (the rows crypto encrypt would read)")->required();
+    psi_estimate->add_option("--peer-records", psi_estimate_args.peer_records,
+                             "The other party's records (default: the same); affects accuracy only");
+    psi_estimate->add_option("--context-spec", psi_estimate_args.context_spec,
+                             "Crypto context spec (default: bfv-exact-psi-v1)");
+    psi_estimate->add_option("--signature-bits", psi_estimate_args.signature_bits,
+                             "As crypto encrypt (default 128)");
+    psi_estimate->add_option("--cells", psi_estimate_args.cells, "As crypto encrypt (default: solved)");
+    psi_estimate->add_option("--tables", psi_estimate_args.tables, "As crypto encrypt (default: solved)");
+    psi_estimate->add_flag  ("--dynamic-tables", psi_estimate_args.dynamic_tables,
+                             "As crypto encrypt: also quote how many tables the data is likely to need");
+    psi_estimate->add_option("--peer-tables", psi_estimate_args.peer_tables,
+                             "The other party's table count, when it differs (per-level tables only)");
+    psi_estimate->add_option("--limbs", psi_estimate_args.limbs,
+                             "As crypto encrypt (default: derived from --signature-bits)");
+    psi_estimate->add_option("--count-groups", psi_estimate_args.count_groups,
+                             "As crypto encrypt (default: solved)");
+    psi_estimate->add_option("--shards", psi_estimate_args.shards, "As crypto encrypt (only 1 is implemented)");
+    psi_estimate->add_option("--target-overflow", psi_estimate_args.target_overflow,
+                             "As crypto encrypt (default 1e-6)");
+    psi_estimate->add_option("--storage-quota-bytes", psi_estimate_args.storage_quota_bytes,
+                             "Your plan's storage quota, to check this upload fits (0 = no limit)");
+    psi_estimate->add_option("--storage-used-bytes", psi_estimate_args.storage_used_bytes,
+                             "Storage already in use against that quota (default 0)");
+    psi_estimate->add_flag  ("--json", psi_estimate_args.emit_json, "Emit JSON output");
+    psi_estimate->callback([&psi_estimate_args, exit_code]() {
+        *exit_code = run_crypto_psi_estimate(psi_estimate_args);
     });
 
     auto* decrypt = crypto->add_subcommand("decrypt",
