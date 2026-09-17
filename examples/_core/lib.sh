@@ -321,6 +321,24 @@ load_session() {
     : "${JULENNY_PERMISSION_ID:?config.env missing JULENNY_PERMISSION_ID}"
     : "${JULENNY_SIGNING_SECRET:?config.env missing JULENNY_SIGNING_SECRET}"
 
+    # The FHE secret share is named after the KEYSETUP role, not the data role.
+    #
+    # The side profile sets a default filename, but it is a DATA-role profile and the two
+    # roles can disagree: a permission can be created in either direction inside one
+    # collaboration, so the data owner is not always the keysetup lead. Taking the name from
+    # the side profile means a reversed permission looks for the wrong file - and a missing
+    # file is the LUCKY outcome, because with both names present it would partial-decrypt
+    # with the wrong role and return a silently wrong answer.
+    #
+    # JULENNY_ROLE comes from config.env, written by 00-init from what the platform reports.
+    # When it is absent the side profile's default stands, which is the old behaviour and is
+    # correct for every collaboration where the two roles agree.
+    if [[ -n "${JULENNY_ROLE:-}" ]]; then
+        local _share_for_role
+        _share_for_role="$(secret_share_filename_for_role "$JULENNY_ROLE")"
+        [[ -n "$_share_for_role" ]] && JL_SECRET_SHARE_FILE="$_share_for_role"
+    fi
+
     mkdir -p "$JL_KEYS_DIR" "$JL_ENV_DIR" "$JL_PEER_DIR"
 }
 
@@ -913,6 +931,38 @@ function_requires_relin_keys() {
     # worst attempts an exchange the platform will reject.
     [[ -f "$fn_def" ]] || return 0
     jq -e '(.requiredEvalKeys // ["relinearization", "sum"]) | index("relinearization")'         "$fn_def" > /dev/null 2>&1
+}
+
+# WHICH HALF OF THE KEY CEREMONY THIS MACHINE RUNS: "lead" or "main".
+#
+# Lead and main build different key material and produce different partial decryptions, and
+# the assignment is fixed once, when the joint key is built. It is NOT the same thing as the
+# data role: a permission can be created in either direction inside one collaboration, so the
+# data owner is not always the keysetup lead.
+#
+# Inferring it from the data role - which is what hardcoding it in 00-init amounted to - makes
+# a reversed permission run the wrong half. The missing-file error that produces is the LUCKY
+# outcome; with both filenames present it would partial-decrypt with the wrong role and return
+# a silently wrong answer.
+#
+# Prints the platform's answer, or "" when the platform does not know (joint keys created
+# before it was recorded are not backfilled). The caller then keeps its old behaviour.
+get_platform_keysetup_role() {
+    local state; state="$(get_keysetup_state 2>/dev/null || echo '{}')"
+    echo "$state" | jq -r '.yourKeysetupRole // empty'
+}
+
+# The filename this machine's FHE secret share is stored under.
+#
+# Follows the KEYSETUP role, not the data role (David, 2026-09-17): on a reversed permission a
+# party uses the other side's filename, which is what keeps the name describing the material.
+# Nothing is renamed and no compatibility shim is needed.
+secret_share_filename_for_role() {
+    case "$1" in
+        lead) echo "fhe_secret_key.bin" ;;
+        main) echo "my_share_secret.bin" ;;
+        *)    echo "" ;;
+    esac
 }
 
 # Evaluation keys this permission's function needs that the COLLABORATION cannot supply.

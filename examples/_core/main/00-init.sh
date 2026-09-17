@@ -409,6 +409,22 @@ if echo "$REG_RESP" | jq -e '.error' > /dev/null 2>&1; then
 fi
 success "Signing public key registered for crypto context: $CTX_SPEC"
 
+# -------- Which half of the key ceremony this machine runs --------
+# Ask the PLATFORM rather than assuming it from the data role. Lead and main build different
+# key material and produce different partial decryptions, and the assignment is fixed once,
+# when the joint key is built - so in a permission created in the other direction, the data
+# owner is NOT the keysetup lead.
+#
+# The platform reports nothing for joint keys created before it recorded this, which are not
+# backfilled. The fallback is the old assumption, correct wherever the two roles agree.
+KEYSETUP_ROLE="$(curl -sS -H "x-api-key: $JULENNY_API_KEY"     "$JULENNY_API_BASE/api/fhe-permissions/$PERM_ID/keysetup" 2>/dev/null     | jq -r '.yourKeysetupRole // empty')"
+if [[ -z "$KEYSETUP_ROLE" ]]; then
+    KEYSETUP_ROLE="main"
+    info "The platform does not record who leads this ceremony; assuming '$KEYSETUP_ROLE'."
+else
+    info "Keysetup role for this machine, as recorded by the platform: $KEYSETUP_ROLE"
+fi
+
 # -------- Write config.env --------
 cat > "$JL_CONFIG" <<EOF
 # JuLenny rule-based-cross-match session config for Beta (data consumer / main).
@@ -418,7 +434,7 @@ JULENNY_PROJECT_ID="$JULENNY_PROJECT_ID"
 JULENNY_JOINT_KEY_ID="$JULENNY_JOINT_KEY_ID"
 JULENNY_PERMISSION_ID="$PERM_ID"
 JULENNY_OUR_SIDE="data-consumer"
-JULENNY_ROLE="main"
+JULENNY_ROLE="$KEYSETUP_ROLE"
 JULENNY_RESULT_VISIBILITY="$JULENNY_RESULT_VISIBILITY"
 JULENNY_SCHEME="$JULENNY_SCHEME"
 JULENNY_CRYPTO_CONTEXT_SPEC="$CTX_SPEC"

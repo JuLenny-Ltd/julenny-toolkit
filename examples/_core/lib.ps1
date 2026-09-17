@@ -524,6 +524,22 @@ function Import-JlSession {
     foreach ($k in $cfg.Keys) {
         Set-Variable -Name $k -Value $cfg[$k] -Scope Script -Force
     }
+
+    # The FHE secret share is named after the KEYSETUP role, not the data role.
+    #
+    # The side profile sets a default filename, but it is a DATA-role profile and the two
+    # roles can disagree: a permission can be created in either direction inside one
+    # collaboration, so the data owner is not always the keysetup lead. Taking the name from
+    # the side profile makes a reversed permission look for the wrong file - and a missing
+    # file is the LUCKY outcome, because with both names present it would partial-decrypt
+    # with the wrong role and return a silently wrong answer.
+    #
+    # When config.env carries no role the side profile's default stands, which is the old
+    # behaviour and is correct wherever the two roles agree.
+    if ($script:JULENNY_ROLE) {
+        $shareForRole = Get-JlSecretShareFileForRole $script:JULENNY_ROLE
+        if ($shareForRole) { $script:JL_SECRET_SHARE_FILE = $shareForRole }
+    }
 }
 
 # ============================================================================
@@ -1174,6 +1190,36 @@ function Test-JlFunctionRequiresRelinKeys {
 #
 # Empty on a platform that predates the field, which is the safe reading: the run proceeds
 # exactly as it did before.
+# Which half of the key ceremony this machine runs, for writing into config.env.
+#
+# Asks the PLATFORM. Returns the data-role default when the platform has no record, which is
+# the old behaviour and is correct wherever the data role and the keysetup role agree.
+function Get-JlKeysetupRoleForConfig {
+    try {
+        $state = Invoke-JlApi GET "/api/fhe-permissions/$($script:JULENNY_PERMISSION_ID)/keysetup" -AllowFailure
+        if ($state -and (Test-JlHasProperty $state 'yourKeysetupRole') -and $state.yourKeysetupRole) {
+            Write-JlInfo "Keysetup role for this machine, as recorded by the platform: $($state.yourKeysetupRole)"
+            return "$($state.yourKeysetupRole)"
+        }
+    } catch { }
+    Write-JlInfo "The platform does not record who leads this ceremony; assuming '$($script:JL_ROLE_DIR)'."
+    return "$($script:JL_ROLE_DIR)"
+}
+
+# The filename this machine's FHE secret share is stored under.
+#
+# Follows the KEYSETUP role, not the data role (David, 2026-09-17): on a reversed permission
+# a party uses the other side's filename, which keeps the name describing the material it
+# holds. Nothing is renamed and no compatibility shim is needed.
+function Get-JlSecretShareFileForRole {
+    param([string] $Role)
+    switch ($Role) {
+        'lead' { return 'fhe_secret_key.bin' }
+        'main' { return 'my_share_secret.bin' }
+        default { return '' }
+    }
+}
+
 function Get-JlMissingEvalKeys {
     $state = Get-JlKeysetupState
     if (-not $state) { return @() }
@@ -1917,7 +1963,14 @@ function Invoke-JlInitSession {
         "JULENNY_JOINT_KEY_ID=`"$jointKeyId`"",
         "JULENNY_PERMISSION_ID=`"$permId`"",
         "JULENNY_OUR_SIDE=`"$($script:JULENNY_OUR_SIDE)`"",
-        "JULENNY_ROLE=`"$($script:JL_ROLE_DIR)`"",
+        # Which half of the key ceremony this machine runs, as the PLATFORM records it -
+        # not inferred from the data role. Lead and main build different key material and
+        # produce different partial decryptions, and the assignment is fixed once, when the
+        # joint key is built, so in a permission created in the other direction the data
+        # owner is NOT the keysetup lead. Falls back to the data role when the platform has
+        # no record, which is every joint key made before it kept one; those are not
+        # backfilled, and the fallback is correct wherever the two roles agree.
+        "JULENNY_ROLE=`"$(Get-JlKeysetupRoleForConfig)`"",
         "JULENNY_RESULT_VISIBILITY=`"$visibility`"",
         "JULENNY_SCHEME=`"$scheme`"",
         "JULENNY_CRYPTO_CONTEXT_SPEC=`"$ctxSpec`"",
