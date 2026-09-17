@@ -18,16 +18,31 @@ $relinR1   = Join-Path $script:JL_KEYS_DIR 'lead-relin-r1.bin'
 $sumR1     = Join-Path $script:JL_KEYS_DIR 'lead-sum-r1.bin'
 
 # -------- 1. pk-share (round 1) --------
-Write-JlInfo "Generating FHE keypair ($($script:JL_OUR_LABEL)'s contribution)..."
-Invoke-JlCli @(
-    'crypto', 'keysetup-contribute',
-    '--context-spec',  $script:JULENNY_CRYPTO_CONTEXT_SPEC,
-    '--role',          'lead',
-    '--output-secret', $fheSecret,
-    '--output-public', $fhePublic
-)
-Write-JlSuccess "FHE secret: $fheSecret  (stays here, never upload)"
-Write-JlSuccess "FHE public contribution: $fhePublic"
+# REUSE an existing secret share rather than generating over it.
+#
+# This phase used to generate unconditionally, which made it destructive to re-run: a new
+# share does not match the joint key already built from the old one, so this machine could
+# no longer partial-decrypt anything. That is why the only advice on a half-built
+# collaboration was to start a new one.
+#
+# It has to be re-runnable, because a collaboration whose joint key was built for a function
+# needing fewer keys still owes the rounds for the keys it lacks, and those rounds are built
+# FROM this share. A fresh ceremony has no share to find, so it still generates one.
+if ((Test-Path -LiteralPath $fheSecret) -and (Test-Path -LiteralPath $fhePublic)) {
+    Write-JlInfo "Reusing this machine's existing FHE key share; not generating a new one."
+    Write-JlInfo "  $fheSecret"
+} else {
+    Write-JlInfo "Generating FHE keypair ($($script:JL_OUR_LABEL)'s contribution)..."
+    Invoke-JlCli @(
+        'crypto', 'keysetup-contribute',
+        '--context-spec',  $script:JULENNY_CRYPTO_CONTEXT_SPEC,
+        '--role',          'lead',
+        '--output-secret', $fheSecret,
+        '--output-public', $fhePublic
+    )
+    Write-JlSuccess "FHE secret: $fheSecret  (stays here, never upload)"
+    Write-JlSuccess "FHE public contribution: $fhePublic"
+}
 
 Publish-JlEnvelope -BinPath $fhePublic -Round 1 -MessageType 'pk-share'
 

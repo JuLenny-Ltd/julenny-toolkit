@@ -20,15 +20,30 @@ RELIN_R1="$JL_KEYS_DIR/lead-relin-r1.bin"
 SUM_R1="$JL_KEYS_DIR/lead-sum-r1.bin"
 
 # -------- 1. pk-share (round 1) --------
-info "Generating FHE keypair (Acme's contribution)..."
-julenny-toolkit crypto keysetup-contribute \
-    --context-spec "$JULENNY_CRYPTO_CONTEXT_SPEC" \
-    --role lead \
-    --output-secret "$FHE_SECRET" \
-    --output-public "$FHE_PUBLIC" \
-    > /dev/null
-success "FHE secret: $FHE_SECRET  (stays here, never upload)"
-success "FHE public contribution: $FHE_PUBLIC"
+# REUSE an existing secret share rather than generating over it.
+#
+# This phase used to generate unconditionally, which made it destructive to re-run: a new
+# share does not match the joint key already built from the old one, so this machine could
+# no longer partial-decrypt anything. That is why the only advice on a half-built
+# collaboration was to start a new one.
+#
+# It has to be re-runnable, because a collaboration whose joint key was built for a function
+# needing fewer keys still owes the rounds for the keys it lacks, and those rounds are built
+# FROM this share. A fresh ceremony has no share to find, so it still generates one.
+if [[ -f "$FHE_SECRET" && -f "$FHE_PUBLIC" ]]; then
+    info "Reusing this machine's existing FHE key share; not generating a new one."
+    info "  $FHE_SECRET"
+else
+    info "Generating FHE keypair (Acme's contribution)..."
+    julenny-toolkit crypto keysetup-contribute \
+        --context-spec "$JULENNY_CRYPTO_CONTEXT_SPEC" \
+        --role lead \
+        --output-secret "$FHE_SECRET" \
+        --output-public "$FHE_PUBLIC" \
+        > /dev/null
+    success "FHE secret: $FHE_SECRET  (stays here, never upload)"
+    success "FHE public contribution: $FHE_PUBLIC"
+fi
 
 wrap_and_upload "$FHE_PUBLIC" 1 "pk-share"
 

@@ -40,17 +40,26 @@ if ($needsSum) {
 }
 
 # -------- 2. Derive the joint pk (chains on the peer's pk-share) --------
-Write-JlInfo "Deriving joint public key..."
-Invoke-JlCli @(
-    'crypto', 'keysetup-contribute',
-    '--context-spec',  $script:JULENNY_CRYPTO_CONTEXT_SPEC,
-    '--role',          'main',
-    '--peer-share',    $leadPkBin,
-    '--output-secret', $myShareSecret,
-    '--output-public', $jointPk
-)
-Write-JlSuccess "$($script:JL_OUR_LABEL)'s share secret: $myShareSecret  (stays here, never upload)"
-Write-JlSuccess "Joint public key: $jointPk"
+# REUSE an existing share rather than deriving over it. Same reason as the lead side: a new
+# share does not match the joint key already built from the old one, so re-running this phase
+# used to leave the machine unable to partial-decrypt. It has to be re-runnable, because the
+# rounds for a key the collaboration still lacks are built FROM this share.
+if ((Test-Path -LiteralPath $myShareSecret) -and (Test-Path -LiteralPath $jointPk)) {
+    Write-JlInfo "Reusing this machine's existing FHE key share; not deriving a new one."
+    Write-JlInfo "  $myShareSecret"
+} else {
+    Write-JlInfo "Deriving joint public key..."
+    Invoke-JlCli @(
+        'crypto', 'keysetup-contribute',
+        '--context-spec',  $script:JULENNY_CRYPTO_CONTEXT_SPEC,
+        '--role',          'main',
+        '--peer-share',    $leadPkBin,
+        '--output-secret', $myShareSecret,
+        '--output-public', $jointPk
+    )
+    Write-JlSuccess "$($script:JL_OUR_LABEL)'s share secret: $myShareSecret  (stays here, never upload)"
+    Write-JlSuccess "Joint public key: $jointPk"
+}
 
 Publish-JlEnvelope -BinPath $jointPk -Round 1 -MessageType 'pk-share'
 

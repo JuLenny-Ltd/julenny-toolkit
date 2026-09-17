@@ -39,16 +39,25 @@ if function_requires_sum_keys; then
 fi
 
 # -------- 2. Derive joint pk (chain on Acme's pk-share) --------
-info "Deriving joint public key..."
-julenny-toolkit crypto keysetup-contribute \
-    --context-spec "$JULENNY_CRYPTO_CONTEXT_SPEC" \
-    --role main \
-    --peer-share "$LEAD_PK_BIN" \
-    --output-secret "$MY_SHARE_SECRET" \
-    --output-public "$JOINT_PK" \
-    > /dev/null
-success "Beta's share secret: $MY_SHARE_SECRET  (stays here, never upload)"
-success "Joint public key: $JOINT_PK"
+# REUSE an existing share rather than deriving over it. Same reason as the lead side: a new
+# share does not match the joint key already built from the old one, so re-running this
+# phase used to leave the machine unable to partial-decrypt. It has to be re-runnable,
+# because the rounds for a key the collaboration still lacks are built FROM this share.
+if [[ -f "$MY_SHARE_SECRET" && -f "$JOINT_PK" ]]; then
+    info "Reusing this machine's existing FHE key share; not deriving a new one."
+    info "  $MY_SHARE_SECRET"
+else
+    info "Deriving joint public key..."
+    julenny-toolkit crypto keysetup-contribute \
+        --context-spec "$JULENNY_CRYPTO_CONTEXT_SPEC" \
+        --role main \
+        --peer-share "$LEAD_PK_BIN" \
+        --output-secret "$MY_SHARE_SECRET" \
+        --output-public "$JOINT_PK" \
+        > /dev/null
+    success "Beta's share secret: $MY_SHARE_SECRET  (stays here, never upload)"
+    success "Joint public key: $JOINT_PK"
+fi
 
 wrap_and_upload "$JOINT_PK" 1 "pk-share"
 
