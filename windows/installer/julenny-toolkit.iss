@@ -332,7 +332,11 @@ begin
     // v0.7.5: a folder the user can find, not a hidden one under AppData. The example
     // scripts share it now, and a folder people are told to drop CSV files into has to
     // be somewhere they can reach in Explorer.
-    WorkdirPage.Values[0] := ExpandConstant('{userprofile}\julenny-workdir');
+    // {%USERPROFILE}, the environment-variable form. Inno has no {userprofile}
+    // constant: using one compiles fine and then dies at RUNTIME with "Unknown
+    // constant", on the only path that reaches it - a machine with no previously
+    // recorded folder, which is every first install.
+    WorkdirPage.Values[0] := ExpandConstant('{%USERPROFILE}\julenny-workdir');
   // Swap the legacy folder-tree Browse for the modern IFileDialog picker.
   WorkdirPage.Buttons[0].OnClick := @BrowseClick;
 
