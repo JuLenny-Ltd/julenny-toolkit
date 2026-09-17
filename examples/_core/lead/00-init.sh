@@ -166,18 +166,36 @@ if [[ "${PROJECT_CHOICE,,}" == "n" ]]; then
     info "The partner company (Beta) must already exist on the platform."
     info "Ask Beta for their Collaboration ID (format XXXX-XXXX, visible on"
     info "their Company page in the JuLenny web UI)."
-    prompt_for PARTNER_INPUT "Partner (Beta) Collaboration ID (XXXX-XXXX)"
-    [[ -n "$PARTNER_INPUT" ]] || die "Partner Collaboration ID is required."
-    PARTNER_ID="$PARTNER_INPUT"
-
-    # 4) Collaboration name.
+    # 4+5) Ask for the partner id and the name, create, and ask AGAIN if the platform
+    # refuses. A collaboration id is typed by hand off the partner's company page, and ids
+    # are PER PLATFORM: the same partner has a different one on dev and on prod, so pasting
+    # the wrong one is an ordinary mistake rather than a rare accident. Ending the run over
+    # it threw away the API key entry, the scheme choice and the function choice made before
+    # this point.
     DEFAULT_COLLAB_NAME="Acme x Beta ($FN_SLUG, $(date +%Y-%m-%d))"
-    prompt_for COLLAB_NAME "Collaboration name" "$DEFAULT_COLLAB_NAME"
+    COLLAB_NAME=""
+    JULENNY_PROJECT_ID=""
+    while [[ -z "$JULENNY_PROJECT_ID" ]]; do
+        prompt_for PARTNER_INPUT "Partner (Beta) Collaboration ID (XXXX-XXXX)"
+        if [[ -z "$PARTNER_INPUT" ]]; then
+            warn "A Collaboration ID is required."
+            continue
+        fi
+        PARTNER_ID="$PARTNER_INPUT"
 
-    # 5) Create the project.
-    step "Creating collaboration via POST /api/fhe-projects..."
-    JULENNY_PROJECT_ID="$(create_collaboration "$PARTNER_ID" "$COLLAB_NAME")" \
-        || die "Collaboration creation failed."
+        # Asked once and kept across retries: the name was never the problem.
+        if [[ -z "$COLLAB_NAME" ]]; then
+            prompt_for COLLAB_NAME "Collaboration name" "$DEFAULT_COLLAB_NAME"
+        fi
+
+        step "Creating collaboration via POST /api/fhe-projects..."
+        if ! JULENNY_PROJECT_ID="$(create_collaboration "$PARTNER_ID" "$COLLAB_NAME")"; then
+            JULENNY_PROJECT_ID=""
+            info "Check the id on Beta's Company page on THIS platform:"
+            info "  $JULENNY_API_BASE"
+            echo
+        fi
+    done
     success "Collaboration created: $JULENNY_PROJECT_ID"
 
     # 6) Create the permission.

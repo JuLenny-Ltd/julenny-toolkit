@@ -554,19 +554,46 @@ function Invoke-JlApi {
     }
 
     try {
+        $script:JL_LAST_API_ERROR = ''
         return Invoke-RestMethod @params
     } catch {
-        if ($AllowFailure) { return $null }
-        $detail = $_.Exception.Message
+        # The platform explains every refusal in the response body - "Partner company not
+        # found.", "No remaining executions.", and so on. Losing it leaves the operator
+        # with a bare status code and nothing to act on, which is what happened to a
+        # mistyped collaboration id: a 400 and no hint that the id was the problem.
+        #
+        # Read the body BOTH ways. PowerShell puts it in ErrorDetails.Message sometimes and
+        # leaves it on the response stream other times, depending on the content type and
+        # how the request failed, and neither is reliable on its own.
+        $status = ''
+        $raw    = ''
+        try { if ($_.ErrorDetails -and $_.ErrorDetails.Message) { $raw = "$($_.ErrorDetails.Message)" } } catch { }
         try {
             $resp = $_.Exception.Response
             if ($resp) {
-                $reader = New-Object System.IO.StreamReader($resp.GetResponseStream())
-                $raw = $reader.ReadToEnd()
-                if ($raw) { $detail = "$detail -- $raw" }
+                try { $status = [int] $resp.StatusCode } catch { }
+                if (-not $raw) {
+                    $reader = New-Object System.IO.StreamReader($resp.GetResponseStream())
+                    $raw = $reader.ReadToEnd()
+                }
             }
         } catch { }
-        Stop-JlWithError "$Method $Path failed: $detail"
+
+        # Prefer the platform's own sentence over the JSON wrapper around it.
+        $friendly = ''
+        if ($raw) {
+            try {
+                $parsed = $raw | ConvertFrom-Json
+                if ($parsed -and (Test-JlHasProperty $parsed 'error')) { $friendly = "$($parsed.error)" }
+            } catch { $friendly = $raw }
+        }
+        if (-not $friendly) { $friendly = $_.Exception.Message }
+
+        $script:JL_LAST_API_ERROR = $friendly
+        if ($AllowFailure) { return $null }
+
+        $prefix = if ($status) { "$Method $Path failed ($status)" } else { "$Method $Path failed" }
+        Stop-JlWithError "$prefix`: $friendly"
     }
 }
 
@@ -1002,18 +1029,27 @@ function New-JlCollaboration {
         [Parameter(Mandatory = $true)][string] $Name,
         [string] $Description = 'Created from the JuLenny example scripts.'
     )
-    $resp = Invoke-JlApi POST "/api/fhe-projects" -Body @{
+    # -AllowFailure, so a refusal comes back as empty with the reason in
+    # $script:JL_LAST_API_ERROR rather than ending the run. The commonest refusal here is
+    # a collaboration id that does not exist on THIS platform - ids are per-platform, so a
+    # prod id pasted into a dev run looks exactly like a typo - and the right response to
+    # that is to ask again, not to make the operator start from the beginning.
+    $resp = Invoke-JlApi POST "/api/fhe-projects" -AllowFailure -Body @{
         partnerCompanyId = $PartnerCollaborationId
         name             = $Name
         description      = $Description
     }
-    $newId = ''
-    if ($resp) {
-        if ((Test-JlHasProperty $resp 'project') -and $resp.project) { $newId = $resp.project.id }
-        elseif ((Test-JlHasProperty $resp 'id'))                     { $newId = $resp.id }
+    if (-not $resp) {
+        $why = if ($script:JL_LAST_API_ERROR) { $script:JL_LAST_API_ERROR } else { 'the platform refused the request.' }
+        Write-JlWarn "Could not create the collaboration: $why"
+        return ''
     }
+    $newId = ''
+    if ((Test-JlHasProperty $resp 'project') -and $resp.project) { $newId = $resp.project.id }
+    elseif ((Test-JlHasProperty $resp 'id'))                     { $newId = $resp.id }
     if ([string]::IsNullOrWhiteSpace($newId)) {
-        Stop-JlWithError "Collaboration creation succeeded but no id was returned."
+        Write-JlWarn "The platform accepted the collaboration but returned no id."
+        return ''
     }
     return $newId
 }
@@ -1621,14 +1657,33 @@ function Invoke-JlInitSession {
         Write-JlInfo "The partner company must already exist on the platform."
         Write-JlInfo "Ask $($script:JL_PEER_LABEL) for their Collaboration ID (format XXXX-XXXX,"
         Write-JlInfo "visible on their Company page in the JuLenny web UI)."
-        $partnerId = Read-JlValue "Partner ($($script:JL_PEER_LABEL)) Collaboration ID (XXXX-XXXX)"
-        if (-not $partnerId) { Stop-JlWithError "Partner Collaboration ID is required." }
+        # Ask until it works. A collaboration id is typed by hand from the partner's company
+        # page, and ids are PER PLATFORM: the same partner has a different one on dev and on
+        # prod, so pasting the wrong one is an ordinary mistake rather than a rare accident.
+        # Ending the run over it threw away the API key entry, the scheme choice and the
+        # function choice that came before.
+        $projectId = ''
+        $collabName = ''
+        while (-not $projectId) {
+            $partnerId = Read-JlValue "Partner ($($script:JL_PEER_LABEL)) Collaboration ID (XXXX-XXXX)"
+            if (-not $partnerId) {
+                Write-JlWarn "A Collaboration ID is required."
+                continue
+            }
 
-        $defaultName = "$($script:JL_OUR_LABEL) x $($script:JL_PEER_LABEL) ($fnSlug, $(Get-Date -Format 'yyyy-MM-dd'))"
-        $collabName = Read-JlValue "Collaboration name" $defaultName
+            if (-not $collabName) {
+                $defaultName = "$($script:JL_OUR_LABEL) x $($script:JL_PEER_LABEL) ($fnSlug, $(Get-Date -Format 'yyyy-MM-dd'))"
+                $collabName = Read-JlValue "Collaboration name" $defaultName
+            }
 
-        Write-JlStep "Creating collaboration via POST /api/fhe-projects..."
-        $projectId = New-JlCollaboration -PartnerCollaborationId $partnerId -Name $collabName
+            Write-JlStep "Creating collaboration via POST /api/fhe-projects..."
+            $projectId = New-JlCollaboration -PartnerCollaborationId $partnerId -Name $collabName
+            if (-not $projectId) {
+                Write-JlInfo "Check the id on $($script:JL_PEER_LABEL)'s Company page on THIS platform:"
+                Write-JlInfo "  $($script:JULENNY_API_BASE)"
+                Write-Host ""
+            }
+        }
         Write-JlSuccess "Collaboration created: $projectId"
 
         $allowed = Read-JlValue "How many executions should this permission allow?" '10'
