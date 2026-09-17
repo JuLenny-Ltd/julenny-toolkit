@@ -146,6 +146,11 @@ SOLO SELF-TEST (one company, no partner) - a DIFFERENT sequence
    4. publish_final_keys with the JOINT public key and the FINAL relin key.
       For an internal grant your single submission is compared against itself and
       completes immediately.
+   4b. verify_keys, before encrypting anything. It compares the public keys on this
+      machine against the platform and replaces any that are stale or missing. A key
+      built for an index set that has since changed looks identical on disk, and
+      computing with one wastes the whole run. The example scripts do this
+      automatically at this point; here it has to be called.
    5. encrypt under the JOINT public key (not the lead's contribution), upload,
       declare_input_dataset. A two-input function needs BOTH inputs from you.
       Use list_workdir_files and ASK THE USER which file is which input.

@@ -203,6 +203,15 @@ export function registerGuideTools(server: McpServer, api: JulennyApiClient) {
 
         // ---- STAGE 2: provide your inputs ----
         if (missingMine.length > 0) {
+          // Check the local keys FIRST, before anything is encrypted under them.
+          //
+          // The example scripts do this automatically at exactly this point. The connector
+          // cannot: verify_keys is a verb someone has to call, so unless it is named here
+          // it never runs and the check exists on paper only. Named first in the list
+          // because a key that is stale or missing makes every step after it wasted work.
+          const keyCheck = `verify_keys(permissionId=${p.permissionId}) FIRST: confirm the public keys on this `
+            + 'machine are still the ones this collaboration agreed on, and re-download any that are not. '
+            + 'A key left over from an earlier index set looks identical to a current one on disk.';
           const actions = missingMine.map(i => {
             const bundle = i.layout === 'encrypted-bundle' && i.encodingRecipe;
             const steps = bundle
@@ -228,7 +237,7 @@ export function registerGuideTools(server: McpServer, api: JulennyApiClient) {
               + 'Do not read the file to decide, and do not ask for its contents.',
             );
           }
-          return ok({ ...base, stage: 'provide-inputs', summary: `Provide your ${missingMine.length} undeclared input(s). Get the signed def first with get_function_definition(saveAs) if you have not.`, yourUndeclaredInputs: missingMine.map(i => i.name), nextActions: actions });
+          return ok({ ...base, stage: 'provide-inputs', summary: `Provide your ${missingMine.length} undeclared input(s). Get the signed def first with get_function_definition(saveAs) if you have not.`, yourUndeclaredInputs: missingMine.map(i => i.name), nextActions: [keyCheck, ...actions] });
         }
 
         // ---- your inputs are in; look at executions ----
