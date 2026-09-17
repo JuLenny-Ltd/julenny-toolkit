@@ -26,8 +26,15 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+# The side profile is chosen by the DATA role, which the scenario bootstrap exports.
+# Sourced dynamically so this phase can be driven for either side: the keysetup role
+# (lead/main) and the data role (owner/consumer) are independent, and a permission can
+# be created in either direction inside one collaboration.
+#
+# The fallback keeps a DIRECT run of this script working, which is how the numbered
+# scripts are documented to be runnable on their own.
 # shellcheck source=../sides/data-owner.env
-source "$SCRIPT_DIR/../sides/data-owner.env"
+source "$SCRIPT_DIR/../sides/${JULENNY_OUR_SIDE:-data-owner}.env"
 # shellcheck source=../lib.sh
 source "$SCRIPT_DIR/../lib.sh"
 

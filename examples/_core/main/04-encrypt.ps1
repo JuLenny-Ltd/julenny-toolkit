@@ -15,7 +15,15 @@
 
 $ErrorActionPreference = 'Stop'
 $here = $PSScriptRoot
-. "$here\..\sides\data-consumer.ps1"
+# The side profile is chosen by the DATA role, which the scenario bootstrap exports.
+# Sourced dynamically so this phase can be driven for either side: the keysetup role
+# (lead/main) and the data role (owner/consumer) are independent, and a permission can
+# be created in either direction inside one collaboration.
+#
+# The fallback keeps a DIRECT run of this script working, which is how the numbered
+# scripts are documented to be runnable on their own.
+$jlSide = if ($env:JULENNY_OUR_SIDE) { $env:JULENNY_OUR_SIDE } else { 'data-consumer' }
+. "$here\..\sides\$jlSide.ps1"
 . "$here\..\lib.ps1"
 Import-JlSession
 
