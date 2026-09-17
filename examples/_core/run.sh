@@ -391,7 +391,32 @@ case "$KS_STATE" in
             err "a new secret share on this machine."
             die "Cannot proceed."
         fi
-        info "Joint key is already complete (reused or finalized). Skipping bundles."
+        # The joint key exists, but it may have been built for a function needing FEWER
+        # evaluation keys than this permission's function needs. Skipping the bundles then
+        # left the run to fail much later, at finalize, asking for a local file that was
+        # never made and telling the operator to re-run a phase that would skip again.
+        #
+        # A collaboration is not limited by the scope of its first permission, so the rounds
+        # for whatever it still lacks are run here. The phases are re-runnable now: they reuse
+        # this machine's existing key share instead of generating over it, and every round
+        # already submitted is idempotent on the platform.
+        MISSING_EVAL_KEYS="$(get_missing_eval_keys)"
+        if [[ -n "$MISSING_EVAL_KEYS" ]]; then
+            warn "This collaboration is missing: $MISSING_EVAL_KEYS"
+            warn "Its joint key was built for a function that did not need it."
+            info "Running the extra key-setup rounds. Both sides have to do this."
+            echo
+            # No gate is added here on purpose. The waits already exist inside the phases:
+            # the consumer's 01 waits for the owner's sum-round1 before deriving its own, and
+            # 03 waits for the peer's sum-round1-continue before combining. Adding another
+            # wait outside them would be a second opinion about the same thing.
+            step "${JL_OUR_LABEL}: key-setup rounds for $MISSING_EVAL_KEYS"
+            "$SCRIPT_DIR/$JL_ROLE_DIR/01-keysetup-1.sh"
+            step "${JL_OUR_LABEL}: finalize the added key"
+            "$SCRIPT_DIR/$JL_ROLE_DIR/03-finalize-keysetup.sh"
+        else
+            info "Joint key is already complete (reused or finalized). Skipping bundles."
+        fi
         ;;
     pending-keysetup|in-progress)
         if is_owner; then

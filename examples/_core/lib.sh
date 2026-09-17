@@ -915,6 +915,19 @@ function_requires_relin_keys() {
     jq -e '(.requiredEvalKeys // ["relinearization", "sum"]) | index("relinearization")'         "$fn_def" > /dev/null 2>&1
 }
 
+# Evaluation keys this permission's function needs that the COLLABORATION cannot supply.
+#
+# Non-empty means keysetup is complete - the joint key really is built - and this permission
+# still owes the rounds that build these keys. A collaboration is not limited by the scope of
+# its first permission, so the answer is to run those rounds, not to start a new collaboration.
+#
+# Empty on a platform that predates the field, which is the safe reading: the run proceeds
+# exactly as it did before.
+get_missing_eval_keys() {
+    local state; state="$(get_keysetup_state)"
+    echo "$state" | jq -r '(.missingEvalKeys // []) | join(" ")'
+}
+
 get_pending_rotation_keysetup() {
     local state; state="$(get_keysetup_state)"
     echo "$state" | jq -c '.pendingRotationKeySetup // null'

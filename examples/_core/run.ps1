@@ -358,7 +358,32 @@ switch -Regex ($ksState) {
             Write-JlErr "a new secret share on this machine."
             Stop-JlWithError "Cannot proceed."
         }
-        Write-JlInfo "Joint key is already complete (reused or finalized). Skipping bundles."
+        # The joint key exists, but it may have been built for a function needing FEWER
+        # evaluation keys than this permission's function needs. Skipping the bundles then
+        # left the run to fail much later, at finalize, asking for a local file that was
+        # never made and telling the operator to re-run a phase that would skip again.
+        #
+        # A collaboration is not limited by the scope of its first permission, so the rounds
+        # for whatever it still lacks are run here. The phases are re-runnable now: they reuse
+        # this machine's existing key share instead of generating over it, and every round
+        # already submitted is idempotent on the platform.
+        #
+        # No extra wait is added: the consumer's 01 already waits for the owner's sum-round1,
+        # and 03 waits for the peer's sum-round1-continue before combining.
+        $missingEvalKeys = Get-JlMissingEvalKeys
+        if ($missingEvalKeys.Count -gt 0) {
+            $missingList = $missingEvalKeys -join ', '
+            Write-JlWarn "This collaboration is missing: $missingList"
+            Write-JlWarn "Its joint key was built for a function that did not need it."
+            Write-JlInfo "Running the extra key-setup rounds. Both sides have to do this."
+            Write-Host ""
+            Write-JlStep "$($script:JL_OUR_LABEL): key-setup rounds for $missingList"
+            Invoke-JlPhase '01-keysetup-1.ps1'
+            Write-JlStep "$($script:JL_OUR_LABEL): finalize the added key"
+            Invoke-JlPhase '03-finalize-keysetup.ps1'
+        } else {
+            Write-JlInfo "Joint key is already complete (reused or finalized). Skipping bundles."
+        }
     }
     '^(pending-keysetup|in-progress)$' {
         if (Test-JlIsOwner) {

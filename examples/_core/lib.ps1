@@ -1166,6 +1166,21 @@ function Test-JlFunctionRequiresRelinKeys {
     return ((Get-JlRequiredEvalKeys $Path) -contains 'relinearization')
 }
 
+# Evaluation keys this permission's function needs that the COLLABORATION cannot supply.
+#
+# Non-empty means keysetup is complete - the joint key really is built - and this permission
+# still owes the rounds that build these keys. A collaboration is not limited by the scope of
+# its first permission, so the answer is to run those rounds, not to start a new one.
+#
+# Empty on a platform that predates the field, which is the safe reading: the run proceeds
+# exactly as it did before.
+function Get-JlMissingEvalKeys {
+    $state = Get-JlKeysetupState
+    if (-not $state) { return @() }
+    if (-not (Test-JlHasProperty $state 'missingEvalKeys')) { return @() }
+    return @($state.missingEvalKeys)
+}
+
 function Get-JlPendingRotationKeysetup {
     $state = Get-JlKeysetupState
     if ($null -eq $state) { return $null }
