@@ -1473,6 +1473,11 @@ function Test-JlAmKeysetupLead {
     return ($script:JULENNY_ROLE -eq 'lead')
 }
 
+# The declared eval keys this permission needs that the collaboration cannot supply.
+#
+# ALWAYS wrap the call in @( ) as well. PowerShell unwraps an empty array on return, so
+# every `return @()` below reaches the caller as $null, and $null.Count throws under
+# Set-StrictMode 2.0. Returning a sentinel instead would only move the problem.
 function Get-JlMissingEvalKeys {
     $state = Get-JlKeysetupState
     if (-not $state) { return @() }

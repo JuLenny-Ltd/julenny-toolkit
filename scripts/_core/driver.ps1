@@ -416,7 +416,12 @@ switch -Regex ($ksState) {
         #
         # No extra wait is added: the consumer's 01 already waits for the owner's sum-round1,
         # and 03 waits for the peer's sum-round1-continue before combining.
-        $missingEvalKeys = Get-JlMissingEvalKeys
+        # @() around the call, not just inside the function: PowerShell unwraps an
+        # empty array on RETURN, so a function that gives back @() hands the caller
+        # $null - and $null.Count is a terminating error under Set-StrictMode 2.0.
+        # That made the HEALTHY path (nothing missing) the one that crashed, while the
+        # path with a missing key worked, which is why the first run never hit it.
+        $missingEvalKeys = @(Get-JlMissingEvalKeys)
         if ($missingEvalKeys.Count -gt 0) {
             $missingList = $missingEvalKeys -join ', '
             Write-JlWarn "This collaboration is missing: $missingList"
