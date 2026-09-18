@@ -4,20 +4,25 @@ End-to-end shell walkthrough of a two-party JuLenny collaboration over the **rul
 
 ## How this folder works
 
-This is a **thin scenario folder**. It holds only this collaboration's data and a one-line-per-side launcher. All of the actual logic (keysetup, encrypt, rotation-key augmentation, execute, release, decrypt) lives in the shared driver at `examples/_core/`, which is fully function-def-driven and shared by every scenario. There is nothing function-specific in the scripts here.
+This is a **thin scenario folder**. It holds a launcher and this README, nothing else. All of the actual logic (keysetup, encrypt, rotation-key augmentation, execute, release, decrypt) lives in the shared driver at `examples/_core/`, which is fully function-def-driven and shared by every scenario. There is nothing function-specific in the scripts here.
 
 ```
 examples/rule-based-cross-match/
 ├── README.md            (this file)
-├── acme/                DATA OWNER side (keysetup lead)
-│   ├── run.sh           thin bootstrap: sets side = data-owner, hands off to _core
-│   └── data/            Acme's private input file(s)
-└── beta/                DATA CONSUMER side (keysetup main)
-    ├── run.sh           thin bootstrap: sets side = data-consumer, hands off to _core
-    └── data/            Beta's input files (rule list + private indicator source)
+├── run.sh               thin bootstrap: names the scenario, hands off to _core
+└── run.ps1              PowerShell twin
 ```
 
-Each `run.sh` exports `JULENNY_OUR_SIDE` and `JL_DATA_DIR=$HERE/data`, locates `_core` (either alongside the scenario on the demo hosts, or two levels up in the repo), and `exec`s `_core/run.sh`. The exact function and version are picked from the platform at `00-init` time, so the same folder works for any rule-based-cross-match version.
+ONE launcher, run on BOTH machines. It used to be two, `acme/run.sh` and `beta/run.sh`, and picking one was how you declared your side. That was a question the operator should never have been asked, because picking a permission answers it.
+
+`run.sh` exports `JL_SCENARIO` (the folder name), locates `_core` (either alongside the scenario on the demo hosts, or one level up in the repo), and `exec`s `_core/run.sh`. The exact function and version are picked from the platform at `00-init` time, so the same folder works for any rule-based-cross-match version.
+
+The sample data is not here. It is installed into the working folder, and the side that arrives with your permission selects your half of it:
+
+```
+<workdir>/samples/rule-based-cross-match/data-owner/       Acme's private input file(s)
+<workdir>/samples/rule-based-cross-match/data-consumer/    Beta's rule list + indicator source
+```
 
 ## Inputs
 

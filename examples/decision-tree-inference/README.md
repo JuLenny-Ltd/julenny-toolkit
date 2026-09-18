@@ -27,7 +27,7 @@ part of the circuit, not a runtime choice.
 
 ## The sample tree
 
-From `beta/data/tree.json`: height 2, 2 features, 2 classes, thresholds already
+From `samples/decision-tree-inference/data-consumer/tree.json`: height 2, 2 features, 2 classes, thresholds already
 normalized to `[-1, 1]`.
 
 ```
@@ -40,8 +40,8 @@ normalized to `[-1, 1]`.
 
 ## Sample data and expected result
 
-- **Acme** (`acme/data/features.json`, dataOwner): `x = [0.6, 0.7]`.
-- **Beta** (`beta/data/tree.json`, queryAnalyst): the tree above.
+- **Acme** (`samples/decision-tree-inference/data-owner/features.json`, dataOwner): `x = [0.6, 0.7]`.
+- **Beta** (`samples/decision-tree-inference/data-consumer/tree.json`, queryAnalyst): the tree above.
 
 Expected decrypted prediction: **`[0.167801, 0.832199]`**, so `argmax = class 1`.
 
@@ -66,8 +66,9 @@ Two encodings of the same `x = [0.6, 0.7]` are provided:
 
 ## Running it
 
-`acme/run.sh` on the data-owner machine, `beta/run.sh` on the data-consumer
-machine.
+`run.sh` on BOTH machines. There is one entry point per scenario, not one
+per side: which side you are comes from the permission you pick at 00-init,
+and it selects your half of the sample data too.
 
 **This scenario requires `node`** on the data-owner side. The `features` input is
 a recipe-driven encrypted bundle, and `_core/recipe/recipe-encode.mjs` runs the

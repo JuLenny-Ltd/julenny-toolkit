@@ -127,6 +127,36 @@ _jl_load_side_profile() {
     # shellcheck source=/dev/null
     source "$_JL_CORE_DIR/sides/$1.env"
     JL_PROFILE_SIDE="$1"
+    JL_SIDE_KNOWN=1
+}
+
+# NO SIDE YET is a legitimate state, not an error.
+#
+# On a first run there is no collaboration on this machine and no permission has been
+# picked, so nothing can say which side we are. Nothing needs to: the collaboration and
+# permission pickers list both directions, and the answer arrives with the permission.
+#
+# The scenario bootstraps used to settle it by having two of them, one per side. That
+# was a question the operator should never have been asked, because picking a
+# permission answers it.
+#
+# In this state the labels are neutral, so no prompt claims to know something it does
+# not, and JL_SIDE_KNOWN is 0 so callers can word themselves accordingly. The side
+# profile's other values are not needed before a permission exists.
+JL_SIDE_KNOWN=0
+
+_jl_load_neutral_side() {
+    JL_OUR_LABEL="${_JL_SCENARIO_OUR_LABEL:-you}"
+    JL_PEER_LABEL="${_JL_SCENARIO_PEER_LABEL:-the other party}"
+    JL_ROLE_LABEL="side not determined yet"
+    JL_PEER_ROLE_LABEL="side not determined yet"
+    JL_SECRET_SHARE_FILE=""
+    JL_DEFAULT_KEYSETUP_ROLE=""
+    JL_PERM_VIEW=""
+    JL_PEER_COLLAB_FIELD=""
+    JULENNY_OUR_SIDE=""
+    JL_PROFILE_SIDE=""
+    JL_SIDE_KNOWN=0
 }
 
 if [[ -z "${JL_PEER_LABEL:-}" ]]; then
@@ -134,20 +164,18 @@ if [[ -z "${JL_PEER_LABEL:-}" ]]; then
         JULENNY_OUR_SIDE="$(_jl_side_from_active_config || true)"
     fi
     case "${JULENNY_OUR_SIDE:-}" in
-        data-owner|data-consumer) ;;
+        data-owner|data-consumer)
+            export JULENNY_OUR_SIDE
+            _jl_load_side_profile "$JULENNY_OUR_SIDE"
+            ;;
         "")
-            echo "Cannot tell which side of the collaboration this machine is." >&2
-            echo "Run a scenario's run.sh, which sets it, or export JULENNY_OUR_SIDE=data-owner" >&2
-            echo "or JULENNY_OUR_SIDE=data-consumer before running this script directly." >&2
-            exit 2
+            _jl_load_neutral_side
             ;;
         *)
             echo "JULENNY_OUR_SIDE must be data-owner or data-consumer, got '$JULENNY_OUR_SIDE'" >&2
             exit 2
             ;;
     esac
-    export JULENNY_OUR_SIDE
-    _jl_load_side_profile "$JULENNY_OUR_SIDE"
 fi
 
 # Per-collab paths. set_active_joint_key fills these in. They stay empty
@@ -259,13 +287,41 @@ wait_msg() {
     echo
 }
 
-# Offer the scenario's data files ($JL_DATA_DIR) for one-key selection, with
-# 'o' for a free-text path. Echoes the chosen path on stdout (all UI goes to
-# stderr, so it is safe in command substitution). Usage:
+# Where this scenario's sample files for THIS side live.
+#
+#     <workdir>/samples/<scenario>/<data-owner|data-consumer>/
+#
+# They used to sit in the example tree, at <scenario>/<acme|beta>/data/, and the
+# per-side bootstrap exported the path. Two things were wrong with that. The copy in
+# the example tree is a SECOND copy: the connector works in the working folder and
+# could not see it, and on 2026-09-17 a stale overlap-A-50.csv in the example tree was
+# run against a fresh overlap-B-30.csv and returned a correct-looking 0. And the
+# bootstrap cannot name the folder any more, because after the two entry points merged
+# it no longer knows which side this machine is.
+#
+# So the scenario supplies only its NAME, and the side comes from the permission.
+# JL_DATA_DIR still wins if it is set, which is how a test or an operator with files
+# elsewhere points somewhere else.
+#
+# Prints nothing when either half is still unknown; callers treat that as "no sample
+# folder", which is the same as an empty one.
+jl_data_dir() {
+    if [[ -n "${JL_DATA_DIR:-}" ]]; then printf '%s' "$JL_DATA_DIR"; return 0; fi
+    [[ -n "${JL_SCENARIO:-}" ]] || return 0
+    case "${JULENNY_OUR_SIDE:-}" in
+        data-owner|data-consumer) ;;
+        *) return 0 ;;
+    esac
+    printf '%s/samples/%s/%s' "$JL_ROOT" "$JL_SCENARIO" "$JULENNY_OUR_SIDE"
+}
+
+# Offer the scenario's sample files for one-key selection, with 'o' for a free-text
+# path. Echoes the chosen path on stdout (all UI goes to stderr, so it is safe in
+# command substitution). Usage:
 #   file="$(pick_data_file "Prompt text" [default_path])"
 pick_data_file() {
     local prompt_text="$1" default_path="${2:-}"
-    local data_dir="${JL_DATA_DIR:-}"
+    local data_dir; data_dir="$(jl_data_dir)"
     local files=() f
     if [[ -n "$data_dir" && -d "$data_dir" ]]; then
         while IFS= read -r f; do files+=("$f"); done \

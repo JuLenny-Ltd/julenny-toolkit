@@ -53,10 +53,10 @@ All paths are relative to `examples/`. Both sides' data is yours in a self-test,
 
 | Input | File |
 |---|---|
-| `weights_a` | `federated-average/acme/data/acme_model_weights.txt` |
-| `weights_b` | `federated-average/beta/data/beta_model_weights.txt` |
-| `scale_a` | `federated-average/beta/data/scale_a.txt` (`0.8`) |
-| `scale_b` | `federated-average/beta/data/scale_b.txt` (`0.2`) |
+| `weights_a` | `samples/federated-average/data-owner/acme_model_weights.txt` |
+| `weights_b` | `samples/federated-average/data-consumer/beta_model_weights.txt` |
+| `scale_a` | `samples/federated-average/data-consumer/scale_a.txt` (`0.8`) |
+| `scale_b` | `samples/federated-average/data-consumer/scale_b.txt` (`0.2`) |
 
 Sixteen weights per side. The result is the elementwise weighted mean,
 `scale_a x weights_a + scale_b x weights_b`:
@@ -72,14 +72,14 @@ answer you can check with a calculator, which makes it the best first self-test.
 
 ### `joint-record-overlap-count` and `-itemized`
 
-`dataset_a` is `joint-record-overlap/acme/data/acme-customers.csv` (76 records).
+`dataset_a` is `samples/joint-record-overlap/data-owner/acme-customers.csv` (76 records).
 Pick any of three files for `dataset_b`; the name states the answer.
 
 | `dataset_b` | Records | Expected count | Expected records (itemized) |
 |---|---|---|---|
-| `beta/data/beta-0match.csv` | 2 | `0` | none |
-| `beta/data/beta-1match.csv` | 1 | `1` | `Sophia Martinez,1990-07-22` |
-| `beta/data/beta-2match.csv` | 2 | `2` | `Amelia White,1989-03-21`, `Sophia Martinez,1990-07-22` |
+| `samples/joint-record-overlap/data-consumer/beta-0match.csv` | 2 | `0` | none |
+| `samples/joint-record-overlap/data-consumer/beta-1match.csv` | 1 | `1` | `Sophia Martinez,1990-07-22` |
+| `samples/joint-record-overlap/data-consumer/beta-2match.csv` | 2 | `2` | `Amelia White,1989-03-21`, `Sophia Martinez,1990-07-22` |
 
 Both CSVs need a header row: the definition sets `skipHeader`, so the first line is
 always discarded. Records are hashed into slots, so expected false matches are roughly
@@ -99,8 +99,8 @@ with nothing flagged.
 
 | Input | File |
 |---|---|
-| `acceptance_matrix` | `negotiation-matrix/acme/data/acceptance_matrix.txt` |
-| `offer_vector` | `negotiation-matrix/beta/data/offer_vector.txt` |
+| `acceptance_matrix` | `samples/negotiation-matrix/data-owner/acceptance_matrix.txt` |
+| `offer_vector` | `samples/negotiation-matrix/data-consumer/offer_vector.txt` |
 
 Both are 24 positions, one `0` or `1` per line, where the slot is the line position.
 Both sides must enumerate the term grid identically.
@@ -117,9 +117,9 @@ data but cannot return a clean zero is not actually working.
 
 | Input | File | Owner |
 |---|---|---|
-| `rule_pairs` | `rule-based-cross-match/beta/data/restriction_ingredient_pairs.txt` | queryAnalyst, **plaintext** |
-| `left_indicator` | `rule-based-cross-match/beta/data/beta_restrictions.txt` | queryAnalyst |
-| `right_indicator` | `rule-based-cross-match/acme/data/acme_ingredients.txt` | dataOwner |
+| `rule_pairs` | `samples/rule-based-cross-match/data-consumer/restriction_ingredient_pairs.txt` | queryAnalyst, **plaintext** |
+| `left_indicator` | `samples/rule-based-cross-match/data-consumer/beta_restrictions.txt` | queryAnalyst |
+| `right_indicator` | `samples/rule-based-cross-match/data-owner/acme_ingredients.txt` | dataOwner |
 
 77 rule pairs, 3 restrictions, 4 ingredients. A pair counts when its left name is in
 the restriction list *and* its right name is in the ingredient list.
@@ -154,7 +154,7 @@ tells the platform which indices to expect, so declare it BEFORE building rotati
 | Input | File | Owner |
 |---|---|---|
 | `model` | `decision-tree-inference/golden/tree.json` | queryAnalyst |
-| `features` | `decision-tree-inference/acme/data/features.json` | dataOwner |
+| `features` | `samples/decision-tree-inference/data-owner/features.json` | dataOwner |
 
 Height-2 tree, 2 features, 2 classes, soft-if degree 16, already normalized to
 `[-1, 1]`. Sample `x = [0.6, 0.7]`.

@@ -231,7 +231,13 @@ if ($env:JL_NEXT_CYCLE -eq '1') {
 if (-not $newTest) {
 Write-Host ""
 Write-Host "============================================================"
-Write-Host " $($script:JL_OUR_LABEL.ToUpper()) RUN: what would you like to do?"
+# Neutral heading until a permission has told us which side this machine is; the
+# label is "you" then, and "YOU RUN:" reads like a typo.
+if ($script:JL_SIDE_KNOWN) {
+    Write-Host " $($script:JL_OUR_LABEL.ToUpper()) RUN: what would you like to do?"
+} else {
+    Write-Host " JULENNY RUN: what would you like to do?"
+}
 Write-Host "============================================================"
 
 if ($sessionExists) {

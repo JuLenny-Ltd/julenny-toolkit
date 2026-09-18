@@ -14,10 +14,10 @@ no ciphertext-ciphertext multiplication, no rotations, no extra eval keys.
 
 | input     | role         | side | encoding           | sample file                   |
 |-----------|--------------|------|--------------------|-------------------------------|
-| scale_a   | queryAnalyst | Beta | plaintext-scalar   | `beta/data/scale_a.txt`       |
-| scale_b   | queryAnalyst | Beta | plaintext-scalar   | `beta/data/scale_b.txt`       |
-| weights_a | dataOwner    | Acme | packed-real-vector | `acme/data/acme_model_weights.txt` |
-| weights_b | queryAnalyst | Beta | packed-real-vector | `beta/data/beta_model_weights.txt` |
+| scale_a   | queryAnalyst | Beta | plaintext-scalar   | `samples/federated-average/data-consumer/scale_a.txt`       |
+| scale_b   | queryAnalyst | Beta | plaintext-scalar   | `samples/federated-average/data-consumer/scale_b.txt`       |
+| weights_a | dataOwner    | Acme | packed-real-vector | `samples/federated-average/data-owner/acme_model_weights.txt` |
+| weights_b | queryAnalyst | Beta | packed-real-vector | `samples/federated-average/data-consumer/beta_model_weights.txt` |
 
 ## The sample data
 
@@ -44,9 +44,8 @@ be, up to CKKS approximation noise (~1e-6 or better):
 
 ## Running it
 
-Same flow as the other scenarios: `acme/run.sh` on the data-owner machine,
-`beta/run.sh` on the data-consumer machine; the function/version is picked at
-00-init time. `requiredEvalKeys` is empty, so phase 4.5 (rotation keys) is
+Same flow as the other scenarios: `run.sh` on BOTH machines, with the side and
+the function/version taken from the permission picked at 00-init time. `requiredEvalKeys` is empty, so phase 4.5 (rotation keys) is
 skipped automatically.
 
 > **Status note:** the CLI's `crypto encrypt` does not yet implement the

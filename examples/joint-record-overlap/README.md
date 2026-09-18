@@ -24,9 +24,9 @@ what the sample data is built to demonstrate.
 
 ## Sample data
 
-**Acme** (`acme/data/acme-customers.csv`, dataOwner): 75 customer records.
+**Acme** (`samples/joint-record-overlap/data-owner/acme-customers.csv`, dataOwner): 75 customer records.
 
-**Beta** (`beta/data/*.csv`, queryAnalyst): three alternative input files, so you
+**Beta** (`samples/joint-record-overlap/data-consumer/*.csv`, queryAnalyst): three alternative input files, so you
 can run the same collaboration three times and get three different, predictable
 answers.
 
@@ -48,8 +48,8 @@ Acme's table, so their matches are exact.
 
 ## Running it
 
-`acme/run.sh` on the data-owner machine, `beta/run.sh` on the data-consumer
-machine; pick the count or itemized variant at 00-init time.
+`run.sh` on BOTH machines; pick the count or itemized variant at 00-init time,
+along with the permission that decides which side this machine is.
 
 Because this is BFV and the other scenarios are CKKS, it needs its **own
 collaboration** with its own joint key: a BFV function cannot reuse a CKKS

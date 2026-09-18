@@ -10,26 +10,50 @@ multi-party threshold decryption) using the `julenny-toolkit` CLI.
 
 Every scenario has two sides, run on two separate machines (or two shells):
 
-| folder | party | platform role | keysetup role |
-|---|---|---|---|
-| `acme/` | data owner | dataOwner | lead |
-| `beta/` | data consumer | queryAnalyst | main |
+| party | function-def input role | usual keysetup role |
+|---|---|---|
+| data owner | dataOwner | lead |
+| data consumer | queryAnalyst | main |
 
 "Acme" and "Beta" are just demo names. The data owner holds the data being
 queried; the data consumer triggers the execution and (by default) sees the
 result. Each side keeps its own secret key share locally and never transmits it.
+
+**You do not choose a side.** There is one `run.sh` per scenario, not one per side:
+which side this machine is comes from the permission you pick at 00-init, and the
+platform is the only thing that really knows. The keysetup role is a *separate*
+question with a separate answer, which is why the third column says "usual" - see
+[Two roles, not one](#two-roles-not-one).
 
 ## Layout
 
 ```
 examples/
   _core/                     Shared driver backing every scenario (below)
-  rule-based-cross-match/    Thin scenario: acme/ + beta/ + data + README
+  samples/                   Sample data, by scenario and side. INSTALLED INTO THE
+                             WORKING FOLDER, not run from here (see below).
+  rule-based-cross-match/    Thin scenario: run.sh + run.ps1 + README
   federated-average/         Thin scenario
   negotiation-matrix/        Thin scenario
   decision-tree-inference/   Thin scenario
   joint-record-overlap/      Thin scenario
 ```
+
+### Sample data lives in the working folder
+
+The installer copies `samples/` to `<workdir>/samples/<scenario>/<side>/`, and that
+is the copy the scripts read:
+
+```
+<workdir>/samples/joint-record-overlap/data-owner/acme-customers.csv
+<workdir>/samples/joint-record-overlap/data-consumer/beta-1match.csv
+```
+
+One copy, in the folder the Claude connector also works in, so both surfaces see the
+same bytes. It used to sit beside the scripts as a second copy, which is how a stale
+fixture came to be run against a fresh one and returned a correct-looking zero.
+
+Set `JL_DATA_DIR` to point the file picker somewhere else entirely.
 
 ### `_core/`: the shared driver
 
@@ -76,37 +100,36 @@ and a Windows machine can be the two sides of one collaboration.
 
 ### Scenario folders: thin bootstraps
 
-Each scenario's `acme/` and `beta/` driver just selects the side and the
-scenario's `data/` directory, then hands off to the one in `_core/`. The actual
-function (and its count/itemized variant) is chosen interactively at init time,
-so one scenario folder can run any function of its family. Each scenario also
+Each scenario's `run.sh` / `run.ps1` does one thing: name the scenario, then hand
+off to the driver in `_core/`. The name is what selects the sample folder. The
+actual function (and its count/itemized variant) is chosen interactively at init
+time, so one scenario folder can run any function of its family. Each scenario also
 carries a `README.md` with its sample data and the hand-verifiable expected
 result.
+
+There used to be two bootstraps per scenario, `acme/` and `beta/`, and picking one
+was how you declared your side. That was a question the operator should never have
+been asked: picking a permission answers it, and answering it twice is how a machine
+ends up running the wrong half of a key ceremony.
 
 Every scenario is a thin bootstrap over `_core`. There is no per-scenario copy of
 the driver, so a fix to the protocol lands in one place for all of them.
 
 ## Running a demo
 
-On each party's machine, from that party's side folder.
+The SAME command on both machines. Neither names a side.
 
 **Linux:**
 
 ```bash
-cd examples/<scenario>/acme   # data owner, on Acme's machine
-./run.sh
-
-cd examples/<scenario>/beta   # data consumer, on Beta's machine
+cd examples/<scenario>
 ./run.sh
 ```
 
 **Windows:**
 
 ```powershell
-cd examples\<scenario>\acme   # data owner
-.\run.ps1
-
-cd examples\<scenario>\beta   # data consumer
+cd examples\<scenario>
 .\run.ps1
 ```
 
@@ -214,30 +237,46 @@ To drive both sides on one host, give each shell its own state root. Override
 `JL_ROOT`, not `JL_WORKDIR`: `JL_WORKDIR` is derived per collaboration and gets
 overwritten as soon as a joint key is selected.
 
+Each root needs its own copy of the sample data, because the samples live under the
+root (`$JL_ROOT/samples/`). Copy them once per root before you start:
+
 ```bash
-# Shell 1 (data owner)
+cp -R examples/samples $HOME/julenny-workdir-acme/samples
+cp -R examples/samples $HOME/julenny-workdir-beta/samples
+```
+
+The two shells then run the SAME command. Neither names a side; each picks its own
+permission, and that is what makes one the owner and the other the consumer.
+
+```bash
+# Shell 1
 export JL_ROOT=$HOME/julenny-workdir-acme
-cd examples/<scenario>/acme && ./run.sh
+cd examples/<scenario> && ./run.sh
 ```
 
 ```bash
-# Shell 2 (data consumer)
+# Shell 2
 export JL_ROOT=$HOME/julenny-workdir-beta
-cd examples/<scenario>/beta && ./run.sh
+cd examples/<scenario> && ./run.sh
 ```
 
 On Windows:
 
 ```powershell
-# Shell 1 (data owner)
-$env:JL_ROOT = "$env:USERPROFILE\julenny-workdir-acme"
-cd examples\<scenario>\acme; .\run.ps1
+Copy-Item -Recurse examples\samples "$env:USERPROFILE\julenny-workdir-acme\samples"
+Copy-Item -Recurse examples\samples "$env:USERPROFILE\julenny-workdir-beta\samples"
 ```
 
 ```powershell
-# Shell 2 (data consumer)
+# Shell 1
+$env:JL_ROOT = "$env:USERPROFILE\julenny-workdir-acme"
+cd examples\<scenario>; .\run.ps1
+```
+
+```powershell
+# Shell 2
 $env:JL_ROOT = "$env:USERPROFILE\julenny-workdir-beta"
-cd examples\<scenario>\beta; .\run.ps1
+cd examples\<scenario>; .\run.ps1
 ```
 
 The two shells then behave as if they were separate machines. Useful for

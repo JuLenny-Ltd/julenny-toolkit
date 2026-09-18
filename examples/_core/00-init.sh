@@ -39,7 +39,11 @@ chmod 700 "$JL_ROOT"
 
 migrate_legacy_workdir_if_needed
 
-step "JuLenny collaboration setup ($JL_OUR_LABEL: $JL_ROLE_LABEL)"
+if (( JL_SIDE_KNOWN )); then
+    step "JuLenny collaboration setup ($JL_OUR_LABEL: $JL_ROLE_LABEL)"
+else
+    step "JuLenny collaboration setup"
+fi
 
 # -------- API connection --------
 # An inherited JULENNY_API_BASE is honoured so a run can be pointed at a staging
@@ -64,7 +68,11 @@ elif load_account_key; then
     info "Using the API key remembered for this machine (${#JULENNY_API_KEY} characters)."
     info "Delete $JL_ACCOUNT_CONFIG to be asked again."
 else
-    prompt_secret JULENNY_API_KEY "${JL_OUR_LABEL}'s API key (starts with sk_live_)"
+    if (( JL_SIDE_KNOWN )); then
+        prompt_secret JULENNY_API_KEY "${JL_OUR_LABEL}'s API key (starts with sk_live_)"
+    else
+        prompt_secret JULENNY_API_KEY "Your JuLenny API key (starts with sk_live_)"
+    fi
     save_account_key
 fi
 [[ "$JULENNY_API_KEY" == sk_live_* ]] || die "API key must start with sk_live_"
@@ -81,9 +89,12 @@ export JULENNY_API_BASE JULENNY_API_KEY
 # MY_ROLE_FIELD is the permission role this run STARTED as. It is used only to sort the
 # list and to word it; it is neither a filter nor a decision. The role that counts is
 # the one the platform reports for the permission finally chosen.
-case "$JULENNY_OUR_SIDE" in
+case "${JULENNY_OUR_SIDE:-}" in
     data-owner)    MY_ROLE_FIELD="dataOwner";    MY_ROLE_WORDS="data-owner" ;;
     data-consumer) MY_ROLE_FIELD="dataConsumer"; MY_ROLE_WORDS="data-consumer" ;;
+    # No side yet: a first run, before any permission has been picked. Nothing to
+    # prefer, so the list stays newest-first and nothing is flagged.
+    "")            MY_ROLE_FIELD="";             MY_ROLE_WORDS="" ;;
     *) die "Unknown JULENNY_OUR_SIDE='$JULENNY_OUR_SIDE'" ;;
 esac
 
@@ -100,7 +111,7 @@ ALL_PROJECTS="$(list_collaborations)"
 # this role come first; the rest are still listed, flagged, and selectable.
 ALL_SORTED="$(echo "$ALL_PROJECTS" | jq 'sort_by(.createdAt) | reverse')"
 OWNED_PROJECTS="$(echo "$ALL_SORTED" | jq --arg role "$MY_ROLE_FIELD" '
-    def has_my_role: ((.yourPermissionRoles // []) | any(. == $role)) or (.permissionCount > 0);
+    def has_my_role: ($role == "") or ((.yourPermissionRoles // []) | any(. == $role)) or (.permissionCount > 0);
     [ .[] | select(has_my_role) ]
     + [ .[] | select(has_my_role | not) | . + {noRoleYet: true} ]')"
 PROJECT_COUNT="$(echo "$OWNED_PROJECTS" | jq 'length')"
@@ -109,7 +120,7 @@ echo
 if (( PROJECT_COUNT > 0 )); then
     info "Your active collaborations (newest first):"
     echo "$OWNED_PROJECTS" \
-        | jq -r --arg words "$MY_ROLE_WORDS" 'to_entries[] | "  [\(.key + 1)] \(.value.name // "(unnamed)")  |  peer: \(.value.partnerCollaborationId // .value.ownerCollaborationId // "?")  |  \(.value.permissionCount) permission(s)  |  keysetup: \(.value.keysetupState // "n/a")  |  created \(.value.createdAt // "?" | .[0:10])  |  id: \(.value.id)\(if .value.noRoleYet then "  |  no " + $words + " permission yet - pick to create the first one" else "" end)"'
+        | jq -r --arg words "$MY_ROLE_WORDS" 'to_entries[] | "  [\(.key + 1)] \(.value.name // "(unnamed)")  |  peer: \(.value.partnerCollaborationId // .value.ownerCollaborationId // "?")  |  \(.value.permissionCount) permission(s)  |  keysetup: \(.value.keysetupState // "n/a")  |  created \(.value.createdAt // "?" | .[0:10])  |  id: \(.value.id)\(if (.value.noRoleYet and $words != "") then "  |  no " + $words + " permission yet - pick to create the first one" else "" end)"'
 else
     info "You are not a member of any active collaboration yet."
 fi
@@ -270,6 +281,10 @@ if [[ "${PROJECT_CHOICE,,}" == "n" ]]; then
     PERM_ID="$(create_permission "$JULENNY_PROJECT_ID" "$FN_SLUG" "$FN_VERSION" "$PARTNER_ID" "$ALLOWED_EXEC" "$JULENNY_RESULT_VISIBILITY" "$EXPIRATION")" \
         || die "Permission creation failed."
     success "Permission created: $PERM_ID  ($FN_SLUG v$FN_VERSION)"
+    # The platform takes a permission's data owner from whoever posts it, so this
+    # machine is now the data owner of this one. Settle the side here rather than
+    # waiting for the read-back below, so the prompts in between are accurate.
+    adopt_data_role "dataOwner"
 
     # 7) Resolve the project's jointKeyId. POST /api/fhe-permissions
     #    triggers joint-key creation server-side; we need to refresh
@@ -449,6 +464,8 @@ else
         PERM_ID="$(create_permission "$JULENNY_PROJECT_ID" "$FN_SLUG" "$FN_VERSION" "$PARTNER_ID" "$ALLOWED_EXEC" "$JULENNY_RESULT_VISIBILITY" "$EXPIRATION")" \
             || die "Permission creation failed."
         success "Permission created: $PERM_ID  ($FN_SLUG v$FN_VERSION)"
+        # As above: posting the permission makes this machine its data owner.
+        adopt_data_role "dataOwner"
     else
         # -------- Pick an existing permission --------
         if ! [[ "$PERMISSION_CHOICE" =~ ^[0-9]+$ ]] || (( PERMISSION_CHOICE < 1 || PERMISSION_CHOICE > PERMISSION_COUNT )); then

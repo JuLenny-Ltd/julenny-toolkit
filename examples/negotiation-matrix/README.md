@@ -39,9 +39,9 @@ cell it covers. The buyer's "Price 12..14, Delivery 1-2 weeks" is just multiple
 
 ## Sample data
 
-- **Buyer** (`acme/data/acceptance_matrix.txt`, dataOwner): Quantity=5000, Price
+- **Buyer** (`samples/negotiation-matrix/data-owner/acceptance_matrix.txt`, dataOwner): Quantity=5000, Price
   12..14, Delivery 1-2 weeks -> 1s at indices **{12,13,15,16,18,19}**.
-- **Supplier** (`beta/data/offer_vector.txt`, queryAnalyst): exactly
+- **Supplier** (`samples/negotiation-matrix/data-consumer/offer_vector.txt`, queryAnalyst): exactly
   Quantity=5000, Price=13, Delivery=2 weeks -> 1 at index **16**.
 - The product is 1 only at index 16 -> the matched deal is **5000 units, $13,
   2 weeks**.
@@ -51,7 +51,7 @@ Expected results:
 - `negotiation-matrix-count` -> **match_count = 1**
 - `negotiation-matrix-itemized` -> ~1.0 at index 16, ~0.0 elsewhere
 
-A no-match supplier file (`beta/data/offer_vector_nomatch.txt`, offers Price=15 /
+A no-match supplier file (`samples/negotiation-matrix/data-consumer/offer_vector_nomatch.txt`, offers Price=15 /
 Delivery=3 weeks -> index 23, which the buyer does not accept) gives count = 0 and
 an all-zero match vector.
 
@@ -64,7 +64,7 @@ the noise, so this is robust.
 
 ## Running it
 
-`acme/run.sh` on the data-owner machine, `beta/run.sh` on the data-consumer
-machine; pick the count or itemized variant at 00-init time. Because it's CKKS on
+`run.sh` on BOTH machines; pick the count or itemized variant at 00-init time,
+along with the permission that decides which side this machine is. Because it's CKKS on
 `ckks-default-v1`, create the permission under your existing CKKS collaboration to
 reuse the joint key. No rotation keys, so phase 4.5 is skipped.

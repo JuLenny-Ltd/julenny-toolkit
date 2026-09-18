@@ -4,10 +4,15 @@
 # chains the numbered scripts. Fully interactive: it inspects platform state
 # at startup and prompts; there are no flags except -h/--help.
 #
-# Which side we are (data-owner / data-consumer) comes from JULENNY_OUR_SIDE, set by
-# the scenario's per-side bootstrap before this runs. lib.sh loads the matching side
-# profile (peer label, API view, secret-share filename, ...), and the only per-side
-# behaviour here lives in the branches marked OWNER / CONSUMER.
+# Which side we are (data-owner / data-consumer) comes from the PERMISSION, via the
+# collaboration's config.env that 00-init writes. lib.sh resolves it and loads the
+# matching side profile (peer label, API view, secret-share filename, ...); the only
+# per-side behaviour here lives in the branches marked OWNER / CONSUMER.
+#
+# On a first run there is no permission yet and so no side, which is a normal state and
+# not an error. The scenario bootstrap used to settle it by having one per side; that
+# was a question the operator should never have been asked, because picking a
+# permission answers it.
 #
 # There is ONE numbered set of phase scripts. It used to be two, _core/lead/ and
 # _core/main/, picked by the data role - which was wrong, because the keysetup role is
@@ -20,14 +25,9 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
-# Which side are we? Exported so the numbered subprocess scripts inherit it; lib.sh
-# reads it and loads the matching side profile.
-JULENNY_OUR_SIDE="${JULENNY_OUR_SIDE:?set JULENNY_OUR_SIDE=data-owner or data-consumer before running (the scenario bootstrap does this)}"
-case "$JULENNY_OUR_SIDE" in
-    data-owner|data-consumer) ;;
-    *) echo "JULENNY_OUR_SIDE must be data-owner or data-consumer, got '$JULENNY_OUR_SIDE'" >&2; exit 2 ;;
-esac
-export JULENNY_OUR_SIDE
+# lib.sh resolves the side: JULENNY_OUR_SIDE if something set it (a direct run, or a
+# test driving both sides from one host), else the active collaboration's config.env,
+# else neutral until a permission is picked.
 # shellcheck source=lib.sh
 source "$SCRIPT_DIR/lib.sh"
 
@@ -222,7 +222,13 @@ fi
 if [[ "${NEW_TEST}" != "true" ]]; then
 echo
 echo "============================================================"
-echo " ${JL_OUR_LABEL^^} RUN: what would you like to do?"
+# Neutral heading until a permission has told us which side this machine is; the
+# label is "you" then, and "YOU RUN:" reads like a typo.
+if (( JL_SIDE_KNOWN )); then
+    echo " ${JL_OUR_LABEL^^} RUN: what would you like to do?"
+else
+    echo " JULENNY RUN: what would you like to do?"
+fi
 echo "============================================================"
 if $SESSION_EXISTS; then
     echo " Current permission: ${CURRENT_PERM:-?}"

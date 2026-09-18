@@ -96,6 +96,9 @@ Source: "{#AppSourceDir}\*";                              DestDir: "{app}\app"; 
 ;     Excludes the bash half: nothing on Windows runs a .sh, and the .env side
 ;     profiles are the bash twins of sides\*.ps1. The .deb excludes the .ps1 half
 ;     of the same tree. ---
+; samples\ ships here too and the helper copies it on to the WORKING folder, not to
+; the scripts folder: the connector reads it from there, and a second copy beside the
+; scripts is what let a stale fixture be run against a fresh one.
 Source: "..\..\examples\*";                               DestDir: "{app}\examples"; Components: examples; Flags: ignoreversion recursesubdirs createallsubdirs; Excludes: "*.sh,*.env"
 Source: "julenny-toolkit-examples.ps1";                   DestDir: "{app}"; Components: examples; Flags: ignoreversion
 
@@ -142,11 +145,13 @@ Filename: "powershell.exe"; \
   Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\merge-claude-config.ps1"" -ApiKey ""{code:GetApiKey}"" -McpExePath ""{app}\julenny-mcp.exe"" -Workdir ""{code:GetWorkdir}"""; \
   StatusMsg: "Configuring the JuLenny connector in Claude Desktop..."; \
   Flags: runhidden waituntilterminated; Components: mcp
-; Copy the chosen side of the examples out to the operator's folder. Same helper
-; they can re-run later to switch side; -Force because the wizard already owns
-; the destination choice, -Yes because the wizard already confirmed it.
+; Copy the example scripts out to the operator's folder, and their sample data on to
+; the WORKING folder, which is why -Workdir is passed. Same helper they can re-run
+; later for a second copy; -Force because the wizard already owns the destination
+; choice, -Yes because the wizard already confirmed it. There is no -Role: the scripts
+; are one set for both sides.
 Filename: "powershell.exe"; \
-  Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\julenny-toolkit-examples.ps1"" -Role ""{code:GetExamplesRole}"" -Dest ""{code:GetExamplesDest}"" -Source ""{app}\examples"" -Force -Yes"; \
+  Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\julenny-toolkit-examples.ps1"" -Dest ""{code:GetExamplesDest}"" -Workdir ""{code:GetWorkdir}"" -Source ""{app}\examples"" -Force -Yes"; \
   StatusMsg: "Copying the example scripts..."; \
   Flags: runhidden waituntilterminated; Components: examples; Check: ShouldCopyExamples
 
@@ -340,31 +345,25 @@ begin
   // Swap the legacy folder-tree Browse for the modern IFileDialog picker.
   WorkdirPage.Buttons[0].OnClick := @BrowseClick;
 
-  // Which side of the collaboration this machine is. Determines which half of
-  // the example tree gets copied out. The last option is an explicit "not now",
-  // so the operator can still decline after seeing the page.
+  // This page used to ask which SIDE of the collaboration the machine was, and copied
+  // only that half of the example tree. The scripts are now one set for both sides -
+  // which side you are comes from the permission you pick - so there is nothing to
+  // choose here beyond whether to copy them at all.
   ExamplesRolePage := CreateInputOptionPage(WorkdirPage.ID,
     'Example scripts',
-    'Which side of the collaboration is this machine?',
-    'The examples come in two halves. Pick yours and only that half is copied' + #13#10 +
-    'to a folder you choose. (Only used if you install the example scripts.)',
+    'Copy the example scripts to a folder you can edit?',
+    'The scripts drive a collaboration end to end and are yours to modify.' + #13#10 +
+    'Their sample data goes into the working folder you chose on the last' + #13#10 +
+    'page, which is where the Claude connector looks for it too.',
     True, False);
-  ExamplesRolePage.Add('Data owner - holds the data being queried (acme)');
-  ExamplesRolePage.Add('Data consumer - triggers the run, sees the result (beta)');
-  ExamplesRolePage.Add('Both - for single-machine testing');
-  ExamplesRolePage.Add('Don''t copy them now (you can run the helper later)');
-  // Preselect whatever they chose last time. Falls back to the first option on a first
-  // install, or if the stored value is not one we recognise.
+  ExamplesRolePage.Add('Yes - copy them to a folder I choose');
+  ExamplesRolePage.Add('Not now (you can run the helper later)');
+  // Preselect whatever they chose last time. Anything an older installer recorded
+  // names a side, and every side now means the same thing: copy them.
   if not RegQueryStringValue(HKCU, 'Software\JuLenny\Toolkit', 'ExamplesRole', PrevExamplesRole) then
     PrevExamplesRole := '';
-  if PrevExamplesRole = 'owner' then
-    ExamplesRolePage.SelectedValueIndex := 0
-  else if PrevExamplesRole = 'consumer' then
+  if PrevExamplesRole = 'none' then
     ExamplesRolePage.SelectedValueIndex := 1
-  else if PrevExamplesRole = 'both' then
-    ExamplesRolePage.SelectedValueIndex := 2
-  else if PrevExamplesRole = 'none' then
-    ExamplesRolePage.SelectedValueIndex := 3
   else
     ExamplesRolePage.SelectedValueIndex := 0;
 
@@ -384,15 +383,13 @@ begin
   ExamplesDirPage.Buttons[0].OnClick := @ExamplesBrowseClick;
 end;
 
-// Which role the operator picked, as the helper's -Role argument. Empty when
-// they chose "don't copy them now".
+// Whether the operator asked for the scripts. Recorded in the registry so an upgrade
+// preselects the same answer. The value is no longer a side: the helper has no -Role.
 function GetExamplesRole(Param: String): String;
 begin
   case ExamplesRolePage.SelectedValueIndex of
-    0: Result := 'owner';
-    1: Result := 'consumer';
-    2: Result := 'both';
-    3: Result := 'none';
+    0: Result := 'copy';
+    1: Result := 'none';
   else
     Result := '';
   end;
@@ -406,7 +403,7 @@ end;
 // Run the copy only when the component is installed AND a side was chosen.
 function ShouldCopyExamples: Boolean;
 begin
-  // 'none' is a deliberate choice ('don't copy them now'), so it must NOT trigger a copy.
+  // 'none' is a deliberate choice ('not now'), so it must NOT trigger a copy.
   Result := WizardIsComponentSelected('examples')
             and (GetExamplesRole('') <> '') and (GetExamplesRole('') <> 'none');
 end;
@@ -419,7 +416,11 @@ begin
   if (PageID = ExamplesRolePage.ID) then
     Result := not WizardIsComponentSelected('examples')
   else if (PageID = ExamplesDirPage.ID) then
-    Result := (not WizardIsComponentSelected('examples')) or (GetExamplesRole('') = '');
+    // 'none' means "not now", so do not go on to ask WHERE. This used to test only
+    // for the empty string, so declining still asked for a destination folder that
+    // was then never used.
+    Result := (not WizardIsComponentSelected('examples'))
+              or (GetExamplesRole('') = '') or (GetExamplesRole('') = 'none');
 end;
 
 function GetApiKey(Param: String): String;

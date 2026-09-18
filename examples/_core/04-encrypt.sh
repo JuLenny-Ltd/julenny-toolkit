@@ -193,14 +193,13 @@ for ((i = 0; i < MY_INPUT_COUNT; i++)); do
     fi
 
     if [[ -z "$PICKED_ID" ]]; then
-        # Pick a local file for this input. Same shape as the picker in
-        # 00-init: list files in $SCRIPT_DIR/data/ for one-key selection,
-        # with 'o) Other' for a free-text path. The picker runs PER INPUT
-        # so the operator can map each function-def input to its matching
-        # file (e.g. right_dictionary -> all_ingredients.txt).
-        DATA_DIR="${JL_DATA_DIR:-$SCRIPT_DIR/data}"
+        # Pick a local file for this input: list this scenario's sample files for
+        # THIS side for one-key selection, with 'o) Other' for a free-text path. The
+        # picker runs PER INPUT so the operator can map each function-def input to its
+        # matching file (e.g. right_dictionary -> all_ingredients.txt).
+        DATA_DIR="$(jl_data_dir)"
         DATA_FILES=()
-        if [[ -d "$DATA_DIR" ]]; then
+        if [[ -n "$DATA_DIR" && -d "$DATA_DIR" ]]; then
             while IFS= read -r f; do DATA_FILES+=("$f"); done \
                 < <(find "$DATA_DIR" -maxdepth 1 -type f | sort)
         fi
@@ -212,8 +211,8 @@ for ((i = 0; i < MY_INPUT_COUNT; i++)); do
             for ((j = 0; j < DATA_COUNT; j++)); do
                 printf "  [%d] %s\n" "$((j + 1))" "$(basename "${DATA_FILES[j]}")"
             done
-        else
-            info "No files found under $DATA_DIR."
+        elif [[ -n "$DATA_DIR" ]]; then
+            info "No sample files under $DATA_DIR."
         fi
         echo "  o) Other (type a path)"
         echo
@@ -223,7 +222,7 @@ for ((i = 0; i < MY_INPUT_COUNT; i++)); do
         while true; do
             if (( DATA_COUNT == 0 )); then
                 DATA_CHOICE="o"
-                info "No files in data/; defaulting to 'o' (type a path)."
+                info "No sample files to choose from; type a path instead."
             else
                 prompt_for DATA_CHOICE "Pick file for input '$INPUT_NAME' (1-$DATA_COUNT, or o)" "1"
             fi

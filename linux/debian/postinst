@@ -44,9 +44,11 @@ copy you can run and edit:
 
   julenny-toolkit-examples
 
-It asks which side of the collaboration this machine is (data owner, data
-consumer, or both) and where to put the scripts. Skip it if you only need the
-CLI or the MCP server.
+It asks where to put the scripts, and places their sample data under samples/
+in your JuLenny working folder, which is where the Claude connector reads it
+too. It does NOT ask which side of a collaboration this machine is: there is
+one set of scripts for both sides, and which side you are comes from the
+permission you pick. Skip it if you only need the CLI or the MCP server.
 
 EOF
         ;;

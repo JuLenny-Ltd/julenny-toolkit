@@ -172,6 +172,36 @@ function Import-JlSideProfile {
     }
     . (Join-Path (Join-Path $script:JL_CORE_DIR 'sides') "$Side.ps1")
     $script:JL_PROFILE_SIDE = $Side
+    $script:JL_SIDE_KNOWN = $true
+}
+
+# NO SIDE YET is a legitimate state, not an error.
+#
+# On a first run there is no collaboration on this machine and no permission has been
+# picked, so nothing can say which side we are. Nothing needs to: the collaboration and
+# permission pickers list both directions, and the answer arrives with the permission.
+#
+# The scenario bootstraps used to settle it by having two of them, one per side. That
+# was a question the operator should never have been asked, because picking a
+# permission answers it.
+#
+# In this state the labels are neutral, so no prompt claims to know something it does
+# not, and JL_SIDE_KNOWN is false so callers can word themselves accordingly. The side
+# profile's other values are not needed before a permission exists.
+$script:JL_SIDE_KNOWN = $false
+
+function Import-JlNeutralSide {
+    if ($script:JL_SCENARIO_OUR_LABEL)  { $script:JL_OUR_LABEL  = $script:JL_SCENARIO_OUR_LABEL }  else { $script:JL_OUR_LABEL  = 'you' }
+    if ($script:JL_SCENARIO_PEER_LABEL) { $script:JL_PEER_LABEL = $script:JL_SCENARIO_PEER_LABEL } else { $script:JL_PEER_LABEL = 'the other party' }
+    $script:JL_ROLE_LABEL        = 'side not determined yet'
+    $script:JL_PEER_ROLE_LABEL   = 'side not determined yet'
+    $script:JL_SECRET_SHARE_FILE = ''
+    $script:JL_DEFAULT_KEYSETUP_ROLE = ''
+    $script:JL_PERM_VIEW         = ''
+    $script:JL_PEER_COLLAB_FIELD = ''
+    $script:JULENNY_OUR_SIDE     = ''
+    $script:JL_PROFILE_SIDE      = ''
+    $script:JL_SIDE_KNOWN        = $false
 }
 
 if (-not (Get-Variable -Name JL_PEER_LABEL -Scope Script -ErrorAction SilentlyContinue)) {
@@ -179,22 +209,47 @@ if (-not (Get-Variable -Name JL_PEER_LABEL -Scope Script -ErrorAction SilentlyCo
     if ($env:JULENNY_OUR_SIDE) { $jlSide = $env:JULENNY_OUR_SIDE }
     if (-not $jlSide) { $jlSide = Get-JlSideFromActiveConfig }
     if (-not $jlSide) {
-        throw ("Cannot tell which side of the collaboration this machine is. Run a " +
-               "scenario's run.ps1, which sets it, or set " +
-               "`$env:JULENNY_OUR_SIDE = 'data-owner' (or 'data-consumer') before " +
-               "running this script directly.")
-    }
-    if ($jlSide -ne 'data-owner' -and $jlSide -ne 'data-consumer') {
+        Import-JlNeutralSide
+    } elseif ($jlSide -ne 'data-owner' -and $jlSide -ne 'data-consumer') {
         throw "JULENNY_OUR_SIDE must be data-owner or data-consumer, got '$jlSide'"
+    } else {
+        $env:JULENNY_OUR_SIDE = $jlSide
+        Import-JlSideProfile $jlSide
     }
-    $env:JULENNY_OUR_SIDE = $jlSide
-    Import-JlSideProfile $jlSide
 }
 
-# The scenario's data\ directory, set by the per-side bootstrap. It arrives as an
-# environment variable because the bootstrap launches run.ps1 as a child process,
-# mirroring how the bash bootstraps export JL_DATA_DIR.
+# The scenario NAME, set by the scenario bootstrap. It arrives as an environment
+# variable because the bootstrap launches run.ps1 as a child process. JL_DATA_DIR is an
+# explicit override for the sample folder; see Get-JlDataDir.
+$script:JL_SCENARIO = ''
+if ($env:JL_SCENARIO) { $script:JL_SCENARIO = $env:JL_SCENARIO }
+$script:JL_DATA_DIR = ''
 if ($env:JL_DATA_DIR) { $script:JL_DATA_DIR = $env:JL_DATA_DIR }
+
+# Where this scenario's sample files for THIS side live.
+#
+#     <workdir>\samples\<scenario>\<data-owner or data-consumer>\
+#
+# They used to sit in the example tree, at <scenario>\<acme or beta>\data\, and the
+# per-side bootstrap passed the path. Two things were wrong with that. The copy in the
+# example tree is a SECOND copy: the connector works in the working folder and could
+# not see it, and on 2026-09-17 a stale overlap-A-50.csv in the example tree was run
+# against a fresh overlap-B-30.csv and returned a correct-looking 0. And the bootstrap
+# cannot name the folder any more, because after the two entry points merged it no
+# longer knows which side this machine is.
+#
+# So the scenario supplies only its NAME, and the side comes from the permission.
+# JL_DATA_DIR still wins if it is set, which is how a test or an operator with files
+# elsewhere points somewhere else.
+#
+# Returns '' when either half is still unknown; callers treat that as "no sample
+# folder", which is the same as an empty one.
+function Get-JlDataDir {
+    if ($script:JL_DATA_DIR) { return $script:JL_DATA_DIR }
+    if (-not $script:JL_SCENARIO) { return '' }
+    if ($script:JULENNY_OUR_SIDE -ne 'data-owner' -and $script:JULENNY_OUR_SIDE -ne 'data-consumer') { return '' }
+    return (Join-Path (Join-Path (Join-Path $script:JL_ROOT 'samples') $script:JL_SCENARIO) $script:JULENNY_OUR_SIDE)
+}
 
 # Per-collab paths. Set-JlActiveJointKey fills these in; empty until a joint key
 # is chosen (00-init) or resolved at load time.
@@ -419,17 +474,14 @@ function Read-JlSecret {
     return $value
 }
 
-# Offers the scenario's data files ($JL_DATA_DIR) for one-key selection, with
+# Offers this scenario's sample files for THIS side for one-key selection, with
 # 'o' for a free-text path. Returns the chosen path.
 function Select-JlDataFile {
     param(
         [Parameter(Mandatory = $true)][string] $Prompt,
         [string] $DefaultPath = ''
     )
-    $dataDir = ''
-    if (Get-Variable -Name JL_DATA_DIR -Scope Script -ErrorAction SilentlyContinue) {
-        $dataDir = $script:JL_DATA_DIR
-    }
+    $dataDir = Get-JlDataDir
 
     $files = @()
     if ($dataDir -and (Test-Path -LiteralPath $dataDir)) {
@@ -1734,7 +1786,11 @@ function Select-JlFunction {
 # create one, and doing so makes that machine the new permission's data owner. Which
 # is how one collaboration comes to hold permissions running in both directions.
 function Invoke-JlInitSession {
-    Write-JlStep "JuLenny collaboration setup ($($script:JL_OUR_LABEL): $($script:JL_ROLE_LABEL))"
+    if ($script:JL_SIDE_KNOWN) {
+        Write-JlStep "JuLenny collaboration setup ($($script:JL_OUR_LABEL): $($script:JL_ROLE_LABEL))"
+    } else {
+        Write-JlStep "JuLenny collaboration setup"
+    }
 
     # -------- API connection --------
     # An inherited JULENNY_API_BASE is honoured so a run can be pointed at a
@@ -1770,7 +1826,11 @@ function Invoke-JlInitSession {
         Write-JlInfo "Using the API key remembered for this machine ($($rememberedKey.Length) characters)."
         Write-JlInfo "Delete $($script:JL_ACCOUNT_CONFIG) to be asked again."
     } else {
-        $script:JULENNY_API_KEY = Read-JlSecret "$($script:JL_OUR_LABEL)'s API key (starts with sk_live_)"
+        if ($script:JL_SIDE_KNOWN) {
+            $script:JULENNY_API_KEY = Read-JlSecret "$($script:JL_OUR_LABEL)'s API key (starts with sk_live_)"
+        } else {
+            $script:JULENNY_API_KEY = Read-JlSecret "Your JuLenny API key (starts with sk_live_)"
+        }
         if (-not (Test-Path -LiteralPath $script:JL_ROOT)) {
             New-Item -ItemType Directory -Path $script:JL_ROOT -Force | Out-Null
         }
@@ -1785,7 +1845,11 @@ function Invoke-JlInitSession {
     }
     Write-JlInfo "Platform: $($script:JULENNY_API_BASE)"
 
-    if ($script:JULENNY_OUR_SIDE -eq 'data-owner') { $myRoleName = 'dataOwner' } else { $myRoleName = 'dataConsumer' }
+    # No side yet, on a first run before any permission has been picked: nothing to
+    # prefer, so the list stays newest-first and nothing is flagged.
+    $myRoleName = ''
+    if ($script:JULENNY_OUR_SIDE -eq 'data-owner')         { $myRoleName = 'dataOwner' }
+    elseif ($script:JULENNY_OUR_SIDE -eq 'data-consumer')  { $myRoleName = 'dataConsumer' }
 
     # -------- Pick or create a collaboration --------
     Write-JlStep "Fetching your collaborations..."
@@ -1807,6 +1871,7 @@ function Invoke-JlInitSession {
         if ((Test-JlHasProperty $p 'yourPermissionRoles') -and $p.yourPermissionRoles) {
             $roles = @($p.yourPermissionRoles)
         }
+        if (-not $myRoleName) { return $true }
         return (($roles -contains $myRoleName) -or ((Get-JlGrantCount $p) -gt 0))
     }
     $sorted      = @($all | Sort-Object createdAt -Descending)
@@ -1829,7 +1894,7 @@ function Invoke-JlInitSession {
             $created = "$($mine[$i].createdAt)"
             if ($created.Length -gt 10) { $created = $created.Substring(0, 10) }
             $flag = ''
-            if ($i -ge $withRole.Count) { $flag = "  |  no $myRoleName permission yet - pick to create the first one" }
+            if ($myRoleName -and $i -ge $withRole.Count) { $flag = "  |  no $myRoleName permission yet - pick to create the first one" }
             Write-Host ("  [{0}] {1}  |  peer: {2}  |  {3} permission(s)  |  keysetup: {4}  |  created {5}  |  id: {6}{7}" -f `
                 ($i + 1), $mine[$i].name, $peer, (Get-JlGrantCount $mine[$i]), $mine[$i].keysetupState, $created, $mine[$i].id, $flag)
         }
@@ -1931,6 +1996,10 @@ function Invoke-JlInitSession {
                                    -AllowedExecutions ([int] $allowed) -ResultVisibility $visibility `
                                    -ExpirationDate $expiration
         Write-JlSuccess "Permission created: $permId  ($fnSlug v$fnVersion)"
+        # The platform takes a permission's data owner from whoever posts it, so this
+        # machine is now the data owner of this one. Settle the side here rather than
+        # waiting for the read-back below, so the prompts in between are accurate.
+        Set-JlDataRoleFromPermission 'dataOwner'
 
     } else {
         $n = 0
@@ -2018,6 +2087,8 @@ function Invoke-JlInitSession {
                                        -AllowedExecutions ([int] $allowed) -ResultVisibility $visibility `
                                        -ExpirationDate $expiration
             Write-JlSuccess "Permission created: $permId"
+            # As above: posting the permission makes this machine its data owner.
+            Set-JlDataRoleFromPermission 'dataOwner'
         } else {
             $n = 0
             if (-not [int]::TryParse($permChoice, [ref] $n) -or $n -lt 1 -or $n -gt $perms.Count) {
@@ -2116,8 +2187,9 @@ function Invoke-JlInitSession {
 
     # -------- Default input file --------
     $inputCsv = ''
-    if ($script:JL_DATA_DIR -and (Test-Path -LiteralPath $script:JL_DATA_DIR)) {
-        $first = @(Get-ChildItem -LiteralPath $script:JL_DATA_DIR -File | Sort-Object Name)
+    $sampleDir = Get-JlDataDir
+    if ($sampleDir -and (Test-Path -LiteralPath $sampleDir)) {
+        $first = @(Get-ChildItem -LiteralPath $sampleDir -File | Sort-Object Name)
         if ($first.Count -gt 0) { $inputCsv = $first[0].FullName }
     }
 
