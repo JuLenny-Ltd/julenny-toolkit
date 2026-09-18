@@ -1,8 +1,7 @@
 # Shared helper library for the _core collaboration driver. PowerShell twin of
 # lib.sh, for the Windows scripts path.
 #
-# Dot-source AFTER the side profile:
-#   . "$PSScriptRoot\sides\data-owner.ps1"
+# Dot-source it on its own; it loads the side profile itself:
 #   . "$PSScriptRoot\lib.ps1"
 #
 # ============================================================================
@@ -48,10 +47,8 @@ try {
         [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
 } catch { }
 
-# -------- guard: the side profile must be loaded first --------
-if (-not (Get-Variable -Name JULENNY_OUR_SIDE -Scope Script -ErrorAction SilentlyContinue)) {
-    throw "lib.ps1: no side profile loaded. Dot-source sides\data-owner.ps1 or sides\data-consumer.ps1 first."
-}
+# The side profile is loaded further down, once the path layout below has given us
+# somewhere to look the side up. See "Which side of the collaboration this machine is".
 
 # ============================================================================
 # Paths
@@ -112,6 +109,88 @@ $script:JL_COLLABS_DIR    = Join-Path $script:JL_ROOT 'collabs'
 $script:JL_ACCOUNT_CONFIG = Join-Path $script:JL_ROOT 'account.env'
 $script:JL_CURRENT_FILE   = Join-Path $script:JL_ROOT 'CURRENT'
 
+# ============================================================================
+# Which side of the collaboration this machine is
+# ============================================================================
+# The side profile supplies the peer label, the permission API view, the peer
+# collaboration-id field and the default secret-share filename.
+#
+# It used to be dot-sourced by the CALLER, which worked only because there was one
+# phase script per side and each one named its own profile. There is now a single
+# numbered set, so the side is resolved here instead, in this order:
+#
+#   1. JULENNY_OUR_SIDE, set by the scenario bootstrap and inherited by run.ps1.
+#   2. The active collaboration's config.env, which records it. This is what keeps a
+#      numbered script runnable on its own, the way they are documented to be.
+#   3. Nothing. Then say so rather than guess: the wrong side lists the peer's
+#      permissions and looks for local files under the other side's names.
+#
+# This is the DATA role (owner / consumer). Which half of the KEY CEREMONY this machine
+# runs is a separate question with a separate answer - see Get-JlKeysetupRoleForConfig.
+#
+# Twin of the same block in lib.sh.
+function Get-JlSideFromActiveConfig {
+    if (-not (Test-Path -LiteralPath $script:JL_CURRENT_FILE)) { return '' }
+    $jk = (Get-Content -LiteralPath $script:JL_CURRENT_FILE -TotalCount 1)
+    if (-not $jk) { return '' }
+    $jk = "$jk".Trim()
+    if (-not $jk) { return '' }
+    $cfg = Join-Path (Join-Path $script:JL_COLLABS_DIR $jk) 'config.env'
+    if (-not (Test-Path -LiteralPath $cfg)) { return '' }
+    foreach ($line in (Get-Content -LiteralPath $cfg)) {
+        if ($line -match '^JULENNY_OUR_SIDE=(.*)$') {
+            return $matches[1].Trim().Trim('"').Trim("'")
+        }
+    }
+    return ''
+}
+
+# Any labels a scenario set before we got here, recorded so a later profile switch can
+# still honour them. The profiles only set JL_OUR_LABEL when it is not already set, so
+# without this a switch would keep the FIRST profile's defaults: the side would change
+# and the names printed beside it would not.
+$script:JL_SCENARIO_OUR_LABEL = ''
+$script:JL_SCENARIO_PEER_LABEL = ''
+if (Get-Variable -Name JL_OUR_LABEL  -Scope Script -ErrorAction SilentlyContinue) { $script:JL_SCENARIO_OUR_LABEL  = $script:JL_OUR_LABEL }
+if (Get-Variable -Name JL_PEER_LABEL -Scope Script -ErrorAction SilentlyContinue) { $script:JL_SCENARIO_PEER_LABEL = $script:JL_PEER_LABEL }
+
+# Which side's profile is currently loaded. Tracked separately from JULENNY_OUR_SIDE,
+# which config.env can change under us when a permission runs the other way round.
+$script:JL_PROFILE_SIDE = ''
+
+function Import-JlSideProfile {
+    param([string] $Side)
+    if ($script:JL_SCENARIO_OUR_LABEL) {
+        $script:JL_OUR_LABEL = $script:JL_SCENARIO_OUR_LABEL
+    } else {
+        Remove-Variable -Name JL_OUR_LABEL -Scope Script -ErrorAction SilentlyContinue
+    }
+    if ($script:JL_SCENARIO_PEER_LABEL) {
+        $script:JL_PEER_LABEL = $script:JL_SCENARIO_PEER_LABEL
+    } else {
+        Remove-Variable -Name JL_PEER_LABEL -Scope Script -ErrorAction SilentlyContinue
+    }
+    . (Join-Path (Join-Path $script:JL_CORE_DIR 'sides') "$Side.ps1")
+    $script:JL_PROFILE_SIDE = $Side
+}
+
+if (-not (Get-Variable -Name JL_PEER_LABEL -Scope Script -ErrorAction SilentlyContinue)) {
+    $jlSide = ''
+    if ($env:JULENNY_OUR_SIDE) { $jlSide = $env:JULENNY_OUR_SIDE }
+    if (-not $jlSide) { $jlSide = Get-JlSideFromActiveConfig }
+    if (-not $jlSide) {
+        throw ("Cannot tell which side of the collaboration this machine is. Run a " +
+               "scenario's run.ps1, which sets it, or set " +
+               "`$env:JULENNY_OUR_SIDE = 'data-owner' (or 'data-consumer') before " +
+               "running this script directly.")
+    }
+    if ($jlSide -ne 'data-owner' -and $jlSide -ne 'data-consumer') {
+        throw "JULENNY_OUR_SIDE must be data-owner or data-consumer, got '$jlSide'"
+    }
+    $env:JULENNY_OUR_SIDE = $jlSide
+    Import-JlSideProfile $jlSide
+}
+
 # The scenario's data\ directory, set by the per-side bootstrap. It arrives as an
 # environment variable because the bootstrap launches run.ps1 as a child process,
 # mirroring how the bash bootstraps export JL_DATA_DIR.
@@ -131,6 +210,12 @@ $script:JULENNY_API_BASE      = ''
 $script:JULENNY_PROJECT_ID    = ''
 $script:JULENNY_PERMISSION_ID = ''
 $script:JULENNY_SIGNING_SECRET = ''
+# The keysetup role. Declared empty because run.ps1 asks which half of the ceremony
+# this machine runs before Import-JlSession has read config.env, and Set-StrictMode
+# makes reading a never-set variable a terminating error rather than an empty string.
+# Empty reads as "not the lead", which is the safe way round: the lead goes first, so
+# a wrong "yes" would publish a round out of order, while a wrong "no" only waits.
+$script:JULENNY_ROLE          = ''
 
 # ============================================================================
 # Output
@@ -525,6 +610,16 @@ function Import-JlSession {
         Set-Variable -Name $k -Value $cfg[$k] -Scope Script -Force
     }
 
+    # config.env records the DATA role the platform reported for this permission, which
+    # 00-init resolved. It wins over the side we were started as: a permission created
+    # in the other direction inside this collaboration legitimately runs the other way
+    # round, and the profile has to follow it or the peer label, the permission view and
+    # the function-input role all describe the wrong party.
+    if ($script:JULENNY_OUR_SIDE -and ($script:JULENNY_OUR_SIDE -ne $script:JL_PROFILE_SIDE)) {
+        $env:JULENNY_OUR_SIDE = $script:JULENNY_OUR_SIDE
+        Import-JlSideProfile $script:JULENNY_OUR_SIDE
+    }
+
     # The FHE secret share is named after the KEYSETUP role, not the data role.
     #
     # The side profile sets a default filename, but it is a DATA-role profile and the two
@@ -650,20 +745,44 @@ function Get-JlKeysetupState {
 # Fetches the permission out of the active-permissions LIST, filtered to our
 # side's view, rather than by id. That is what lib.sh does, and the list
 # endpoint is the one that self-heals a permission whose derived fields drifted.
+# Every permission this account holds, whichever direction it runs.
+#
+# The platform's list endpoint is one-sided: view=granted returns the permissions where
+# this company is the data owner, view=received the ones where it is the consumer. A
+# collaboration can hold both, so anything that asks "what is in this collaboration"
+# has to ask twice. Asking once is what made a permission created in the other
+# direction invisible - it could be created and then never selected again.
+#
+# Deduped by id: the two views are disjoint today, but a permission appearing in both
+# would otherwise be listed twice.
+function Get-JlAllMyPermissions {
+    $all = @()
+    foreach ($view in @('granted', 'received')) {
+        $resp = Invoke-JlApi GET "/api/fhe-permissions?status=active&view=$view" -AllowFailure
+        if ($resp -and ((Test-JlHasProperty $resp 'permissions'))) { $all += @($resp.permissions) }
+    }
+    $seen = @{}
+    $out = @()
+    foreach ($p in $all) {
+        if (-not $seen.ContainsKey("$($p.id)")) {
+            $seen["$($p.id)"] = $true
+            $out += $p
+        }
+    }
+    return $out
+}
+
 function Get-JlPermission {
     param(
-        [string] $PermissionId = '',
-        [string] $View = ''
+        [string] $PermissionId = ''
     )
     if (-not $PermissionId) { $PermissionId = $script:JULENNY_PERMISSION_ID }
-    if (-not $View)         { $View = $script:JL_PERM_VIEW }
 
-    $resp = Invoke-JlApi GET "/api/fhe-permissions?status=active&view=$View"
-    if ($resp -and ((Test-JlHasProperty $resp 'permissions'))) {
-        $match = @($resp.permissions | Where-Object { $_.id -eq $PermissionId })
-        if ($match.Count -gt 0) { return $match[0] }
-    }
-    Stop-JlWithError "Permission $PermissionId not found in view=$View."
+    # Both views: a permission running in the other direction is still ours to read,
+    # and which view holds it is exactly what the caller should not have to know.
+    $match = @(Get-JlAllMyPermissions | Where-Object { $_.id -eq $PermissionId })
+    if ($match.Count -gt 0) { return $match[0] }
+    Stop-JlWithError "Permission $PermissionId is not among this account's active permissions."
 }
 
 # "dataConsumer" (default) or "dataOwner": which side decrypts the plaintext.
@@ -705,12 +824,14 @@ function Get-JlCollaborations {
     return @($resp)
 }
 
+# Every permission under one joint key, in BOTH directions.
+#
+# This is what the permission picker lists, so listing one view meant a permission
+# created in the other direction could never be picked - which is the whole of the
+# reversed-permission case.
 function Get-JlPermissionsForJointKey {
     param([Parameter(Mandatory = $true)][string] $JointKeyId)
-    $resp = Invoke-JlApi GET "/api/fhe-permissions?status=active&view=$($script:JL_PERM_VIEW)&jointKeyId=$JointKeyId"
-    if ($null -eq $resp) { return @() }
-    if ((Test-JlHasProperty $resp 'permissions')) { return @($resp.permissions) }
-    return @($resp)
+    return @(Get-JlAllMyPermissions | Where-Object { $_.jointKeyId -eq $JointKeyId })
 }
 
 function Get-JlFunctions {
@@ -1202,8 +1323,8 @@ function Get-JlKeysetupRoleForConfig {
             return "$($state.yourKeysetupRole)"
         }
     } catch { }
-    Write-JlInfo "The platform does not record who leads this ceremony; assuming '$($script:JL_ROLE_DIR)'."
-    return "$($script:JL_ROLE_DIR)"
+    Write-JlInfo "The platform does not record who leads this ceremony; assuming '$($script:JL_DEFAULT_KEYSETUP_ROLE)'."
+    return "$($script:JL_DEFAULT_KEYSETUP_ROLE)"
 }
 
 # The filename this machine's FHE secret share is stored under.
@@ -1218,6 +1339,56 @@ function Get-JlSecretShareFileForRole {
         'main' { return 'my_share_secret.bin' }
         default { return '' }
     }
+}
+
+# Adopt the DATA role the platform reports for a permission, switching side profile if
+# it is not the one we started with.
+#
+# The side we start as is a guess: it comes from which scenario bootstrap was run, or
+# from the last collaboration's config.env. The permission's own `yourRole` is the
+# answer, and a permission created in the other direction inside the same collaboration
+# legitimately disagrees with the guess.
+#
+# 00-init used to stop on that disagreement ("expected dataOwner. Run from the
+# data-owner side"), which made a reversed permission unreachable from the scripts
+# entirely. Roles are read from the platform, not remembered as a choice.
+function Set-JlDataRoleFromPermission {
+    param([string] $YourRole)
+    $want = ''
+    switch ($YourRole) {
+        'dataOwner'    { $want = 'data-owner' }
+        'dataConsumer' { $want = 'data-consumer' }
+        ''             { return }   # platform did not say; keep what we have
+        default { Stop-JlWithError "Permission reports an unknown role '$YourRole'." }
+    }
+    if ($want -eq $script:JULENNY_OUR_SIDE) { return }
+
+    Write-JlInfo "This permission makes this machine the $($want -replace '-', ' '), not the $($script:JULENNY_OUR_SIDE -replace '-', ' ')."
+    Write-JlInfo "  Switching to the $want profile for the rest of this run."
+    $env:JULENNY_OUR_SIDE = $want
+    Import-JlSideProfile $want
+}
+
+# The function-def input role this machine supplies inputs for, from its DATA role.
+#
+# This one really is the data role: the function definition labels its inputs dataOwner
+# or queryAnalyst, and which of the two this machine answers to is decided per
+# permission, not by the key ceremony.
+function Get-JlMyFunctionInputRole {
+    switch ($script:JULENNY_OUR_SIDE) {
+        'data-owner'    { return 'dataOwner' }
+        'data-consumer' { return 'queryAnalyst' }
+        default { Stop-JlWithError "Unknown JULENNY_OUR_SIDE='$($script:JULENNY_OUR_SIDE)'" }
+    }
+}
+
+# True when this machine runs the LEAD half of the key ceremony.
+#
+# JULENNY_ROLE comes from config.env, where 00-init wrote what the platform reported.
+# Do not substitute the data role: they are the same answer only while the permission
+# runs in the direction the collaboration was created in.
+function Test-JlAmKeysetupLead {
+    return ($script:JULENNY_ROLE -eq 'lead')
 }
 
 function Get-JlMissingEvalKeys {
@@ -1554,13 +1725,15 @@ function Select-JlFunction {
     return $funcs[$n - 1]
 }
 
+# Session setup, for BOTH sides.
+#
+# It used to take -CanCreatePermission, passed only by the data-owner half, on the
+# understanding that only the owner may create a permission. That is not what the
+# platform does: it takes a permission's data owner from whoever posts it and only
+# checks the caller is a party to the collaboration's joint key. Either member may
+# create one, and doing so makes that machine the new permission's data owner. Which
+# is how one collaboration comes to hold permissions running in both directions.
 function Invoke-JlInitSession {
-    param(
-        # Only the data owner can create a permission under an existing
-        # collaboration; the consumer must wait for one to be granted.
-        [switch] $CanCreatePermission
-    )
-
     Write-JlStep "JuLenny collaboration setup ($($script:JL_OUR_LABEL): $($script:JL_ROLE_LABEL))"
 
     # -------- API connection --------
@@ -1664,33 +1837,29 @@ function Invoke-JlInitSession {
         Write-JlInfo "You are not a member of any active collaboration yet."
     }
     Write-Host "  n) Create a NEW collaboration + permission via the API"
-    if (-not $CanCreatePermission) {
-        Write-Host "     (uncommon on this side - usually the data owner initiates. Useful for single-machine smoke tests.)"
-    }
     Write-Host ""
 
-    if ($mine.Count -eq 0 -and -not $CanCreatePermission) {
-        # Consumer side: do NOT default into creating one. The data owner creates
-        # the collaboration here, so "none found" nearly always means they have
-        # not created it yet, or this machine is pointed at the wrong account or
-        # host - not that a new collaboration is wanted. Auto-selecting 'n'
-        # silently created a duplicate the owner could not see, leaving the
-        # operator waiting on a peer with nothing to answer.
-        Write-JlWarn "No collaborations found where you're the $myRoleName."
-        Write-JlWarn "In the normal flow $($script:JL_PEER_LABEL) creates the collaboration and grants you a permission."
-        Write-JlWarn "If you expected one here, check that this API key belongs to the account"
-        Write-JlWarn "$($script:JL_PEER_LABEL) invited, and that the platform host printed above is right."
+    if ($mine.Count -eq 0) {
+        # Do NOT default into creating one. An empty list usually means the other party
+        # has not created the collaboration yet, or this machine is pointed at the wrong
+        # account or host - not that a new collaboration is wanted. Auto-selecting 'n'
+        # silently created a duplicate the peer could not see, which is worse than
+        # stopping, because the operator then waits on someone with nothing to answer.
+        #
+        # The data-owner half used to auto-select 'n'. Either party can create one now,
+        # so the same care applies on both sides.
+        Write-JlWarn "No collaborations found for this account."
+        Write-JlWarn "If $($script:JL_PEER_LABEL) has already created one and granted you a permission, check"
+        Write-JlWarn "that this API key belongs to the account they invited, and that the platform"
+        Write-JlWarn "host printed above is the right one."
         Write-Host ""
         $createNew = Read-JlValue "Create a NEW collaboration anyway? (y/N)" 'N'
         if ($createNew -match '^[Yy]') {
             $projectChoice = 'n'
         } else {
-            Write-JlInfo "Nothing to do until $($script:JL_PEER_LABEL) creates the collaboration. Exiting."
+            Write-JlInfo "Nothing to do until a collaboration exists. Exiting."
             exit 0
         }
-    } elseif ($mine.Count -eq 0) {
-        $projectChoice = 'n'
-        Write-JlInfo "No existing collaborations; defaulting to 'n' (create new)."
     } else {
         $projectChoice = Read-JlValue "Pick a collaboration (1-$($mine.Count), or n)" '1'
     }
@@ -1701,11 +1870,6 @@ function Invoke-JlInitSession {
 
     if ($projectChoice -match '^[Nn]$') {
         Write-JlStep "Creating a new collaboration + permission via API"
-        if (-not $CanCreatePermission) {
-            Write-JlWarn "Heads up: in the normal two-party flow the data owner creates the collaboration."
-            Write-JlWarn "Use this path only for single-machine smoke tests where you drive both sides."
-            Write-Host ""
-        }
 
         $fn = Select-JlFunction
         $fnSlug = $fn.slug
@@ -1748,15 +1912,16 @@ function Invoke-JlInitSession {
         Write-JlSuccess "Collaboration created: $projectId"
 
         $allowed = Read-JlValue "How many executions should this permission allow?" '10'
+        # Creating a permission makes THIS machine its data owner, whichever side script
+        # was run, because the platform takes the owner from whoever posts it. So the
+        # visibility question is the same on both sides, and is asked on both.
+        Write-Host ""
+        Write-Host "Who should see the plaintext result?"
+        Write-Host "  1) The data consumer, $($script:JL_PEER_LABEL)  [default]"
+        Write-Host "  2) The data owner, this machine"
+        $visChoice = Read-JlValue "Choose (1-2)" '1'
         $visibility = 'dataConsumer'
-        if ($CanCreatePermission) {
-            Write-Host ""
-            Write-Host "Who should see the plaintext result?"
-            Write-Host "  1) The data consumer ($($script:JL_PEER_LABEL))  [default]"
-            Write-Host "  2) The data owner ($($script:JL_OUR_LABEL))"
-            $visChoice = Read-JlValue "Choose (1-2)" '1'
-            if ($visChoice -eq '2') { $visibility = 'dataOwner' }
-        }
+        if ($visChoice -eq '2') { $visibility = 'dataOwner' }
 
         $expiration = Read-JlExpirationDate
 
@@ -1788,21 +1953,15 @@ function Invoke-JlInitSession {
         } else {
             Write-JlInfo "No permissions found under this collaboration."
         }
-        if ($CanCreatePermission) { Write-Host "  n) Create a NEW permission via the API" }
+        Write-Host "  n) Create a NEW permission via the API"
+        Write-Host "     (creating one makes this machine that permission's data owner)"
         Write-Host ""
-
-        if ($perms.Count -eq 0 -and -not $CanCreatePermission) {
-            Stop-JlWithError "No permissions here yet. Ask $($script:JL_PEER_LABEL) (the data owner) to add one."
-        }
 
         $default = '1'
         if ($perms.Count -eq 0) { $default = 'n' }
-        $permChoice = Read-JlValue "Pick a permission (1-$($perms.Count)$(if ($CanCreatePermission) { ', or n' }))" $default
+        $permChoice = Read-JlValue "Pick a permission (1-$($perms.Count), or n)" $default
 
         if ($permChoice -match '^[Nn]$') {
-            if (-not $CanCreatePermission) {
-                Stop-JlWithError "Only the data owner can create a permission."
-            }
             # One joint key per collaboration, so a new permission must use the same scheme
             # as the permissions already here. Infer it from an existing one rather than
             # asking; only fall back to the prompt if there is nothing to read it from.
@@ -1892,6 +2051,16 @@ function Invoke-JlInitSession {
     if ((Test-JlHasProperty $permObj 'resultVisibility') -and $permObj.resultVisibility) {
         $visibility = $permObj.resultVisibility
     }
+
+    # -------- Adopt the data role the platform reports for THIS permission --------
+    # The side we started as is a guess; the permission's own yourRole is the answer,
+    # and creating a permission here makes this machine its data owner whichever side
+    # script was run. Taking it may switch the side profile, which is why the peer
+    # collaboration-id field is read afterwards.
+    $yourRole = ''
+    if ((Test-JlHasProperty $permObj 'yourRole')) { $yourRole = "$($permObj.yourRole)" }
+    Set-JlDataRoleFromPermission $yourRole
+
     $peerCollab = ''
     if ((Test-JlHasProperty $permObj $script:JL_PEER_COLLAB_FIELD)) {
         $peerCollab = $permObj.$($script:JL_PEER_COLLAB_FIELD)
@@ -1900,7 +2069,7 @@ function Invoke-JlInitSession {
     Write-JlSuccess "Permission resolved: $permId  ($fnSlug v$fnVersion)"
     Write-JlInfo "  $($script:JL_OUR_LABEL) is:  $($script:JL_ROLE_LABEL)"
     if ($peerCollab) {
-        Write-JlInfo "  $($script:JL_PEER_LABEL) (peer): collab $peerCollab"
+        Write-JlInfo "  $($script:JL_PEER_LABEL) (peer): $($script:JL_PEER_ROLE_LABEL), collab $peerCollab"
     }
     Write-JlInfo "  Result is visible to: $visibility"
 
@@ -2448,9 +2617,13 @@ function Invoke-JlFinalizeKeysetup {
     $needsSum   = Test-JlFunctionRequiresSumKeys
     $needsRelin = Test-JlFunctionRequiresRelinKeys
 
-    # Role decides which share is "a" and which is "b"; side decides which of
-    # them is local and which came from the peer.
-    $iAmLead = ($script:JL_ROLE_DIR -eq 'lead')
+    # The KEYSETUP role decides which share is ours and which is the peer's, and which
+    # message type the peer's sum share arrives under.
+    #
+    # This read the DATA role until 2026-09-18, which is the same answer only while the
+    # two agree. On a permission created in the other direction it named our own share
+    # as the peer's and waited forever for a message type the peer never sends.
+    $iAmLead = ($script:JULENNY_ROLE -eq 'lead')
     if ($iAmLead) {
         $leadR2  = Join-Path $script:JL_KEYS_DIR 'lead-relin-r2.bin'
         $mainR2  = Join-Path $script:JL_PEER_DIR 'main-relin-r2.bin'

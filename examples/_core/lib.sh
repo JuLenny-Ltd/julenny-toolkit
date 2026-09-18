@@ -4,8 +4,8 @@
 #
 # This one lib backs BOTH sides of EVERY scenario. The side-specific bits
 # (peer label, permission API view, peer collaboration-id field, secret-share
-# filename, role identity) come from a side profile sourced before this lib:
-# _core/sides/data-owner.env or _core/sides/data-consumer.env. The scenario
+# filename) come from a side profile, _core/sides/data-owner.env or
+# _core/sides/data-consumer.env, which this lib sources itself. The scenario
 # selects the function/scheme; the function-def then drives encoding,
 # eval-key needs, output layout, and result visibility at runtime. See
 # .plans/shared-core-example-scripts.md.
@@ -17,12 +17,8 @@
 
 set -euo pipefail
 
-# The side profile (_core/sides/<role>.env) must be sourced before this lib so
-# the side-specific vars it defines are set. _core/run.sh does this. Fail
-# loudly if a caller skipped it, rather than running with empty values.
-: "${JL_PEER_LABEL:?side profile not sourced (run via _core/run.sh); JL_PEER_LABEL unset}"
-: "${JL_PERM_VIEW:?side profile not sourced; JL_PERM_VIEW unset}"
-: "${JL_SECRET_SHARE_FILE:?side profile not sourced; JL_SECRET_SHARE_FILE unset}"
+# The side profile is sourced further down, once the path layout below has given us
+# somewhere to look the side up. See "Which side of the collaboration this machine is".
 
 # -------- Path layout --------
 # ONE working folder on this machine, shared with the connector. Holds:
@@ -82,6 +78,77 @@ JL_COLLABS_DIR="$JL_ROOT/collabs"
 # again AND left another copy of a live key on disk. Remembered here once instead.
 JL_ACCOUNT_CONFIG="$JL_ROOT/account.env"
 JL_CURRENT_FILE="$JL_ROOT/CURRENT"
+
+# -------- Which side of the collaboration this machine is --------
+# The side profile supplies the peer label, the permission API view, the peer
+# collaboration-id field and the default secret-share filename.
+#
+# It used to be sourced by the CALLER, which worked only because there was one phase
+# script per side and each one named its own profile. There is now a single numbered
+# set, so the side is resolved here instead, in this order:
+#
+#   1. JULENNY_OUR_SIDE, exported by the scenario bootstrap and by run.sh.
+#   2. The active collaboration's config.env, which records it. This is what keeps a
+#      numbered script runnable on its own, the way they are documented to be.
+#   3. Nothing. Then say so rather than guess: the wrong side lists the peer's
+#      permissions and looks for local files under the other side's names.
+#
+# This is the DATA role (owner / consumer). Which half of the KEY CEREMONY this machine
+# runs is a separate question with a separate answer - see get_platform_keysetup_role.
+_jl_side_from_active_config() {
+    local jk cfg val
+    [[ -f "$JL_CURRENT_FILE" ]] || return 1
+    jk="$(tr -d '\r' < "$JL_CURRENT_FILE" | head -n 1)"
+    jk="${jk//[[:space:]]/}"
+    [[ -n "$jk" ]] || return 1
+    cfg="$JL_COLLABS_DIR/$jk/config.env"
+    [[ -f "$cfg" ]] || return 1
+    val="$(grep -m1 '^JULENNY_OUR_SIDE=' "$cfg" | cut -d= -f2- | tr -d '"' | tr -d "'" | tr -d '[:space:]')"
+    [[ -n "$val" ]] || return 1
+    printf '%s' "$val"
+}
+
+_JL_CORE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# Any labels a scenario set before we got here, recorded so a later profile switch can
+# still honour them. The profiles write JL_OUR_LABEL="${JL_OUR_LABEL:-Acme}", so without
+# this a switch would keep the FIRST profile's defaults: the side would change and the
+# names printed beside it would not.
+_JL_SCENARIO_OUR_LABEL="${JL_OUR_LABEL:-}"
+_JL_SCENARIO_PEER_LABEL="${JL_PEER_LABEL:-}"
+
+# Which side's profile is currently loaded. Tracked separately from JULENNY_OUR_SIDE,
+# which config.env can change under us when a permission runs the other way round.
+JL_PROFILE_SIDE=""
+
+_jl_load_side_profile() {
+    if [[ -n "$_JL_SCENARIO_OUR_LABEL" ]]; then JL_OUR_LABEL="$_JL_SCENARIO_OUR_LABEL"; else unset JL_OUR_LABEL; fi
+    if [[ -n "$_JL_SCENARIO_PEER_LABEL" ]]; then JL_PEER_LABEL="$_JL_SCENARIO_PEER_LABEL"; else unset JL_PEER_LABEL; fi
+    # shellcheck source=/dev/null
+    source "$_JL_CORE_DIR/sides/$1.env"
+    JL_PROFILE_SIDE="$1"
+}
+
+if [[ -z "${JL_PEER_LABEL:-}" ]]; then
+    if [[ -z "${JULENNY_OUR_SIDE:-}" ]]; then
+        JULENNY_OUR_SIDE="$(_jl_side_from_active_config || true)"
+    fi
+    case "${JULENNY_OUR_SIDE:-}" in
+        data-owner|data-consumer) ;;
+        "")
+            echo "Cannot tell which side of the collaboration this machine is." >&2
+            echo "Run a scenario's run.sh, which sets it, or export JULENNY_OUR_SIDE=data-owner" >&2
+            echo "or JULENNY_OUR_SIDE=data-consumer before running this script directly." >&2
+            exit 2
+            ;;
+        *)
+            echo "JULENNY_OUR_SIDE must be data-owner or data-consumer, got '$JULENNY_OUR_SIDE'" >&2
+            exit 2
+            ;;
+    esac
+    export JULENNY_OUR_SIDE
+    _jl_load_side_profile "$JULENNY_OUR_SIDE"
+fi
 
 # Per-collab paths. set_active_joint_key fills these in. They stay empty
 # until a specific joint key is chosen (00-init.sh) or resolved at load
@@ -320,6 +387,15 @@ load_session() {
     : "${JULENNY_PROJECT_ID:?config.env missing JULENNY_PROJECT_ID}"
     : "${JULENNY_PERMISSION_ID:?config.env missing JULENNY_PERMISSION_ID}"
     : "${JULENNY_SIGNING_SECRET:?config.env missing JULENNY_SIGNING_SECRET}"
+
+    # config.env records the DATA role the platform reported for this permission, which
+    # 00-init resolved. It wins over the side we were started as: a permission created
+    # in the other direction inside this collaboration legitimately runs the other way
+    # round, and the profile has to follow it or the peer label, the permission view and
+    # the function-input role all describe the wrong party.
+    if [[ -n "${JULENNY_OUR_SIDE:-}" && "$JULENNY_OUR_SIDE" != "$JL_PROFILE_SIDE" ]]; then
+        _jl_load_side_profile "$JULENNY_OUR_SIDE"
+    fi
 
     # The FHE secret share is named after the KEYSETUP role, not the data role.
     #
@@ -718,15 +794,32 @@ prompt_secret() {
 }
 
 # -------- platform-state helpers --------
+# Every permission this account holds in a collaboration, whichever direction it runs.
+#
+# The platform's list endpoint is one-sided: view=granted returns the permissions where
+# this company is the data owner, view=received the ones where it is the consumer. A
+# collaboration can hold both, so anything that asks "what is in this collaboration"
+# has to ask twice. Asking once is what made a permission created in the other
+# direction invisible - it could be created and then never selected again.
+#
+# Deduped by id: the two views are disjoint today, but a permission appearing in both
+# would otherwise be listed twice.
+list_all_my_permissions() {
+    local granted received
+    granted="$(curl_jl GET "/api/fhe-permissions?status=active&view=granted"  | jq '[.permissions[]?]')"
+    received="$(curl_jl GET "/api/fhe-permissions?status=active&view=received" | jq '[.permissions[]?]')"
+    jq -n --argjson a "$granted" --argjson b "$received" \
+        '($a + $b) | unique_by(.id)'
+}
+
 fetch_permission() {
     local perm_id="${1:-$JULENNY_PERMISSION_ID}"
-    local view="${2:-${JL_PERM_VIEW}}"
-    local resp
-    resp="$(curl_jl GET "/api/fhe-permissions?status=active&view=$view")"
     local doc
-    doc="$(echo "$resp" | jq --arg id "$perm_id" '.permissions[]? | select(.id == $id)')"
+    # Both views: a permission running in the other direction is still ours to read,
+    # and which view holds it is exactly what the caller should not have to know.
+    doc="$(list_all_my_permissions | jq --arg id "$perm_id" '.[] | select(.id == $id)')"
     [[ -n "$doc" ]] \
-        || die "Permission $perm_id not found in view=$view. Raw response: $resp"
+        || die "Permission $perm_id is not among this account's active permissions."
     echo "$doc"
 }
 
@@ -745,21 +838,26 @@ list_collaborations() {
     resp="$(curl_jl GET "/api/fhe-projects")"
     # The project docs carry NO permission count (the platform never sets
     # one; the picker used to print "null permission(s)"). Derive it from
-    # the active-permissions list, grouped by jointKeyId. One extra call.
-    perms="$(curl_jl GET "/api/fhe-permissions?status=active&view=${JL_PERM_VIEW}" \
-        | jq '[.permissions[]?]')"
+    # the active-permissions list, grouped by jointKeyId.
+    #
+    # Counting BOTH directions: a collaboration holding only permissions that run the
+    # other way round is not an empty collaboration, and counting one view made it
+    # look like one.
+    perms="$(list_all_my_permissions)"
     echo "$resp" | jq --argjson perms "$perms" '
         (.projects // []) | map(. as $p | $p + {
             permissionCount: ([$perms[] | select((.jointKeyId // "none") == ($p.jointKeyId // "-"))] | length)
         })'
 }
 
+# Every permission under one joint key, in BOTH directions.
+#
+# This is what the permission picker lists, so listing one view meant a permission
+# created in the other direction could never be picked - which is the whole of the
+# reversed-permission case.
 list_permissions_for_joint_key() {
     local jk_id="$1"
-    local view="${2:-${JL_PERM_VIEW}}"
-    local resp
-    resp="$(curl_jl GET "/api/fhe-permissions?status=active&view=$view")"
-    echo "$resp" | jq --arg jk "$jk_id" '[.permissions[]? | select(.jointKeyId == $jk)]'
+    list_all_my_permissions | jq --arg jk "$jk_id" '[.[] | select(.jointKeyId == $jk)]'
 }
 
 # Datasets for ONE function input, not every dataset in the collaboration.
@@ -963,6 +1061,57 @@ secret_share_filename_for_role() {
         main) echo "my_share_secret.bin" ;;
         *)    echo "" ;;
     esac
+}
+
+# Adopt the DATA role the platform reports for a permission, switching side profile if
+# it is not the one we started with.
+#
+# The side we start as is a guess: it comes from which scenario bootstrap was run, or
+# from the last collaboration's config.env. The permission's own `yourRole` is the
+# answer, and a permission created in the other direction inside the same collaboration
+# legitimately disagrees with the guess.
+#
+# 00-init used to die on that disagreement ("expected dataOwner. Run from the
+# data-owner side"), which made a reversed permission unreachable from the scripts
+# entirely. Roles are read from the platform, not remembered as a choice.
+adopt_data_role() {
+    local your_role="$1"
+    local want
+    case "$your_role" in
+        dataOwner)    want="data-owner" ;;
+        dataConsumer) want="data-consumer" ;;
+        "")           return 0 ;;  # platform did not say; keep what we have
+        *) die "Permission reports an unknown role '$your_role'." ;;
+    esac
+    [[ "$want" == "$JULENNY_OUR_SIDE" ]] && return 0
+
+    info "This permission makes this machine the ${want/-/ }, not the ${JULENNY_OUR_SIDE/-/ }."
+    info "  Switching to the $want profile for the rest of this run."
+    JULENNY_OUR_SIDE="$want"
+    export JULENNY_OUR_SIDE
+    _jl_load_side_profile "$JULENNY_OUR_SIDE"
+}
+
+# The function-def input role this machine supplies inputs for, from its DATA role.
+#
+# This one really is the data role: the function definition labels its inputs dataOwner
+# or queryAnalyst, and which of the two this machine answers to is decided per
+# permission, not by the key ceremony.
+my_function_input_role() {
+    case "$JULENNY_OUR_SIDE" in
+        data-owner)    echo "dataOwner" ;;
+        data-consumer) echo "queryAnalyst" ;;
+        *) die "Unknown JULENNY_OUR_SIDE='$JULENNY_OUR_SIDE'" ;;
+    esac
+}
+
+# True when this machine runs the LEAD half of the key ceremony.
+#
+# JULENNY_ROLE comes from config.env, where 00-init wrote what the platform reported.
+# Do not substitute the data role: they are the same answer only while the permission
+# runs in the direction the collaboration was created in.
+i_am_keysetup_lead() {
+    [[ "${JULENNY_ROLE:-}" == "lead" ]]
 }
 
 # Evaluation keys this permission's function needs that the COLLABORATION cannot supply.
@@ -1600,7 +1749,7 @@ viewer_flow() {
 
     # 5. Combine both partials and render the answer.
     # Branching driven by the function-def's output.layout. See
-    # original 06-decrypt.sh for the full rationale.
+    # original 06-decrypt.sh, now 06-end-of-cycle.sh, for the full rationale.
     local function_def="$JL_WORKDIR/function-def.json"
     local output_layout="scalar"
     if [[ -f "$function_def" ]]; then

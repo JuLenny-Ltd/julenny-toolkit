@@ -103,19 +103,21 @@ function Remove-IfPresent {
     }
 }
 
+# Prune the scenario entry folder for the side that was not asked for.
+#
+# Two things are deliberately NOT pruned any more:
+#
+#   _core\lead and _core\main no longer exist. There is one numbered set of phase
+#   scripts, and each phase branches internally on whichever role governs it.
+#
+#   NEITHER side profile is dropped, even though only one is used at a time. A
+#   permission created in the other direction inside the same collaboration makes this
+#   machine the other data role, and the scripts follow that by loading the other
+#   profile mid-run. Deleting it would turn a supported case into a missing file.
 if ($Role -ne 'both') {
-    if ($Role -eq 'owner') {
-        $sideToDrop = 'beta'; $roleDirToDrop = 'main'; $profileToDrop = 'data-consumer'
-    } else {
-        $sideToDrop = 'acme'; $roleDirToDrop = 'lead'; $profileToDrop = 'data-owner'
-    }
+    if ($Role -eq 'owner') { $sideToDrop = 'beta' } else { $sideToDrop = 'acme' }
     Get-ChildItem -LiteralPath $Dest -Directory | ForEach-Object {
         Remove-IfPresent (Join-Path $_.FullName $sideToDrop)
-    }
-    Remove-IfPresent (Join-Path $Dest "_core\$roleDirToDrop")
-    # Both extensions: the side profile exists as a .ps1 and a .env twin.
-    foreach ($ext in @('ps1', 'env')) {
-        Remove-IfPresent (Join-Path $Dest "_core\sides\$profileToDrop.$ext")
     }
 }
 

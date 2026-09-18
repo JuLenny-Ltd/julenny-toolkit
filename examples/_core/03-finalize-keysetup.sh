@@ -1,40 +1,43 @@
 #!/usr/bin/env bash
-# Acme: finalize the joint keysetup.
+# Finalize the joint keysetup. BOTH sides run it, and both do the SAME work:
 #
-# After both sides have completed bundles 1 and 2, this script:
-#   1. Downloads Beta's relin-round2 and sum-round1-continue shares.
-#   2. Runs the deterministic combines locally (must produce byte-identical
-#      output to Beta's runs of the same combines).
-#   3. SHA-256-hashes each of the three final joint keys.
-#   4. Requests one signed object storage upload URL per keyType, PUTs the blob.
-#   5. Builds the to-sign JSON locally (mimicking what the web UI would emit).
-#   6. Calls `julenny-toolkit crypto wrap-final-keys-envelope` to sign the envelope.
-#   7. POSTs the signed envelope to /keysetup/final-keys.
-#   8. Reports the resulting permission state.
+#   1. Collect whichever round-2 / sum shares the peer owes.
+#   2. Run the deterministic combines locally. Each side must produce byte-identical
+#      output to the other's run of the same combine; that is what the platform checks.
+#   3. SHA-256-hash each final joint key.
+#   4. Request one signed object storage upload URL per keyType and PUT the blob.
+#   5. Build the to-sign JSON locally, mimicking what the web UI emits.
+#   6. Sign the envelope with `julenny-toolkit crypto wrap-final-keys-envelope`.
+#   7. POST the signed envelope to /keysetup/final-keys.
+#   8. Report the resulting permission state.
 #
-# Strictly mirrors the web UI's option-B finalization flow: the toolkit binary
-# is offline (combines + signing only); platform calls happen here in bash.
+# The ONLY thing the keysetup role changes is which of the two shares in each combine is
+# already on this machine and which has to be fetched from the peer, plus the message
+# type the peer's sum share arrives under. The combines themselves take the LEAD's share
+# as -a and the MAIN's as -b on both machines, because that ordering is what makes the
+# two outputs identical.
 #
-# Installed wherever julenny-toolkit-examples copied this side's scripts.
-# Run after acme/02-keysetup-2.sh + beta/02-keysetup-2.sh have both finished.
+# Which half this machine runs is the KEYSETUP role, read from the platform by 00-init,
+# NOT the data role: a permission created in the other direction inside the same
+# collaboration makes the data owner the keysetup main.
+#
+# Strictly mirrors the web UI's option-B finalization flow: the toolkit binary is
+# offline (combines + signing only); platform calls happen here in bash.
+#
+# Run after 02-keysetup-2.sh has finished on BOTH machines.
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-# The side profile is chosen by the DATA role, which the scenario bootstrap exports.
-# Sourced dynamically so this phase can be driven for either side: the keysetup role
+# lib.sh resolves which side of the collaboration this machine is and loads the
+# matching side profile, so one copy of this phase serves both. The keysetup role
 # (lead/main) and the data role (owner/consumer) are independent, and a permission can
 # be created in either direction inside one collaboration.
-#
-# The fallback keeps a DIRECT run of this script working, which is how the numbered
-# scripts are documented to be runnable on their own.
-# shellcheck source=../sides/data-owner.env
-source "$SCRIPT_DIR/../sides/${JULENNY_OUR_SIDE:-data-owner}.env"
-# shellcheck source=../lib.sh
-source "$SCRIPT_DIR/../lib.sh"
+# shellcheck source=lib.sh
+source "$SCRIPT_DIR/lib.sh"
 load_session
 
-step "Acme: finalize joint keysetup"
+step "${JL_OUR_LABEL}: finalize joint keysetup (keysetup role: ${JULENNY_ROLE:-unknown})"
 
 # -------- Idempotence marker: skip if already submitted for THIS permission --------
 # 03 registers the finalKeys references against the permission's own document.
@@ -53,6 +56,9 @@ fi
 # finalize - even if it never held the local keysetup intermediates (e.g. the
 # joint key was set up via a different tool/machine and is being reused here).
 # Detect the already-complete state and skip BEFORE requiring local files.
+#
+# The main half used to run this same check much later, just before requesting upload
+# URLs, by which point the local-file checks had already stopped the run.
 _precheck="$(curl_jl POST "/api/fhe-permissions/$JULENNY_PERMISSION_ID/keysetup/final-keys/upload-url" \
     -H "Content-Type: application/json" \
     --data-binary "$(jq -n '{keyType: "joint_public_key"}')" 2>/dev/null || echo '{}')"
@@ -62,7 +68,6 @@ if [[ "$(echo "$_precheck" | jq -r '.error // ""')" == *"in state 'complete'"* ]
     exit 0
 fi
 
-
 # Rotation-free functions (no "sum" in requiredEvalKeys) skip the sum key entirely.
 if function_requires_sum_keys; then NEEDS_SUM="yes"; else NEEDS_SUM="no"; fi
 # Additive-only functions (federated-average) declare requiredEvalKeys: [] and have
@@ -70,22 +75,49 @@ if function_requires_sum_keys; then NEEDS_SUM="yes"; else NEEDS_SUM="no"; fi
 if function_requires_relin_keys; then NEEDS_RELIN="yes"; else NEEDS_RELIN="no"; fi
 
 # -------- Locate already-produced files --------
-LEAD_R2="$JL_KEYS_DIR/lead-relin-r2.bin"
-LEAD_SUM="$JL_KEYS_DIR/lead-sum-r1.bin"
+# LEAD_* and MAIN_* name the SHARES, not the machines. Which of them is ours and which
+# is the peer's is the only thing the role decides here.
 COMBINED_R1="$JL_KEYS_DIR/combined-relin-r1.bin"
+
+if i_am_keysetup_lead; then
+    LEAD_R2="$JL_KEYS_DIR/lead-relin-r2.bin"
+    LEAD_SUM="$JL_KEYS_DIR/lead-sum-r1.bin"
+    MAIN_R2="$JL_PEER_DIR/main-relin-r2.bin"
+    MAIN_SUM="$JL_PEER_DIR/main-sum-r1.bin"
+    MY_R2="$LEAD_R2"
+    MY_SUM="$LEAD_SUM"
+    PEER_R2="$MAIN_R2"
+    PEER_SUM="$MAIN_SUM"
+    PEER_SUM_MSG="sum-round1-continue"
+    # The lead never derives the joint pk. Normally it picks it up during bundle 2; an
+    # additive-only function has no bundle 2, so it can still be owed here.
+    JOINT_PK_FROM_PEER=true
+else
+    LEAD_R2="$JL_PEER_DIR/lead-relin-r2.bin"
+    LEAD_SUM="$JL_PEER_DIR/lead-sum-r1.bin"
+    MAIN_R2="$JL_KEYS_DIR/main-relin-r2.bin"
+    MAIN_SUM="$JL_KEYS_DIR/main-sum-r1.bin"
+    MY_R2="$MAIN_R2"
+    MY_SUM="$MAIN_SUM"
+    PEER_R2="$LEAD_R2"
+    PEER_SUM="$LEAD_SUM"
+    PEER_SUM_MSG="sum-round1"
+    # The main derived the joint pk itself in bundle 1; there is nothing to fetch.
+    JOINT_PK_FROM_PEER=false
+fi
 
 # The round-2 intermediates are only needed to PRODUCE the final relin key. A new
 # permission reusing an existing joint key already has the final key on disk, and the
 # combine below is skipped, so only insist on the intermediates when there is a
 # combine still to do.
 FINAL_RELIN_PRECHECK="$JL_KEYS_DIR/final_relin_key.bin"
-[[ "$NEEDS_RELIN" != "yes" || -f "$FINAL_RELIN_PRECHECK" || -f "$LEAD_R2" ]] \
-    || die "Missing $LEAD_R2. Did 02-keysetup-2.sh run?"
+[[ "$NEEDS_RELIN" != "yes" || -f "$FINAL_RELIN_PRECHECK" || -f "$MY_R2" ]] \
+    || die "Missing $MY_R2. Did 02-keysetup-2.sh run?"
 # Same reasoning as the relin intermediates: sum-round-1 is only needed to PRODUCE
 # the final sum key, so a reused joint key that already has it needs nothing.
 FINAL_SUM_PRECHECK="$JL_KEYS_DIR/final_sum_key.bin"
-[[ "$NEEDS_SUM" != "yes" || -f "$FINAL_SUM_PRECHECK" || -f "$LEAD_SUM" ]] \
-    || die "Missing $LEAD_SUM. Did 01-keysetup-1.sh run?"
+[[ "$NEEDS_SUM" != "yes" || -f "$FINAL_SUM_PRECHECK" || -f "$MY_SUM" ]] \
+    || die "Missing $MY_SUM. Did 01-keysetup-1.sh run?"
 [[ "$NEEDS_RELIN" != "yes" || -f "$FINAL_RELIN_PRECHECK" || -f "$COMBINED_R1" ]] \
     || die "Missing $COMBINED_R1. Did 02-keysetup-2.sh run?"
 
@@ -94,44 +126,44 @@ JOINT_PK=""
 for candidate in "$JL_KEYS_DIR/joint_public_key.bin" "$JL_PEER_DIR/joint-pk.bin"; do
     if [[ -f "$candidate" ]]; then JOINT_PK="$candidate"; break; fi
 done
-# Normally Acme picks the joint pk up during bundle 2. An additive-only function has no
-# bundle 2, so fetch it from Beta's pk-share here instead: Beta's pk-share IS the joint
-# public key.
-if [[ -z "$JOINT_PK" ]]; then
-    info "Fetching the joint public key from Beta's pk-share..."
+if [[ -z "$JOINT_PK" ]] && $JOINT_PK_FROM_PEER; then
+    # The main's pk-share IS the joint public key, so for the lead this fetch is the
+    # joint key itself and not a peer contribution to it.
+    info "Fetching the joint public key from ${JL_PEER_LABEL}'s pk-share..."
     wait_for_peer_share "pk-share"
     download_peer_share "pk-share" "$JL_PEER_DIR/joint-pk.bin"
     [[ -f "$JL_PEER_DIR/joint-pk.bin" ]] && JOINT_PK="$JL_PEER_DIR/joint-pk.bin"
 fi
 [[ -n "$JOINT_PK" ]] || die "Cannot find the joint public key on disk."
 
-# -------- 1. Download Beta's relin-round2 and sum-round1-continue --------
-# Skip download if we already have them locally (idempotence: a reused-joint-
-# key permission won't have a fresh peer upload for THIS permission, but the
-# bytes from the original keysetup are still on disk and still correct).
-MAIN_R2="$JL_PEER_DIR/main-relin-r2.bin"
-MAIN_SUM="$JL_PEER_DIR/main-sum-r1.bin"
-
+# -------- 1. Collect the peer's round-2 and sum shares --------
+# Skip the download if we already have them locally (idempotence: a reused-joint-key
+# permission will not have a fresh peer upload for THIS permission, but the bytes from
+# the original keysetup are still on disk and still correct).
+#
 # The peer's round-2 share is ONLY an input to the combine below, and that combine is
 # skipped when the final key is already on disk. Waiting for a share we will never use
 # deadlocks a reused-joint-key permission whose peer-share cache happens to be empty:
 # the peer walks straight past its own (cached) wait and never re-publishes.
 if [[ "$NEEDS_RELIN" == "yes" && ! -f "$FINAL_RELIN_PRECHECK" ]]; then
-    if [[ ! -f "$MAIN_R2" ]]; then
-        info "Waiting for Beta's relin-round2 contribution..."
+    if [[ ! -f "$PEER_R2" ]]; then
+        info "Waiting for ${JL_PEER_LABEL}'s relin-round2 contribution..."
         wait_for_peer_share "relin-round2"
-        download_peer_share "relin-round2" "$MAIN_R2"
+        download_peer_share "relin-round2" "$PEER_R2"
     else
-        info "Reusing existing peer share: $MAIN_R2"
+        info "Reusing existing peer share: $PEER_R2"
     fi
 fi
 if [[ "$NEEDS_SUM" == "yes" && ! -f "$FINAL_SUM_PRECHECK" ]]; then
-    if [[ ! -f "$MAIN_SUM" ]]; then
-        info "Waiting for Beta's sum-round1-continue contribution..."
-        wait_for_peer_share "sum-round1-continue"
-        download_peer_share "sum-round1-continue" "$MAIN_SUM"
+    if [[ ! -f "$PEER_SUM" ]]; then
+        # The main half used to download this blind, with no wait. That is fine only
+        # while the lead has certainly published first, which is not something this
+        # phase can assume.
+        info "Waiting for ${JL_PEER_LABEL}'s $PEER_SUM_MSG contribution..."
+        wait_for_peer_share "$PEER_SUM_MSG"
+        download_peer_share "$PEER_SUM_MSG" "$PEER_SUM"
     else
-        info "Reusing existing peer share: $MAIN_SUM"
+        info "Reusing existing peer share: $PEER_SUM"
     fi
 fi
 
@@ -314,11 +346,11 @@ case "$STATE" in
         echo "  $SCRIPT_DIR/04-encrypt.sh"
         ;;
     awaiting-peer-submission|awaiting-finalization)
-        info "Your submission is in. Waiting for Beta to run their finalize."
+        info "Your submission is in. Waiting for ${JL_PEER_LABEL} to run their finalize."
         info "  Server: $MSG"
         touch "$MARKER"
         echo
-        info "Tell Beta to run their finalize step on their own machine"
+        info "Tell ${JL_PEER_LABEL} to run their finalize step on their own machine"
         info "(their run.sh / run.ps1 handles it, or the equivalent MCP verbs)."
         ;;
     *)

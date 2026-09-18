@@ -129,16 +129,20 @@ mkdir -p "$DEST"
 cp -R "$SRC"/. "$DEST"/
 chmod -R u+w "$DEST"
 
-# Both extensions on the side profile: it exists as a .env and a .ps1 twin.
+# Prune the scenario entry folder for the side that was not asked for.
+#
+# Two things are deliberately NOT pruned any more:
+#
+#   _core/lead and _core/main no longer exist. There is one numbered set of phase
+#   scripts, and each phase branches internally on whichever role governs it.
+#
+#   NEITHER side profile is dropped, even though only one is used at a time. A
+#   permission created in the other direction inside the same collaboration makes this
+#   machine the other data role, and the scripts follow that by loading the other
+#   profile mid-run. Deleting it would turn a supported case into a missing file.
 case "$ROLE" in
-    owner)
-        rm -rf "$DEST"/*/beta "$DEST"/_core/main \
-               "$DEST"/_core/sides/data-consumer.env "$DEST"/_core/sides/data-consumer.ps1
-        ;;
-    consumer)
-        rm -rf "$DEST"/*/acme "$DEST"/_core/lead \
-               "$DEST"/_core/sides/data-owner.env "$DEST"/_core/sides/data-owner.ps1
-        ;;
+    owner)    rm -rf "$DEST"/*/beta ;;
+    consumer) rm -rf "$DEST"/*/acme ;;
 esac
 
 # Drop the Windows scripts. This machine cannot run a .ps1, and leaving them

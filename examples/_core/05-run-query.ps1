@@ -8,16 +8,11 @@
 
 $ErrorActionPreference = 'Stop'
 $here = $PSScriptRoot
-# The side profile is chosen by the DATA role, which the scenario bootstrap exports.
-# Sourced dynamically so this phase can be driven for either side: the keysetup role
+# lib.ps1 resolves which side of the collaboration this machine is and loads the
+# matching side profile, so one copy of this phase serves both. The keysetup role
 # (lead/main) and the data role (owner/consumer) are independent, and a permission can
 # be created in either direction inside one collaboration.
-#
-# The fallback keeps a DIRECT run of this script working, which is how the numbered
-# scripts are documented to be runnable on their own.
-$jlSide = if ($env:JULENNY_OUR_SIDE) { $env:JULENNY_OUR_SIDE } else { 'data-consumer' }
-. "$here\..\sides\$jlSide.ps1"
-. "$here\..\lib.ps1"
+. "$here\lib.ps1"
 Import-JlSession
 
 $functionDefPath = Join-Path $script:JL_WORKDIR 'function-def.json'
@@ -245,7 +240,7 @@ while (-not $execId) {
 
 Write-JlSuccess "Execution triggered. ID: $execId"
 
-# Persist this cycle's execution id so the viewer flow (06-decrypt) waits for
+# Persist this cycle's execution id so the viewer flow (06-end-of-cycle) waits for
 # THIS execution rather than offering older released ones.
 $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
 [System.IO.File]::WriteAllText((Join-Path $script:JL_WORKDIR 'last_exec_id'), $execId, $utf8NoBom)
@@ -293,4 +288,4 @@ while ($true) {
 }
 
 Write-Host ""
-Write-JlInfo "Next step: $($script:JL_PEER_LABEL) runs their end-of-cycle (release); then run 06-decrypt.ps1 here."
+Write-JlInfo "Next step: $($script:JL_PEER_LABEL) runs their end-of-cycle (release); then run 06-end-of-cycle.ps1 here."

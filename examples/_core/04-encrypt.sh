@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
-# Data consumer: pick a dataset for each queryAnalyst input the function-def
-# declares.
+# Pick a dataset for each function-def input THIS side is responsible for. Both sides
+# run it, and both do the same work.
 #
-# Iterates over the inputs whose role matches this side's responsibility
-# (queryAnalyst), uploads each, and declares preferred-datasets.
+# Which inputs those are comes from the DATA role: the function definition labels each
+# input dataOwner or queryAnalyst. This is one of only two phases that reads the data
+# role rather than the keysetup role, because it is about whose data goes in, not about
+# who holds which half of the key.
 #
 # Each input branches on inputs[i].encoding:
 #   - If it starts with "plaintext-" (for example rule-based-cross-match's
@@ -11,33 +13,34 @@
 #     uploaded via upload_plaintext_dataset (multipart POST with the
 #     kind=plaintext flag). No `julenny-toolkit crypto encrypt` pass.
 #   - Plaintext inputs also skip the dataset_csv_map.json bookkeeping, because
-#     06-decrypt's resolve-indicator only applies to encrypted indicator
+#     06-end-of-cycle's resolve-indicator only applies to encrypted indicator
 #     outputs, not plaintext attachments.
 #
 # Which inputs are plaintext is entirely function-def driven, so this branch is
 # what lets one script serve every scenario.
+#
+# There were two copies of this until 2026-09-18, one per side. They had drifted: the
+# owner's lacked the signed-URL path for uploads over the inline cap, the picker that
+# re-prompts instead of aborting on a bad entry, the CSV map for a reused dataset, and
+# the plaintext sidecar that phase 4.5 cross-checks rotation indices against. This is
+# the consumer's copy, which had all four.
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-# The side profile is chosen by the DATA role, which the scenario bootstrap exports.
-# Sourced dynamically so this phase can be driven for either side: the keysetup role
+# lib.sh resolves which side of the collaboration this machine is and loads the
+# matching side profile, so one copy of this phase serves both. The keysetup role
 # (lead/main) and the data role (owner/consumer) are independent, and a permission can
 # be created in either direction inside one collaboration.
-#
-# The fallback keeps a DIRECT run of this script working, which is how the numbered
-# scripts are documented to be runnable on their own.
-# shellcheck source=../sides/data-consumer.env
-source "$SCRIPT_DIR/../sides/${JULENNY_OUR_SIDE:-data-consumer}.env"
-# shellcheck source=../lib.sh
-source "$SCRIPT_DIR/../lib.sh"
+# shellcheck source=lib.sh
+source "$SCRIPT_DIR/lib.sh"
 load_session
 
-MY_ROLE="queryAnalyst"
+MY_ROLE="$(my_function_input_role)"
 PICK_FILE="$JL_WORKDIR/my_dataset_picks.json"
 FUNCTION_DEF="$JL_WORKDIR/function-def.json"
 
-step "Beta: pick datasets for $MY_ROLE inputs"
+step "${JL_OUR_LABEL}: pick datasets for $MY_ROLE inputs"
 
 [[ -f "$FUNCTION_DEF" ]] \
     || die "Function-def not found at $FUNCTION_DEF. Re-run ./00-init.sh."
@@ -45,11 +48,11 @@ step "Beta: pick datasets for $MY_ROLE inputs"
 MY_INPUTS_JSON="$(jq --arg r "$MY_ROLE" '[.inputs[]? | select(.role == $r)]' "$FUNCTION_DEF")"
 MY_INPUT_COUNT="$(echo "$MY_INPUTS_JSON" | jq 'length')"
 if (( MY_INPUT_COUNT == 0 )); then
-    info "Function declares no $MY_ROLE inputs. Nothing for Beta to upload."
+    info "Function declares no $MY_ROLE inputs. Nothing for ${JL_OUR_LABEL} to upload."
     exit 0
 fi
 
-info "Function requires $MY_INPUT_COUNT $MY_ROLE input(s) from Beta."
+info "Function requires $MY_INPUT_COUNT $MY_ROLE input(s) from ${JL_OUR_LABEL}."
 
 # -------- Fetch the joint public key. Needed for ciphertext inputs AND for
 # encrypted-bundle inputs: the bundle is encrypted under the joint key after the
@@ -116,7 +119,7 @@ for ((i = 0; i < MY_INPUT_COUNT; i++)); do
 
     PICKED_ID=""
     if (( EXISTING_COUNT > 0 )); then
-        info "Existing Beta dataset(s) in this project:"
+        info "Existing ${JL_OUR_LABEL} dataset(s) in this project:"
         echo "$EXISTING" \
             | jq -r 'to_entries[] | "  \(.key + 1)) \(.value.name)  (id: \(.value.id), uploaded \((.value.createdAt // "?") | .[0:10]))"'
         echo "  u) Upload a NEW dataset"
@@ -157,14 +160,14 @@ for ((i = 0; i < MY_INPUT_COUNT; i++)); do
                         warn "Map says CSV is $MAPPED_CSV but that file no longer exists."
                     else
                         info "No CSV mapping yet for this dataset. Supplying one now lets"
-                        info "06-decrypt resolve indicator-hash output back to record names."
+                        info "06-end-of-cycle resolve indicator-hash output back to record names."
                     fi
                     prompt_for CSV_FOR_DSET "Originating CSV for '$PICKED_NAME' (blank to skip)" "${JULENNY_INPUT_CSV:-}"
                     if [[ -n "$CSV_FOR_DSET" ]]; then
                         [[ -f "$CSV_FOR_DSET" ]] || die "CSV not found: $CSV_FOR_DSET"
                         remember_dataset_csv "$PICKED_ID" "$CSV_FOR_DSET"
                     else
-                        warn "Skipped CSV mapping. 06-decrypt will re-prompt for this dataset."
+                        warn "Skipped CSV mapping. 06-end-of-cycle will re-prompt for this dataset."
                     fi
                 fi
 
@@ -227,9 +230,9 @@ for ((i = 0; i < MY_INPUT_COUNT; i++)); do
 
             if [[ "${DATA_CHOICE,,}" == "o" ]]; then
                 if $IS_PLAINTEXT; then
-                    prompt_for INPUT_FILE "Path to Beta's plaintext file for input '$INPUT_NAME'" "$HOME/$INPUT_NAME.txt"
+                    prompt_for INPUT_FILE "Path to ${JL_OUR_LABEL}'s plaintext file for input '$INPUT_NAME'" "$HOME/$INPUT_NAME.txt"
                 else
-                    prompt_for INPUT_FILE "Path to Beta's CSV for input '$INPUT_NAME'" "${JULENNY_INPUT_CSV:-$HOME/data.csv}"
+                    prompt_for INPUT_FILE "Path to ${JL_OUR_LABEL}'s CSV for input '$INPUT_NAME'" "${JULENNY_INPUT_CSV:-$HOME/data.csv}"
                 fi
                 if [[ -f "$INPUT_FILE" ]]; then break; fi
                 warn "File not found: '$INPUT_FILE' - please try again."
@@ -254,7 +257,7 @@ for ((i = 0; i < MY_INPUT_COUNT; i++)); do
         # collided and the picker showed several identically-named datasets with no way
         # to tell which file each held. The default is what people actually accept.
         prompt_for DATASET_NAME "Display name for the uploaded dataset" \
-                   "Beta $INPUT_NAME $(basename "$INPUT_FILE") ($(date +%Y-%m-%d))"
+                   "${JL_OUR_LABEL} $INPUT_NAME $(basename "$INPUT_FILE") ($(date +%Y-%m-%d))"
 
         if $IS_BUNDLE; then
             # encrypted-bundle: run the function-def's encodingRecipe (cleartext,
@@ -270,7 +273,7 @@ for ((i = 0; i < MY_INPUT_COUNT; i++)); do
             echo "============================================================"
 
             BUNDLE_INPUT="$JL_KEYS_DIR/$(basename "$INPUT_FILE").$INPUT_NAME.bundle-input.json"
-            node "$SCRIPT_DIR/../recipe/recipe-encode.mjs" \
+            node "$SCRIPT_DIR/recipe/recipe-encode.mjs" \
                 "$FUNCTION_DEF" "$INPUT_NAME" "$INPUT_FILE" "$BUNDLE_INPUT" \
                 || die "recipe executor failed for '$INPUT_NAME'."
 
@@ -385,7 +388,7 @@ for ((i = 0; i < MY_INPUT_COUNT; i++)); do
             success "Uploaded as '$DATASET_NAME' ($PICKED_ID)."
 
             # Map originating CSV for this ciphertext input. Plaintext inputs
-            # don't need this — 06-decrypt's resolve-indicator only looks
+            # don't need this - 06-end-of-cycle's resolve-indicator only looks
             # up encrypted indicators, not plaintext attachments.
             remember_dataset_csv "$PICKED_ID" "$INPUT_FILE"
             remember_column_choice "$PICKED_ID" "${COL_CHOICE:-all}"
@@ -408,12 +411,20 @@ done
 
 echo "$PICKS_JSON" > "$PICK_FILE"
 echo
-success "Beta's dataset picks for this execution:"
+success "${JL_OUR_LABEL}'s dataset picks for this execution:"
 echo "$PICKS_JSON" | jq .
 info "Saved to $PICK_FILE; 05-run-query will pass them on the trigger."
 
 echo
-info "Next step (on this machine), once Acme has also run their 04-encrypt:"
-echo "  $SCRIPT_DIR/05-run-query.sh"
-echo "  (The trigger will use Beta's picks above; for Acme's inputs, you'll be"
-echo "   prompted at trigger time since Beta can't read Acme's local picks.)"
+info "Next step (on this machine), once ${JL_PEER_LABEL} has also run their 04-encrypt:"
+if [[ "$JULENNY_OUR_SIDE" == "data-consumer" ]]; then
+    # The consumer triggers the execution; the owner waits for it and then takes its
+    # part in the end-of-cycle. That split is by DATA role and does not move.
+    echo "  $SCRIPT_DIR/05-run-query.sh"
+    echo "  (The trigger will use the picks above; for ${JL_PEER_LABEL}'s inputs you will be"
+    echo "   prompted at trigger time, since this machine cannot read their local picks.)"
+else
+    echo "  $SCRIPT_DIR/06-end-of-cycle.sh"
+    echo "  (It waits for ${JL_PEER_LABEL} to trigger the execution, then takes this"
+    echo "   machine's part in revealing the answer.)"
+fi

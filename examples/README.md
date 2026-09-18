@@ -33,22 +33,42 @@ examples/
 
 ### `_core/`: the shared driver
 
-One implementation backs both sides of every scenario. The side-specific bits
-(labels, API view, secret-share filename, role) come from a profile in
-`_core/sides/` that's sourced before the shared library.
+One implementation backs both sides of every scenario. There is ONE numbered set of
+phase scripts, and each phase branches internally on whichever role governs it. The
+side-specific bits (labels, API view, default secret-share filename) come from a
+profile in `_core/sides/`, which the shared library loads for you.
 
 ```
 _core/
   run.sh   / run.ps1     One-command driver: menu -> runs the phases in order
   lib.sh   / lib.ps1     Shared helper library (API calls, keysetup, encrypt,
                          release/decrypt dispatch, collaboration creation)
+  00-init .. 06-end-of-cycle   The numbered phase scripts. One set, both sides.
   sides/
-    data-owner.env    / .ps1    Profile for the Acme/lead side
-    data-consumer.env / .ps1    Profile for the Beta/main side
-  lead/                  Data-owner phase scripts (00-init .. 05-release)
-  main/                  Data-consumer phase scripts (00-init .. 06-decrypt)
+    data-owner.env    / .ps1    Profile for the data-owner side
+    data-consumer.env / .ps1    Profile for the data-consumer side
   recipe/                Node helpers for encodingRecipe inputs (shared)
 ```
+
+#### Two roles, not one
+
+A party has **two** roles in a collaboration, and they are independent:
+
+- the **data role** (owner or consumer) is per PERMISSION. It says whose data goes in
+  and who triggers the run.
+- the **keysetup role** (lead or main) is per JOINT KEY, fixed once when that key is
+  built. It says which half of the key ceremony this machine performs.
+
+They agree in the common case, which is why the phase scripts used to live in `lead/`
+and `main/` folders picked by the data role. They stop agreeing as soon as a
+collaboration holds a permission created in the other direction, and the folder layout
+was then actively wrong: it ran the wrong half of the ceremony, against key material
+stored under the other half's filename.
+
+So each phase reads the role that actually governs it: keysetup role for `01`, `02`,
+`03` and `04.5`; data role for `00-init` and `04-encrypt`; the permission's
+`resultVisibility` for `06-end-of-cycle`. Both roles are read from the platform, never
+remembered as a choice.
 
 Each script has a `.sh` and a `.ps1` form. They are twins: same phases, same
 round numbers, same message types, same `config.env` format, so a Linux machine
@@ -115,8 +135,8 @@ The driver runs these in order; you can also run them individually. Each exists 
 | 3 | `03-finalize-keysetup` | Submit/confirm the finalized joint keys |
 | 4 | `04-encrypt` | Encode and upload this side's input dataset(s) |
 | 4.5 | `04.5-rotation-keysetup` | Rotation-key augmentation, only if the function declares rotation in `requiredEvalKeys`; otherwise a no-op |
-| 5 | `05-release` (lead) / `05-run-query` (main) | Owner releases its partial decrypt; consumer triggers the execution |
-| 6 | `06-decrypt` (main) | Combine both partial decryptions and reveal the plaintext answer |
+| 5 | `05-run-query` (data consumer only) | Trigger the execution |
+| 6 | `06-end-of-cycle` (both sides) | This machine's part in revealing the answer. The viewer combines both partial decryptions and sees the plaintext; the releaser contributes its partial and never does. Which one you are comes from the permission's `resultVisibility`. |
 
 ## Scenarios
 

@@ -157,7 +157,7 @@ cd <examples>\joint-record-overlap\beta; .\run.ps1
 
 Every script exists in both forms and does the same work, so the two sides of a collaboration can run on different operating systems. The installer copies only the set your machine can run.
 
-The driver chains the numbered phase scripts (`00-init` through `06-decrypt`), which you can also run individually to follow the protocol step by step. Each is small, commented, and uses only HTTPS plus this toolkit. Read them as the canonical reference for integrating the toolkit into your own pipelines.
+The driver chains the numbered phase scripts (`00-init` through `06-end-of-cycle`), which you can also run individually to follow the protocol step by step. Each is small, commented, and uses only HTTPS plus this toolkit. Read them as the canonical reference for integrating the toolkit into your own pipelines.
 
 Windows needs nothing beyond the toolkit itself: the PowerShell scripts use built-in cmdlets, so there is no `jq` or `curl` to install and no WSL.
 

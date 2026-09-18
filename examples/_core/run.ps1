@@ -3,10 +3,17 @@
 # numbered scripts. Fully interactive: it inspects platform state at startup and
 # asks; there are no flags except -Help.
 #
-# Which side we are (data-owner / data-consumer) comes from JULENNY_OUR_SIDE,
-# set by the scenario's per-side bootstrap before this runs. The matching side
-# profile is dot-sourced below, and the only per-side behaviour lives in the
-# branches marked OWNER / CONSUMER.
+# Which side we are (data-owner / data-consumer) comes from JULENNY_OUR_SIDE, set by
+# the scenario's per-side bootstrap before this runs. lib.ps1 loads the matching side
+# profile, and the only per-side behaviour here lives in the branches marked
+# OWNER / CONSUMER.
+#
+# There is ONE numbered set of phase scripts. It used to be two, _core\lead\ and
+# _core\main\, picked by the data role - which was wrong, because the keysetup role is
+# a separate thing and a permission created in the other direction inside the same
+# collaboration makes the two disagree. Each phase now branches internally on whichever
+# role actually governs it: keysetup role for 01, 02, 03 and 04.5; data role for
+# 00-init and 04-encrypt; resultVisibility for 06-end-of-cycle.
 #
 # PowerShell twin of run.sh.
 
@@ -21,12 +28,11 @@ $ErrorActionPreference = 'Stop'
 $here = $PSScriptRoot
 
 if ($Help) {
-    Get-Content $PSCommandPath | Select-Object -Skip 1 -First 10 | ForEach-Object { $_ -replace '^#\s?', '' }
+    Get-Content $PSCommandPath | Select-Object -Skip 1 -First 8 | ForEach-Object { $_ -replace '^#\s?', '' }
     exit 0
 }
 
-# Which side are we? Dot-source the matching profile BEFORE lib.ps1, whose guard
-# requires the profile vars.
+# Which side are we? lib.ps1 reads this and loads the matching side profile.
 $side = $env:JULENNY_OUR_SIDE
 if (-not $side) {
     throw "Set JULENNY_OUR_SIDE=data-owner or data-consumer before running (the scenario bootstrap does this)."
@@ -34,7 +40,6 @@ if (-not $side) {
 if ($side -ne 'data-owner' -and $side -ne 'data-consumer') {
     throw "JULENNY_OUR_SIDE must be data-owner or data-consumer, got '$side'"
 }
-. "$here\sides\$side.ps1"
 . "$here\lib.ps1"
 
 function Test-JlIsOwner { return ($script:JULENNY_OUR_SIDE -eq 'data-owner') }
@@ -48,8 +53,6 @@ $watchMode   = $false
 $newTest     = $false
 $switchCollab = $false
 $onlyDecrypt = $false
-
-$roleDir = $script:JL_ROLE_DIR
 
 # ---------------- State detection ----------------
 function Test-JlPeerUploaded {
@@ -110,17 +113,48 @@ function Set-JlNextUndecryptedExecution {
     return $false
 }
 
-# We always gate on the PEER's bundle uploads. The lead publishes pk-share as
-# bundle 1; the main publishes relin-round1-continue. Each side waits for the
-# other's bundle-1 message type; bundle 2 is the same type both ways.
+# We always gate on the PEER's bundle uploads. The LEAD publishes pk-share as bundle 1;
+# the MAIN publishes relin-round1-continue. Each side waits for the other's bundle-1
+# message type; bundle 2 is the same type both ways.
+#
+# This branched on the DATA role until 2026-09-18, which is the same answer only while
+# the two roles agree. On a permission created in the other direction it waited for the
+# message type this machine had itself just published, and looked for its own key share
+# under the other half's filename.
+#
 # An additive-only function (requiredEvalKeys: []) has no relin exchange at all, so
 # bundle 1 is just the pk-share pair and there is no bundle 2. Waiting for
 # relin-round1-continue there hangs forever: the platform goes straight to
 # awaiting-finalization and refuses further messages.
-$script:JlNeedsRelin = Test-JlFunctionRequiresRelinKeys
-if (Test-JlIsOwner -and $script:JlNeedsRelin) { $peerBundle1Type = 'relin-round1-continue' } else { $peerBundle1Type = 'pk-share' }
-if (Test-JlIsOwner) { $ownBundle1Marker = 'fhe_public_key.bin' } else { $ownBundle1Marker = 'joint_public_key.bin' }
-if ($script:JlNeedsRelin) { if (Test-JlIsOwner) { $ownBundle1Marker = 'lead-relin-r1.bin' } else { $ownBundle1Marker = 'main-relin-r1.bin' } }
+#
+# Recomputed after 00-init, because on a first run neither the function-def nor the
+# keysetup role is known yet. Kept in one function so the two calls cannot drift.
+#
+# The lines this replaced also read `if (Test-JlIsOwner -and $x)`, which does not mean
+# what it looks like: a function with no param block swallows `-and` and the operand
+# into $args and returns its own value, so the second condition never applied.
+function Resolve-JlBundleMarkers {
+    $script:JlNeedsRelin = Test-JlFunctionRequiresRelinKeys
+    if (Test-JlAmKeysetupLead) {
+        if ($script:JlNeedsRelin) {
+            $script:JlPeerBundle1Type  = 'relin-round1-continue'
+            $script:JlOwnBundle1Marker = 'lead-relin-r1.bin'
+        } else {
+            $script:JlPeerBundle1Type  = 'pk-share'
+            $script:JlOwnBundle1Marker = 'fhe_public_key.bin'
+        }
+        $script:JlOwnBundle2Marker = 'lead-relin-r2.bin'
+    } else {
+        $script:JlPeerBundle1Type = 'pk-share'
+        if ($script:JlNeedsRelin) {
+            $script:JlOwnBundle1Marker = 'main-relin-r1.bin'
+        } else {
+            $script:JlOwnBundle1Marker = 'joint_public_key.bin'
+        }
+        $script:JlOwnBundle2Marker = 'main-relin-r2.bin'
+    }
+}
+Resolve-JlBundleMarkers
 
 # ---------------- Gate: wait, or exit and let the operator re-run ----------------
 function Invoke-JlGate {
@@ -153,7 +187,7 @@ function Invoke-JlGate {
 # Runs a numbered phase script as its own process, exactly as run.sh does.
 function Invoke-JlPhase {
     param([Parameter(Mandatory = $true)][string] $ScriptName)
-    $path = Join-Path (Join-Path $here $roleDir) $ScriptName
+    $path = Join-Path $here $ScriptName
     if (-not (Test-Path -LiteralPath $path)) { Stop-JlWithError "Phase script not found: $path" }
     # Clear it first. Invoking a PowerShell script does NOT set $LASTEXITCODE: it
     # keeps whatever the last NATIVE process left behind. Without this reset, a
@@ -300,20 +334,17 @@ Import-JlSession
 # Re-fetch the function-def (mutable per slug/version); soft-fails offline.
 try { Update-JlFunctionDef | Out-Null } catch { Write-JlWarn "Could not refresh the function definition; using the local copy." }
 
-# Recomputed here, AFTER 00-init has fetched the function definition. The value set
-# before phase 1 is decided when a first run has no function-def.json at all, so it is
-# a guess rather than a reading. bash guessed the other way and its consumer skipped
-# keysetup bundle 2 entirely, deadlocking against an owner waiting for it.
-$script:JlNeedsRelin = Test-JlFunctionRequiresRelinKeys
-if (Test-JlIsOwner -and $script:JlNeedsRelin) { $peerBundle1Type = 'relin-round1-continue' } else { $peerBundle1Type = 'pk-share' }
-if (Test-JlIsOwner) { $ownBundle1Marker = 'fhe_public_key.bin' } else { $ownBundle1Marker = 'joint_public_key.bin' }
-if ($script:JlNeedsRelin) { if (Test-JlIsOwner) { $ownBundle1Marker = 'lead-relin-r1.bin' } else { $ownBundle1Marker = 'main-relin-r1.bin' } }
+# Recomputed here, AFTER 00-init has fetched the function definition AND written the
+# keysetup role to config.env. Both inputs are unknown before phase 1: the values set
+# then are a guess rather than a reading. bash guessed the other way and its consumer
+# skipped keysetup bundle 2 entirely, deadlocking against an owner waiting for it.
+Resolve-JlBundleMarkers
 
-# Consumer shortcut: skip everything and just decrypt. 06-decrypt is
+# Consumer shortcut: skip everything and just decrypt. 06-end-of-cycle is
 # self-contained (polls, and picks if there are several).
 if ($onlyDecrypt) {
     Write-JlStep "$($script:JL_OUR_LABEL): decrypt latest released execution"
-    Invoke-JlPhase '06-decrypt.ps1'
+    Invoke-JlPhase '06-end-of-cycle.ps1'
     exit 0
 }
 
@@ -386,29 +417,31 @@ switch -Regex ($ksState) {
         }
     }
     '^(pending-keysetup|in-progress)$' {
-        if (Test-JlIsOwner) {
-            # OWNER: publish bundle 1, wait, publish bundle 2, wait.
-            if (-not (Test-Path -LiteralPath (Join-Path $script:JL_KEYS_DIR $ownBundle1Marker))) {
+        # Ordering is by KEYSETUP role, not by data role: the lead goes first because
+        # its contributions depend on nothing, and the main chains on them.
+        if (Test-JlAmKeysetupLead) {
+            # LEAD: publish bundle 1, wait, publish bundle 2, wait.
+            if (-not (Test-Path -LiteralPath (Join-Path $script:JL_KEYS_DIR $script:JlOwnBundle1Marker))) {
                 Write-JlStep "$($script:JL_OUR_LABEL): keysetup bundle 1"
                 Invoke-JlPhase '01-keysetup-1.ps1'
             }
-            Invoke-JlGate "$($script:JL_PEER_LABEL) to complete bundle 1 ($peerBundle1Type)" { Test-JlPeerUploaded $peerBundle1Type }
+            Invoke-JlGate "$($script:JL_PEER_LABEL) to complete bundle 1 ($($script:JlPeerBundle1Type))" { Test-JlPeerUploaded $script:JlPeerBundle1Type }
             if ($script:JlNeedsRelin) {
-                if (-not (Test-Path -LiteralPath (Join-Path $script:JL_KEYS_DIR 'lead-relin-r2.bin'))) {
+                if (-not (Test-Path -LiteralPath (Join-Path $script:JL_KEYS_DIR $script:JlOwnBundle2Marker))) {
                     Write-JlStep "$($script:JL_OUR_LABEL): keysetup bundle 2"
                     Invoke-JlPhase '02-keysetup-2.ps1'
                 }
                 Invoke-JlGate "$($script:JL_PEER_LABEL) to complete bundle 2 (relin-round2)" { Test-JlPeerUploaded 'relin-round2' }
             }
         } else {
-            # CONSUMER: wait for bundle 1, publish, wait for bundle 2, publish.
-            if (-not (Test-Path -LiteralPath (Join-Path $script:JL_KEYS_DIR $ownBundle1Marker))) {
-                Invoke-JlGate "$($script:JL_PEER_LABEL) to publish bundle 1 (pk-share)" { Test-JlPeerUploaded $peerBundle1Type }
+            # MAIN: wait for bundle 1, publish, wait for bundle 2, publish.
+            if (-not (Test-Path -LiteralPath (Join-Path $script:JL_KEYS_DIR $script:JlOwnBundle1Marker))) {
+                Invoke-JlGate "$($script:JL_PEER_LABEL) to publish bundle 1 (pk-share)" { Test-JlPeerUploaded $script:JlPeerBundle1Type }
                 Write-JlStep "$($script:JL_OUR_LABEL): keysetup bundle 1"
                 Invoke-JlPhase '01-keysetup-1.ps1'
             }
             if ($script:JlNeedsRelin) {
-                if (-not (Test-Path -LiteralPath (Join-Path $script:JL_KEYS_DIR 'main-relin-r2.bin'))) {
+                if (-not (Test-Path -LiteralPath (Join-Path $script:JL_KEYS_DIR $script:JlOwnBundle2Marker))) {
                     Invoke-JlGate "$($script:JL_PEER_LABEL) to publish bundle 2 (relin-round2)" { Test-JlPeerUploaded 'relin-round2' }
                     Write-JlStep "$($script:JL_OUR_LABEL): keysetup bundle 2"
                     Invoke-JlPhase '02-keysetup-2.ps1'
@@ -582,7 +615,7 @@ if (Test-JlIsOwner) {
         Invoke-JlGate "a new execution to be released by $($script:JL_PEER_LABEL)" { Set-JlNextUndecryptedExecution }
     }
     Write-JlStep "$($script:JL_OUR_LABEL): end-of-cycle (resultVisibility: $($script:JULENNY_RESULT_VISIBILITY))"
-    Invoke-JlPhase '05-release.ps1'
+    Invoke-JlPhase '06-end-of-cycle.ps1'
     Write-Host ""
     Write-JlSuccess "All $($script:JL_OUR_LABEL) phases done."
     Invoke-JlOfferAnotherCycle
@@ -618,7 +651,7 @@ if (Test-JlIsOwner) {
     }
 
     Write-JlStep "$($script:JL_OUR_LABEL): end-of-cycle (resultVisibility: $($script:JULENNY_RESULT_VISIBILITY))"
-    Invoke-JlPhase '06-decrypt.ps1'
+    Invoke-JlPhase '06-end-of-cycle.ps1'
     Write-Host ""
     Write-JlSuccess "All $($script:JL_OUR_LABEL) phases done. Answer is above."
 Invoke-JlOfferAnotherCycle

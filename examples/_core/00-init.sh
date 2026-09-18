@@ -1,24 +1,25 @@
 #!/usr/bin/env bash
-# Data-owner (keysetup lead) session setup.
+# Session setup. BOTH sides run it.
 #
 # Function-agnostic: this backs every scenario, because the function is picked
 # from the platform's live list at run time rather than hardcoded here.
 #
-#   1. The collaboration picker lists existing data-owner collaborations
-#      up front and appends an "n) Create a NEW collaboration + permission"
-#      option, mirroring the dataset picker in 04-encrypt.sh. Picking 'n'
-#      POSTs to /api/fhe-projects and /api/fhe-permissions (see lib.sh's
-#      create_collaboration / create_permission helpers). With zero existing
-#      collaborations, 'n' becomes the only and default choice.
+#   1. The collaboration picker lists the collaborations this account is in and
+#      appends an "n) Create a NEW collaboration + permission" option, mirroring the
+#      dataset picker in 04-encrypt.sh. Picking 'n' POSTs to /api/fhe-projects and
+#      /api/fhe-permissions (see lib.sh's create_collaboration / create_permission).
 #   2. No scheme guard: both BFV and CKKS are supported by the toolkit core,
 #      so the function-def's declared scheme is let through and recorded in
 #      config.env.
-#   3. Once a collaboration is picked, the permission picker uses the same
-#      shape: list existing permissions and append "n) Create a NEW permission via
-#      the API". The data owner can POST /api/fhe-permissions under the
-#      existing collaboration with the same authority it used to create the
-#      collaboration. Same scheme/function picker as the new-collaboration
-#      branch.
+#   3. Once a collaboration is picked, the permission picker has the same shape:
+#      list the existing permissions and append "n) Create a NEW permission via the
+#      API". EITHER member may create one. The platform takes a permission's data
+#      owner from whoever posts it, so creating one here makes this machine that
+#      permission's data owner - which is how one collaboration comes to hold
+#      permissions running in both directions.
+#   4. The data role for the chosen permission is read back FROM THE PLATFORM, not
+#      assumed from which scenario folder was run. Picking a permission that runs the
+#      other way round switches this run's side profile rather than refusing.
 #
 # Saves everything to <workdir>/collabs/<jointKeyId>/config.env so later scripts pick
 # it up automatically.
@@ -26,17 +27,12 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-# The side profile is chosen by the DATA role, which the scenario bootstrap exports.
-# Sourced dynamically so this phase can be driven for either side: the keysetup role
+# lib.sh resolves which side of the collaboration this machine is and loads the
+# matching side profile, so one copy of this phase serves both. The keysetup role
 # (lead/main) and the data role (owner/consumer) are independent, and a permission can
 # be created in either direction inside one collaboration.
-#
-# The fallback keeps a DIRECT run of this script working, which is how the numbered
-# scripts are documented to be runnable on their own.
-# shellcheck source=../sides/data-owner.env
-source "$SCRIPT_DIR/../sides/${JULENNY_OUR_SIDE:-data-owner}.env"
-# shellcheck source=../lib.sh
-source "$SCRIPT_DIR/../lib.sh"
+# shellcheck source=lib.sh
+source "$SCRIPT_DIR/lib.sh"
 
 mkdir -p "$JL_ROOT" "$JL_SIGNING_DIR" "$JL_COLLABS_DIR"
 chmod 700 "$JL_ROOT"
@@ -68,7 +64,7 @@ elif load_account_key; then
     info "Using the API key remembered for this machine (${#JULENNY_API_KEY} characters)."
     info "Delete $JL_ACCOUNT_CONFIG to be asked again."
 else
-    prompt_secret JULENNY_API_KEY "Acme's API key (starts with sk_live_)"
+    prompt_secret JULENNY_API_KEY "${JL_OUR_LABEL}'s API key (starts with sk_live_)"
     save_account_key
 fi
 [[ "$JULENNY_API_KEY" == sk_live_* ]] || die "API key must start with sk_live_"
@@ -76,25 +72,35 @@ fi
 export JULENNY_API_BASE JULENNY_API_KEY
 
 # -------- Pick OR create collaboration --------
-# Fetch existing data-owner collaborations up front, list them, and append
-# an "n) Create a NEW collaboration + permission" option. Same shape as the
-# dataset picker in 04-encrypt.sh and the permission picker further below. If
-# the operator wants a fresh collaboration, picking 'n' drops into the
-# /api/fhe-projects + /api/fhe-permissions creation flow.
+# Fetch this account's collaborations up front, list them, and append an
+# "n) Create a NEW collaboration + permission" option. Same shape as the dataset
+# picker in 04-encrypt.sh and the permission picker further below. If the operator
+# wants a fresh collaboration, picking 'n' drops into the /api/fhe-projects +
+# /api/fhe-permissions creation flow.
+#
+# MY_ROLE_FIELD is the permission role this run STARTED as. It is used only to sort the
+# list and to word it; it is neither a filter nor a decision. The role that counts is
+# the one the platform reports for the permission finally chosen.
+case "$JULENNY_OUR_SIDE" in
+    data-owner)    MY_ROLE_FIELD="dataOwner";    MY_ROLE_WORDS="data-owner" ;;
+    data-consumer) MY_ROLE_FIELD="dataConsumer"; MY_ROLE_WORDS="data-consumer" ;;
+    *) die "Unknown JULENNY_OUR_SIDE='$JULENNY_OUR_SIDE'" ;;
+esac
+
 step "Fetching your collaborations..."
 ALL_PROJECTS="$(list_collaborations)"
 # yourPermissionRoles (dataOwner/dataConsumer per collab) is the primary signal that
 # this account already holds a permission of its role here; permissionCount, derived
 # from the role-scoped permissions view in list_collaborations, is the fallback.
 # A collaboration is only a container: the data owner is decided PER PERMISSION, so a
-# member holding no data-owner permission here can still create the first one. Listing
+# member holding no permission of this role here can still create the first one. Listing
 # only collaborations where this account already holds one made the reversed-role case
 # impossible - the picker showed nothing, defaulted to 'n' and would have created a
-# second collaboration. Collaborations where this account already has a data-owner
-# permission come first; the rest are still listed, flagged, and selectable.
+# second collaboration. Collaborations where this account already has a permission of
+# this role come first; the rest are still listed, flagged, and selectable.
 ALL_SORTED="$(echo "$ALL_PROJECTS" | jq 'sort_by(.createdAt) | reverse')"
-OWNED_PROJECTS="$(echo "$ALL_SORTED" | jq '
-    def has_my_role: ((.yourPermissionRoles // []) | any(. == "dataOwner")) or (.permissionCount > 0);
+OWNED_PROJECTS="$(echo "$ALL_SORTED" | jq --arg role "$MY_ROLE_FIELD" '
+    def has_my_role: ((.yourPermissionRoles // []) | any(. == $role)) or (.permissionCount > 0);
     [ .[] | select(has_my_role) ]
     + [ .[] | select(has_my_role | not) | . + {noRoleYet: true} ]')"
 PROJECT_COUNT="$(echo "$OWNED_PROJECTS" | jq 'length')"
@@ -103,7 +109,7 @@ echo
 if (( PROJECT_COUNT > 0 )); then
     info "Your active collaborations (newest first):"
     echo "$OWNED_PROJECTS" \
-        | jq -r 'to_entries[] | "  [\(.key + 1)] \(.value.name // "(unnamed)")  |  peer: \(.value.partnerCollaborationId // .value.ownerCollaborationId // "?")  |  \(.value.permissionCount) permission(s)  |  keysetup: \(.value.keysetupState // "n/a")  |  created \(.value.createdAt // "?" | .[0:10])  |  id: \(.value.id)\(if .value.noRoleYet then "  |  no data-owner permission yet - pick to create the first one" else "" end)"'
+        | jq -r --arg words "$MY_ROLE_WORDS" 'to_entries[] | "  [\(.key + 1)] \(.value.name // "(unnamed)")  |  peer: \(.value.partnerCollaborationId // .value.ownerCollaborationId // "?")  |  \(.value.permissionCount) permission(s)  |  keysetup: \(.value.keysetupState // "n/a")  |  created \(.value.createdAt // "?" | .[0:10])  |  id: \(.value.id)\(if .value.noRoleYet then "  |  no " + $words + " permission yet - pick to create the first one" else "" end)"'
 else
     info "You are not a member of any active collaboration yet."
 fi
@@ -111,8 +117,26 @@ echo "  n) Create a NEW collaboration + permission via the API"
 echo
 
 if (( PROJECT_COUNT == 0 )); then
-    PROJECT_CHOICE="n"
-    info "No existing collaborations; defaulting to 'n' (create new)."
+    # Do NOT default into creating one. An empty list usually means the other party has
+    # not created the collaboration yet, or this machine is pointed at the wrong account
+    # or host - not that a new collaboration is wanted. Auto-selecting 'n' here silently
+    # created a duplicate the peer could not see, which is worse than stopping, because
+    # the operator then waits on someone who has nothing to answer.
+    #
+    # The data-owner half used to auto-select 'n'. Either party can create one now, so
+    # the same care applies on both sides.
+    warn "No collaborations found for this account."
+    warn "If ${JL_PEER_LABEL} has already created one and granted you a permission, check that"
+    warn "this API key belongs to the account they invited, and that the platform host"
+    warn "printed above is the right one."
+    echo
+    prompt_for CREATE_NEW "Create a NEW collaboration anyway? (y/N)" "N"
+    if [[ "${CREATE_NEW,,}" == "y" || "${CREATE_NEW,,}" == "yes" ]]; then
+        PROJECT_CHOICE="n"
+    else
+        info "Nothing to do until a collaboration exists. Exiting."
+        exit 0
+    fi
 else
     prompt_for PROJECT_CHOICE "Pick a collaboration (1-$PROJECT_COUNT, or n)" "1"
 fi
@@ -165,13 +189,12 @@ if [[ "${PROJECT_CHOICE,,}" == "n" ]]; then
     FN_SLUG="$(echo "$FN_OBJ" | jq -r '.slug')"
     FN_VERSION="$(echo "$FN_OBJ" | jq -r '.version')"
 
-    # 3) Partner (Beta): operator types Beta's Collaboration ID (XXXX-XXXX,
-    # visible on Beta's Company page in the JuLenny web UI). It is passed
-    # straight to the API, which resolves it internally - the toolkit never
-    # handles a raw company id.
+    # 3) The peer: operator types the PEER's Collaboration ID (XXXX-XXXX, visible on
+    # their Company page in the JuLenny web UI). It is passed straight to the API,
+    # which resolves it internally - the toolkit never handles a raw company id.
     echo
-    info "The partner company (Beta) must already exist on the platform."
-    info "Ask Beta for their Collaboration ID (format XXXX-XXXX, visible on"
+    info "The partner company (${JL_PEER_LABEL}) must already exist on the platform."
+    info "Ask ${JL_PEER_LABEL} for their Collaboration ID (format XXXX-XXXX, visible on"
     info "their Company page in the JuLenny web UI)."
     # 4+5) Ask for the partner id and the name, create, and ask AGAIN if the platform
     # refuses. A collaboration id is typed by hand off the partner's company page, and ids
@@ -179,11 +202,11 @@ if [[ "${PROJECT_CHOICE,,}" == "n" ]]; then
     # the wrong one is an ordinary mistake rather than a rare accident. Ending the run over
     # it threw away the API key entry, the scheme choice and the function choice made before
     # this point.
-    DEFAULT_COLLAB_NAME="Acme x Beta ($FN_SLUG, $(date +%Y-%m-%d))"
+    DEFAULT_COLLAB_NAME="${JL_OUR_LABEL} x ${JL_PEER_LABEL} ($FN_SLUG, $(date +%Y-%m-%d))"
     COLLAB_NAME=""
     JULENNY_PROJECT_ID=""
     while [[ -z "$JULENNY_PROJECT_ID" ]]; do
-        prompt_for PARTNER_INPUT "Partner (Beta) Collaboration ID (XXXX-XXXX)"
+        prompt_for PARTNER_INPUT "Partner (${JL_PEER_LABEL}) Collaboration ID (XXXX-XXXX)"
         if [[ -z "$PARTNER_INPUT" ]]; then
             warn "A Collaboration ID is required."
             continue
@@ -198,7 +221,7 @@ if [[ "${PROJECT_CHOICE,,}" == "n" ]]; then
         step "Creating collaboration via POST /api/fhe-projects..."
         if ! JULENNY_PROJECT_ID="$(create_collaboration "$PARTNER_ID" "$COLLAB_NAME")"; then
             JULENNY_PROJECT_ID=""
-            info "Check the id on Beta's Company page on THIS platform:"
+            info "Check the id on ${JL_PEER_LABEL}'s Company page on THIS platform:"
             info "  $JULENNY_API_BASE"
             echo
         fi
@@ -224,14 +247,17 @@ if [[ "${PROJECT_CHOICE,,}" == "n" ]]; then
         info "Permission will not expire (no expiration date set)."
     fi
 
-    # Who sees the plaintext answer? (resultVisibility, 0.5.5)
-    # dataConsumer = Beta sees the answer (default, original behavior).
-    # dataOwner    = Acme sees the answer (roles in the threshold-decrypt
-    #                flow swap; Beta uploads partial, Acme combines).
+    # Who sees the plaintext answer? (resultVisibility)
+    # dataConsumer = the peer sees the answer (default, original behaviour).
+    # dataOwner    = this machine sees it; the roles in the threshold-decrypt flow swap,
+    #                so the peer uploads the partial and this side combines.
+    #
+    # Creating a permission makes THIS machine its data owner, whichever side script was
+    # run, because the platform takes the owner from whoever posts it.
     echo
     info "Who should see the plaintext result of executions on this permission?"
-    info "  1) Data consumer (Beta) - default"
-    info "  2) Data owner (Acme, this side)"
+    info "  1) The data consumer, ${JL_PEER_LABEL} - default"
+    info "  2) The data owner, this machine"
     prompt_for RV_CHOICE "Choose (1-2)" "1"
     case "$RV_CHOICE" in
         1) JULENNY_RESULT_VISIBILITY="dataConsumer" ;;
@@ -299,7 +325,11 @@ else
 
     if [[ "${PERMISSION_CHOICE,,}" == "n" ]]; then
         # -------- Create a permission under the existing collaboration --------
-        # Acme is the data owner on this project, so the API lets us POST
+        # The platform takes a permission's data owner from whoever posts it, and only
+        # checks that the caller is a party to the collaboration's joint key. So EITHER
+        # member may create one here, and doing so makes this machine that permission's
+        # data owner. That is how one collaboration comes to hold permissions running in
+        # both directions.
         # /api/fhe-permissions directly (same call the create-new-collab
         # branch makes after creating its fresh project). The scheme/
         # function picker below is identical to that branch's picker.
@@ -320,7 +350,7 @@ else
         fi
         [[ -n "$PARTNER_ID" ]] \
             || die "Project records no counterparty collaboration id; cannot create a permission."
-        info "Partner (Beta) Collaboration ID: $PARTNER_ID"
+        info "Partner (${JL_PEER_LABEL}) Collaboration ID: $PARTNER_ID"
 
         # 1) Determine scheme. A permission created under an EXISTING
         # collaboration MUST match that collaboration's joint key scheme
@@ -402,11 +432,11 @@ else
             info "Permission will not expire (no expiration date set)."
         fi
 
-        # Who sees the plaintext answer? See lib for details.
+        # Who sees the plaintext answer? See the create-collaboration branch above.
         echo
         info "Who should see the plaintext result of executions on this permission?"
-        info "  1) Data consumer (Beta) - default"
-        info "  2) Data owner (Acme, this side)"
+        info "  1) The data consumer, ${JL_PEER_LABEL} - default"
+        info "  2) The data owner, this machine"
         prompt_for RV_CHOICE "Choose (1-2)" "1"
         case "$RV_CHOICE" in
             1) JULENNY_RESULT_VISIBILITY="dataConsumer" ;;
@@ -438,8 +468,11 @@ if [[ -z "$JULENNY_JOINT_KEY_ID" ]]; then
     # Edge case: the create-new branch wasn't able to resolve the joint key
     # id from the project doc yet. Re-fetch it from the permission, which
     # will have it by the time this code runs.
-    JULENNY_JOINT_KEY_ID="$(curl_jl GET "/api/fhe-permissions?status=active" \
-        | jq -r --arg id "$PERM_ID" '.permissions[]? | select(.id == $id) | .jointKeyId // empty')"
+    # Both views. A permission just created here makes this machine its data owner
+    # whichever side script was run, so it will not be under the view this run started
+    # with if that was the consumer side.
+    JULENNY_JOINT_KEY_ID="$(list_all_my_permissions \
+        | jq -r --arg id "$PERM_ID" '.[] | select(.id == $id) | .jointKeyId // empty')"
     [[ -n "$JULENNY_JOINT_KEY_ID" ]] \
         || die "Could not resolve joint key id for permission $PERM_ID; cannot proceed."
 fi
@@ -454,17 +487,26 @@ fi
 PERM_OBJ="$(fetch_permission "$PERM_ID")"
 
 YOUR_ROLE="$(echo "$PERM_OBJ" | jq -r '.yourRole // empty')"
-PEER_COLLAB="$(echo "$PERM_OBJ" | jq -r '.dataConsumerCollaborationId // empty')"
 FN_SLUG="$(echo "$PERM_OBJ" | jq -r '.fheFunction')"
 FN_VERSION="$(echo "$PERM_OBJ" | jq -r '.functionVersion')"
 CTX_SPEC="$(echo "$PERM_OBJ" | jq -r '.cryptoContextSpec // empty')"
-# resultVisibility (0.5.5): read from permission, default to "dataConsumer"
-# for permissions that pre-date this field. If we set it ourselves above
-# (create-new path), respect that; otherwise pick up the platform's value.
+# resultVisibility: read from the permission, defaulting to "dataConsumer" for
+# permissions that pre-date the field. If we set it ourselves above (create-new path),
+# respect that; otherwise pick up the platform's value.
 JULENNY_RESULT_VISIBILITY="${JULENNY_RESULT_VISIBILITY:-$(echo "$PERM_OBJ" | jq -r '.resultVisibility // "dataConsumer"')}"
 
-[[ -z "$YOUR_ROLE" || "$YOUR_ROLE" == "dataOwner" ]] \
-    || die "Permission yourRole is '$YOUR_ROLE'; expected dataOwner. Run from the data-owner side."
+# -------- Adopt the data role the platform reports for THIS permission --------
+# This used to be an assertion that the permission matched the side we started as, and
+# it stopped the run when it did not. That made a permission created in the other
+# direction unreachable from the scripts: the only way to reach it was to run the other
+# side's folder, which then looked for this machine's key material under the other
+# side's filenames.
+#
+# The permission's own yourRole is the answer, so take it. It may switch the side
+# profile, which is why the peer collaboration-id field is read afterwards.
+adopt_data_role "$YOUR_ROLE"
+PEER_COLLAB="$(echo "$PERM_OBJ" | jq -r --arg f "$JL_PEER_COLLAB_FIELD" '.[$f] // empty')"
+
 [[ -n "$FN_SLUG" && "$FN_SLUG" != "null" ]] \
     || die "Selected permission has no fheFunction slug."
 [[ -n "$FN_VERSION" && "$FN_VERSION" != "null" ]] \
@@ -473,12 +515,12 @@ JULENNY_RESULT_VISIBILITY="${JULENNY_RESULT_VISIBILITY:-$(echo "$PERM_OBJ" | jq 
     || die "Selected permission has no cryptoContextSpec. Cannot register signing key."
 
 success "Permission resolved: $PERM_ID  ($FN_SLUG v$FN_VERSION)"
-info "  Acme is:     data owner / keysetup lead"
-info "  Beta (peer): data consumer / keysetup main${PEER_COLLAB:+ (collab $PEER_COLLAB)}"
+info "  ${JL_OUR_LABEL} is:     $JL_ROLE_LABEL"
+info "  ${JL_PEER_LABEL} (peer): ${JL_PEER_ROLE_LABEL}${PEER_COLLAB:+ (collab $PEER_COLLAB)}"
 
 # -------- Default for downstream prompts --------
 # JULENNY_INPUT_CSV is referenced as a default in the o)Other fallback prompts
-# in 04-encrypt and 06-decrypt. We silently populate it with the first file
+# in 04-encrypt and 06-end-of-cycle. We silently populate it with the first file
 # (alphabetically) under $SCRIPT_DIR/data/, if such a file exists. No prompt
 # at 00-init time; the operator never has to pick a single "input" file when
 # the function actually has 4 of them. Downstream pickers still ask per-input.
@@ -526,7 +568,7 @@ if [[ -f "$SIGNING_SECRET" && -f "$SIGNING_PUBLIC" ]]; then
 fi
 
 if [[ ! -f "$SIGNING_SECRET" ]]; then
-    step "Generating Ed25519 signing keypair for Acme"
+    step "Generating Ed25519 signing keypair for ${JL_OUR_LABEL}"
     julenny-toolkit crypto signing-keygen \
         --output-secret "$SIGNING_SECRET" \
         --output-public "$SIGNING_PUBLIC" \
@@ -535,7 +577,7 @@ if [[ ! -f "$SIGNING_SECRET" ]]; then
 fi
 
 # -------- Register signing public key --------
-step "Registering Acme's signing public key with the platform..."
+step "Registering ${JL_OUR_LABEL}'s signing public key with the platform..."
 SIGNING_PUBLIC_HEX="$(xxd -p -c 256 "$SIGNING_PUBLIC" | tr -d '\n')"
 [[ ${#SIGNING_PUBLIC_HEX} -eq 64 ]] \
     || die "Signing public key hex is ${#SIGNING_PUBLIC_HEX} chars, expected 64."
@@ -564,21 +606,25 @@ success "Signing public key registered for crypto context: $CTX_SPEC"
 # backfilled. The fallback is the old assumption, correct wherever the two roles agree.
 KEYSETUP_ROLE="$(curl -sS -H "x-api-key: $JULENNY_API_KEY"     "$JULENNY_API_BASE/api/fhe-permissions/$PERM_ID/keysetup" 2>/dev/null     | jq -r '.yourKeysetupRole // empty')"
 if [[ -z "$KEYSETUP_ROLE" ]]; then
-    KEYSETUP_ROLE="lead"
+    KEYSETUP_ROLE="$JL_DEFAULT_KEYSETUP_ROLE"
     info "The platform does not record who leads this ceremony; assuming '$KEYSETUP_ROLE'."
 else
     info "Keysetup role for this machine, as recorded by the platform: $KEYSETUP_ROLE"
 fi
 
 # -------- Write config.env --------
+# JULENNY_OUR_SIDE is written from what the PLATFORM reported for this permission (see
+# adopt_data_role above), not from which scenario folder was run. It is what every later
+# phase reads to pick its side profile, so a reversed permission stays reversed for the
+# whole of the rest of the collaboration.
 cat > "$JL_CONFIG" <<EOF
-# JuLenny rule-based-cross-match session config for Acme (data owner / lead).
+# JuLenny session config for $JL_OUR_LABEL ($JL_ROLE_LABEL / keysetup $KEYSETUP_ROLE).
 JULENNY_API_BASE="$JULENNY_API_BASE"
 JULENNY_API_KEY="$JULENNY_API_KEY"
 JULENNY_PROJECT_ID="$JULENNY_PROJECT_ID"
 JULENNY_JOINT_KEY_ID="$JULENNY_JOINT_KEY_ID"
 JULENNY_PERMISSION_ID="$PERM_ID"
-JULENNY_OUR_SIDE="data-owner"
+JULENNY_OUR_SIDE="$JULENNY_OUR_SIDE"
 JULENNY_ROLE="$KEYSETUP_ROLE"
 JULENNY_RESULT_VISIBILITY="$JULENNY_RESULT_VISIBILITY"
 JULENNY_SCHEME="$JULENNY_SCHEME"

@@ -4,26 +4,30 @@
 # chains the numbered scripts. Fully interactive: it inspects platform state
 # at startup and prompts; there are no flags except -h/--help.
 #
-# Which side we are (data-owner / data-consumer) comes from JULENNY_OUR_SIDE,
-# set by the scenario's per-side bootstrap before this runs. The matching side
-# profile (peer label, API view, secret-share filename, ...) is sourced below,
-# and the only per-side behavior lives in the branches marked OWNER / CONSUMER.
+# Which side we are (data-owner / data-consumer) comes from JULENNY_OUR_SIDE, set by
+# the scenario's per-side bootstrap before this runs. lib.sh loads the matching side
+# profile (peer label, API view, secret-share filename, ...), and the only per-side
+# behaviour here lives in the branches marked OWNER / CONSUMER.
+#
+# There is ONE numbered set of phase scripts. It used to be two, _core/lead/ and
+# _core/main/, picked by the data role - which was wrong, because the keysetup role is
+# a separate thing and a permission created in the other direction inside the same
+# collaboration makes the two disagree. Each phase now branches internally on whichever
+# role actually governs it: keysetup role for 01, 02, 03 and 04.5; data role for
+# 00-init and 04-encrypt; resultVisibility for 06-end-of-cycle.
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
-# Which side are we? Source the matching side profile BEFORE lib.sh, whose
-# guard requires the profile vars. Export so the numbered subprocess scripts
-# inherit the side too.
+# Which side are we? Exported so the numbered subprocess scripts inherit it; lib.sh
+# reads it and loads the matching side profile.
 JULENNY_OUR_SIDE="${JULENNY_OUR_SIDE:?set JULENNY_OUR_SIDE=data-owner or data-consumer before running (the scenario bootstrap does this)}"
 case "$JULENNY_OUR_SIDE" in
     data-owner|data-consumer) ;;
     *) echo "JULENNY_OUR_SIDE must be data-owner or data-consumer, got '$JULENNY_OUR_SIDE'" >&2; exit 2 ;;
 esac
 export JULENNY_OUR_SIDE
-# shellcheck source=/dev/null
-source "$SCRIPT_DIR/sides/${JULENNY_OUR_SIDE}.env"
 # shellcheck source=lib.sh
 source "$SCRIPT_DIR/lib.sh"
 
@@ -39,7 +43,7 @@ unset _jl_run_initial_jk
 
 for arg in "$@"; do
     case "$arg" in
-        -h|--help) sed -n '2,11p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        -h|--help) sed -n '2,10p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
         *) err "Unknown argument: $arg (this script takes no flags - it asks at startup)"; exit 2 ;;
     esac
 done
@@ -142,37 +146,49 @@ gate() {
 }
 
 # -------- Peer-state check fns --------
-# We always gate on the PEER's bundle uploads. The lead (owner) publishes
-# pk-share as bundle 1; the main (consumer) publishes relin-round1-continue.
-# Each side waits for the other's bundle-1 message type; bundle 2 is the same
-# message type both ways.
+# We always gate on the PEER's bundle uploads. The LEAD publishes pk-share as bundle 1;
+# the MAIN publishes relin-round1-continue. Each side waits for the other's bundle-1
+# message type; bundle 2 is the same message type both ways.
+#
+# This branched on the DATA role until 2026-09-18, which is the same answer only while
+# the two roles agree. On a permission created in the other direction it waited for the
+# message type this machine had itself just published, and looked for its own key share
+# under the other half's filename.
 #
 # An additive-only function (requiredEvalKeys: []) has no relin exchange at all, so
 # bundle 1 is just the pk-share pair and there is no bundle 2. Waiting for
 # relin-round1-continue there hangs forever: the platform goes straight to
 # awaiting-finalization and refuses further messages.
-if function_requires_relin_keys; then
-    JL_NEEDS_RELIN=1
-else
-    JL_NEEDS_RELIN=0
-fi
+#
+# Recomputed after 00-init, because on a first run neither the function-def nor the
+# keysetup role is known yet. Kept in one function so the two calls cannot drift.
+resolve_bundle_markers() {
+    if function_requires_relin_keys; then
+        JL_NEEDS_RELIN=1
+    else
+        JL_NEEDS_RELIN=0
+    fi
 
-if is_owner; then
-    if (( JL_NEEDS_RELIN )); then
-        PEER_BUNDLE1_TYPE="relin-round1-continue"
-        OWN_BUNDLE1_MARKER="lead-relin-r1.bin"
+    if i_am_keysetup_lead; then
+        if (( JL_NEEDS_RELIN )); then
+            PEER_BUNDLE1_TYPE="relin-round1-continue"
+            OWN_BUNDLE1_MARKER="lead-relin-r1.bin"
+        else
+            PEER_BUNDLE1_TYPE="pk-share"
+            OWN_BUNDLE1_MARKER="fhe_public_key.bin"
+        fi
+        OWN_BUNDLE2_MARKER="lead-relin-r2.bin"
     else
         PEER_BUNDLE1_TYPE="pk-share"
-        OWN_BUNDLE1_MARKER="fhe_public_key.bin"
+        if (( JL_NEEDS_RELIN )); then
+            OWN_BUNDLE1_MARKER="main-relin-r1.bin"
+        else
+            OWN_BUNDLE1_MARKER="joint_public_key.bin"
+        fi
+        OWN_BUNDLE2_MARKER="main-relin-r2.bin"
     fi
-else
-    PEER_BUNDLE1_TYPE="pk-share"
-    if (( JL_NEEDS_RELIN )); then
-        OWN_BUNDLE1_MARKER="main-relin-r1.bin"
-    else
-        OWN_BUNDLE1_MARKER="joint_public_key.bin"
-    fi
-fi
+}
+resolve_bundle_markers
 peer_did_bundle1() { peer_has_uploaded "$PEER_BUNDLE1_TYPE"; }
 peer_did_bundle2() { peer_has_uploaded "relin-round2"; }
 
@@ -299,7 +315,7 @@ fi
 # Phase 1: ensure config exists.
 if [[ ! -f "$JL_CONFIG" ]]; then
     step "${JL_OUR_LABEL}: initial session setup"
-    "$SCRIPT_DIR/$JL_ROLE_DIR/00-init.sh"
+    "$SCRIPT_DIR/00-init.sh"
     # 00-init runs in its own process and may have selected a DIFFERENT collaboration
     # than the one this shell resolved at startup; it records the choice in the CURRENT
     # pointer. Drop the cached paths so load_session re-reads it. Without this the shell
@@ -312,41 +328,22 @@ load_session
 # Re-fetch the function-def (mutable per slug/version); fails softly offline.
 refresh_function_def
 
-# Recomputed here, AFTER 00-init has fetched the function definition.
+# Recomputed here, AFTER 00-init has fetched the function definition AND written the
+# keysetup role to config.env. Both inputs are unknown before phase 1.
 #
-# The value above is decided before phase 1, when a first run has no
-# function-def.json at all, so neither side is reading anything real: bash
-# defaulted to "no relin" and PowerShell to "relin needed". On a first run of a
-# relin function the consumer therefore skipped bundle 2 entirely and walked on
-# to the dataset phase, while the owner sat waiting for a relin-round2 that was
-# never coming. The two halves disagreeing made it look like a peer problem.
-if function_requires_relin_keys; then
-    JL_NEEDS_RELIN=1
-else
-    JL_NEEDS_RELIN=0
-fi
-if is_owner; then
-    if (( JL_NEEDS_RELIN )); then
-        PEER_BUNDLE1_TYPE="relin-round1-continue"
-        OWN_BUNDLE1_MARKER="lead-relin-r1.bin"
-    else
-        PEER_BUNDLE1_TYPE="pk-share"
-        OWN_BUNDLE1_MARKER="fhe_public_key.bin"
-    fi
-else
-    PEER_BUNDLE1_TYPE="pk-share"
-    if (( JL_NEEDS_RELIN )); then
-        OWN_BUNDLE1_MARKER="main-relin-r1.bin"
-    else
-        OWN_BUNDLE1_MARKER="joint_public_key.bin"
-    fi
-fi
+# The values from the first call are decided before phase 1, when a first run has no
+# function-def.json at all, so neither side is reading anything real: bash defaulted to
+# "no relin" and PowerShell to "relin needed". On a first run of a relin function the
+# consumer therefore skipped bundle 2 entirely and walked on to the dataset phase, while
+# the owner sat waiting for a relin-round2 that was never coming. The two halves
+# disagreeing made it look like a peer problem.
+resolve_bundle_markers
 
 # Consumer-only shortcut: skip everything and just decrypt the latest released
-# execution. 06-decrypt is self-contained (polls the platform, picks if many).
+# execution. 06-end-of-cycle is self-contained (polls the platform, picks if many).
 if $ONLY_DECRYPT; then
     step "${JL_OUR_LABEL}: decrypt latest released execution"
-    "$SCRIPT_DIR/$JL_ROLE_DIR/06-decrypt.sh"
+    "$SCRIPT_DIR/06-end-of-cycle.sh"
     exit 0
 fi
 
@@ -411,25 +408,27 @@ case "$KS_STATE" in
             # 03 waits for the peer's sum-round1-continue before combining. Adding another
             # wait outside them would be a second opinion about the same thing.
             step "${JL_OUR_LABEL}: key-setup rounds for $MISSING_EVAL_KEYS"
-            "$SCRIPT_DIR/$JL_ROLE_DIR/01-keysetup-1.sh"
+            "$SCRIPT_DIR/01-keysetup-1.sh"
             step "${JL_OUR_LABEL}: finalize the added key"
-            "$SCRIPT_DIR/$JL_ROLE_DIR/03-finalize-keysetup.sh"
+            "$SCRIPT_DIR/03-finalize-keysetup.sh"
         else
             info "Joint key is already complete (reused or finalized). Skipping bundles."
         fi
         ;;
     pending-keysetup|in-progress)
-        if is_owner; then
+        # Ordering is by KEYSETUP role, not by data role: the lead goes first because
+        # its contributions depend on nothing, and the main chains on them.
+        if i_am_keysetup_lead; then
             # Lead: publish bundle 1, wait for main's bundle 1, publish bundle 2, wait.
             if [[ ! -f "$JL_KEYS_DIR/$OWN_BUNDLE1_MARKER" ]]; then
                 step "${JL_OUR_LABEL}: keysetup bundle 1"
-                "$SCRIPT_DIR/$JL_ROLE_DIR/01-keysetup-1.sh"
+                "$SCRIPT_DIR/01-keysetup-1.sh"
             fi
             gate "${JL_PEER_LABEL} to complete bundle 1 ($PEER_BUNDLE1_TYPE)" peer_did_bundle1
             if (( JL_NEEDS_RELIN )); then
-                if [[ ! -f "$JL_KEYS_DIR/lead-relin-r2.bin" ]]; then
+                if [[ ! -f "$JL_KEYS_DIR/$OWN_BUNDLE2_MARKER" ]]; then
                     step "${JL_OUR_LABEL}: keysetup bundle 2"
-                    "$SCRIPT_DIR/$JL_ROLE_DIR/02-keysetup-2.sh"
+                    "$SCRIPT_DIR/02-keysetup-2.sh"
                 fi
                 gate "${JL_PEER_LABEL} to complete bundle 2 (relin-round2)" peer_did_bundle2
             fi
@@ -438,13 +437,13 @@ case "$KS_STATE" in
             if [[ ! -f "$JL_KEYS_DIR/$OWN_BUNDLE1_MARKER" ]]; then
                 gate "${JL_PEER_LABEL} to publish bundle 1 (pk-share)" peer_did_bundle1
                 step "${JL_OUR_LABEL}: keysetup bundle 1"
-                "$SCRIPT_DIR/$JL_ROLE_DIR/01-keysetup-1.sh"
+                "$SCRIPT_DIR/01-keysetup-1.sh"
             fi
             if (( JL_NEEDS_RELIN )); then
-                if [[ ! -f "$JL_KEYS_DIR/main-relin-r2.bin" ]]; then
+                if [[ ! -f "$JL_KEYS_DIR/$OWN_BUNDLE2_MARKER" ]]; then
                     gate "${JL_PEER_LABEL} to publish bundle 2 (relin-round2)" peer_did_bundle2
                     step "${JL_OUR_LABEL}: keysetup bundle 2"
-                    "$SCRIPT_DIR/$JL_ROLE_DIR/02-keysetup-2.sh"
+                    "$SCRIPT_DIR/02-keysetup-2.sh"
                 fi
             fi
         fi
@@ -476,7 +475,7 @@ fi
 # finalKeys row for THIS permission isn't populated yet). 03 is idempotent.
 if [[ "$KS_STATE" == "awaiting-finalization" || "$KS_STATE" == "complete" ]]; then
     step "${JL_OUR_LABEL}: finalize keysetup"
-    "$SCRIPT_DIR/$JL_ROLE_DIR/03-finalize-keysetup.sh"
+    "$SCRIPT_DIR/03-finalize-keysetup.sh"
 fi
 
 # Keysetup is finished, so the platform now knows what every public key should be. Check
@@ -519,7 +518,7 @@ new_cycle_datasets() {
         return 0
     fi
     step "${JL_OUR_LABEL}: encrypt and upload dataset (new test cycle)"
-    JULENNY_NEW_TEST=1 "$SCRIPT_DIR/$JL_ROLE_DIR/04-encrypt.sh"
+    JULENNY_NEW_TEST=1 "$SCRIPT_DIR/04-encrypt.sh"
 
     # Rotation indices are derived from the DECLARED plaintext data, so re-declaring can
     # invalidate the rotation keys and reopen rotation keysetup on the platform. This
@@ -528,7 +527,7 @@ new_cycle_datasets() {
     # while the peer waits for a contribution that is never coming. 4.5 is a no-op when
     # the function declares no rotation, and idempotent when nothing changed.
     step "${JL_OUR_LABEL}: rotation key augmentation (after re-declaring datasets)"
-    "$SCRIPT_DIR/$JL_ROLE_DIR/04.5-rotation-keysetup.sh"
+    "$SCRIPT_DIR/04.5-rotation-keysetup.sh"
 }
 
 # A run drives ONE cycle and then exits, so the side that finishes first is gone by the
@@ -550,12 +549,12 @@ if (( ${#MY_INPUT_NAMES[@]} == 0 )); then
     info "Function declares no inputs for ${JL_OUR_LABEL}'s role ($MY_FN_ROLE); nothing to upload."
 elif $NEW_TEST; then
     step "${JL_OUR_LABEL}: encrypt and upload dataset (new test cycle)"
-    JULENNY_NEW_TEST=1 "$SCRIPT_DIR/$JL_ROLE_DIR/04-encrypt.sh"
+    JULENNY_NEW_TEST=1 "$SCRIPT_DIR/04-encrypt.sh"
 elif (( ${#UNDECLARED[@]} > 0 )); then
     step "${JL_OUR_LABEL}: declare/upload dataset(s) for this permission"
     info "Inputs not yet declared for this permission: ${UNDECLARED[*]}"
     info "(Pick an existing dataset to reuse it, or 'u' to upload a fresh one.)"
-    "$SCRIPT_DIR/$JL_ROLE_DIR/04-encrypt.sh"
+    "$SCRIPT_DIR/04-encrypt.sh"
 else
     info "All of ${JL_OUR_LABEL}'s inputs are already declared for this permission. Skipping upload."
 fi
@@ -563,9 +562,9 @@ fi
 # Phase 4.5: rotation key augmentation. No-op unless the function-def declares
 # requiredEvalKeys including rotation; the script decides.
 step "${JL_OUR_LABEL}: rotation key augmentation (if required by function)"
-"$SCRIPT_DIR/$JL_ROLE_DIR/04.5-rotation-keysetup.sh"
+"$SCRIPT_DIR/04.5-rotation-keysetup.sh"
 
-# Phase 5: end-of-cycle. The end-of-cycle SCRIPT (05-release / 06-decrypt) each
+# Phase 5: end-of-cycle. The end-of-cycle script (06-end-of-cycle, one for both sides)
 # dispatch internally on resultVisibility (releaser_flow / viewer_flow). The
 # difference here is structural: the consumer triggers the execution; the owner
 # does not, it waits for the consumer's trigger and then releases.
@@ -603,7 +602,7 @@ if is_owner; then
         gate "a new execution to be released by ${JL_PEER_LABEL}" pin_next_undecrypted_execution
     fi
     step "${JL_OUR_LABEL}: end-of-cycle (resultVisibility: $JULENNY_RESULT_VISIBILITY)"
-    "$SCRIPT_DIR/$JL_ROLE_DIR/05-release.sh"
+    "$SCRIPT_DIR/06-end-of-cycle.sh"
     echo
     success "All ${JL_OUR_LABEL} phases done."
     offer_another_cycle
@@ -639,11 +638,11 @@ else
     if $NEED_TRIGGER; then
         gate "all function inputs to be declared by both sides" all_required_inputs_declared
         step "${JL_OUR_LABEL}: trigger function execution"
-        "$SCRIPT_DIR/$JL_ROLE_DIR/05-run-query.sh"
+        "$SCRIPT_DIR/05-run-query.sh"
     fi
 
     step "${JL_OUR_LABEL}: end-of-cycle (resultVisibility: $JULENNY_RESULT_VISIBILITY)"
-    "$SCRIPT_DIR/$JL_ROLE_DIR/06-decrypt.sh"
+    "$SCRIPT_DIR/06-end-of-cycle.sh"
     echo
     success "All ${JL_OUR_LABEL} phases done. Answer is above."
     offer_another_cycle

@@ -1,4 +1,4 @@
-# Data-owner (keysetup lead) session setup.
+# Session setup. BOTH sides run it.
 #
 # Function-agnostic: this backs every scenario, because the function is picked
 # from the platform's live list at run time rather than hardcoded here.
@@ -8,21 +8,20 @@
 # the signing keypair, and writing config.env so the later scripts pick it all
 # up automatically.
 #
-# The data owner may create permissions, so this side gets that option.
+# EITHER member may create a permission. The platform takes a permission's data owner
+# from whoever posts it, so creating one here makes this machine that permission's data
+# owner - which is how one collaboration comes to hold permissions running in both
+# directions. The data role is then read back FROM THE PLATFORM rather than assumed
+# from which scenario folder was run.
 #
 # PowerShell twin of 00-init.sh.
 
 $ErrorActionPreference = 'Stop'
 $here = $PSScriptRoot
-# The side profile is chosen by the DATA role, which the scenario bootstrap exports.
-# Sourced dynamically so this phase can be driven for either side: the keysetup role
+# lib.ps1 resolves which side of the collaboration this machine is and loads the
+# matching side profile, so one copy of this phase serves both. The keysetup role
 # (lead/main) and the data role (owner/consumer) are independent, and a permission can
 # be created in either direction inside one collaboration.
-#
-# The fallback keeps a DIRECT run of this script working, which is how the numbered
-# scripts are documented to be runnable on their own.
-$jlSide = if ($env:JULENNY_OUR_SIDE) { $env:JULENNY_OUR_SIDE } else { 'data-owner' }
-. "$here\..\sides\$jlSide.ps1"
-. "$here\..\lib.ps1"
+. "$here\lib.ps1"
 
-Invoke-JlInitSession -CanCreatePermission
+Invoke-JlInitSession

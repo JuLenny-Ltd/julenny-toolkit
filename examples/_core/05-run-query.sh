@@ -6,17 +6,12 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-# The side profile is chosen by the DATA role, which the scenario bootstrap exports.
-# Sourced dynamically so this phase can be driven for either side: the keysetup role
+# lib.sh resolves which side of the collaboration this machine is and loads the
+# matching side profile, so one copy of this phase serves both. The keysetup role
 # (lead/main) and the data role (owner/consumer) are independent, and a permission can
 # be created in either direction inside one collaboration.
-#
-# The fallback keeps a DIRECT run of this script working, which is how the numbered
-# scripts are documented to be runnable on their own.
-# shellcheck source=/dev/null
-source "$SCRIPT_DIR/../sides/${JULENNY_OUR_SIDE:-data-consumer}.env"
-# shellcheck source=../lib.sh
-source "$SCRIPT_DIR/../lib.sh"
+# shellcheck source=lib.sh
+source "$SCRIPT_DIR/lib.sh"
 load_session
 
 step "${JL_OUR_LABEL}: trigger FHE function execution"
@@ -207,7 +202,7 @@ done
 
 success "Execution triggered. ID: $EXEC_ID"
 
-# Persist this cycle's execution id so the viewer flow (06-decrypt) waits for
+# Persist this cycle's execution id so the viewer flow (06-end-of-cycle) waits for
 # THIS execution to be released instead of offering older released ones.
 echo "$EXEC_ID" > "$JL_WORKDIR/last_exec_id"
 
@@ -254,4 +249,4 @@ while true; do
 done
 
 echo
-info "Next step: ${JL_PEER_LABEL} runs their end-of-cycle (release); then run 06-decrypt here."
+info "Next step: ${JL_PEER_LABEL} runs their end-of-cycle (release); then run 06-end-of-cycle here."
