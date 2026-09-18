@@ -40,14 +40,15 @@ if ($Help) {
     exit 0
 }
 
-# Which side are we? lib.ps1 reads this and loads the matching side profile.
-$side = $env:JULENNY_OUR_SIDE
-if (-not $side) {
-    throw "Set JULENNY_OUR_SIDE=data-owner or data-consumer before running (the scenario bootstrap does this)."
-}
-if ($side -ne 'data-owner' -and $side -ne 'data-consumer') {
-    throw "JULENNY_OUR_SIDE must be data-owner or data-consumer, got '$side'"
-}
+# lib.ps1 resolves the side: JULENNY_OUR_SIDE if something set it (a direct run, or a
+# test driving both sides from one host), else the active collaboration's config.env,
+# else neutral until a permission is picked.
+#
+# This used to demand JULENNY_OUR_SIDE up front and throw without it, which is what the
+# per-side bootstraps used to set. Once they were merged nothing set it, and the only
+# reason the first runs worked was a stale value left in the shell by the OLD bootstrap
+# - so it failed the moment anyone opened a fresh window. The bash twin was corrected
+# and this was not.
 . "$here\lib.ps1"
 
 function Test-JlIsOwner { return ($script:JULENNY_OUR_SIDE -eq 'data-owner') }
