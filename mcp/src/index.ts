@@ -149,7 +149,7 @@ SOLO SELF-TEST (one company, no partner) - a DIFFERENT sequence
    4b. verify_keys, before encrypting anything. It compares the public keys on this
       machine against the platform and replaces any that are stale or missing. A key
       built for an index set that has since changed looks identical on disk, and
-      computing with one wastes the whole run. The example scripts do this
+      computing with one wastes the whole run. The scripts do this
       automatically at this point; here it has to be called.
    5. encrypt under the JOINT public key (not the lead's contribution), upload,
       declare_input_dataset. A two-input function needs BOTH inputs from you.
@@ -172,7 +172,7 @@ SOLO SELF-TEST (one company, no partner) - a DIFFERENT sequence
   rotation indices must be derived from the rule_pairs file first).
 
   ALWAYS CHECK THE ANSWER. Every function ships sample data with a documented expected
-  result in examples/SELF-TEST.md. A run that merely completes proves the pipeline works;
+  result in scripts/SELF-TEST.md. A run that merely completes proves the pipeline works;
   only a run that MATCHES the expected value proves the encoding, keys, circuit and
   decryption are all correct. Partial data corruption produces a successful run with a
   plausible wrong answer, and without a reference there is no way to tell them apart. If
@@ -184,7 +184,7 @@ SOLO SELF-TEST (one company, no partner) - a DIFFERENT sequence
   (rows_A x rows_B) / slots. There are never false negatives.
 
 SCRIPTS PARITY: the two-party flow also ships as interactive shell scripts (the
-00-06 example scripts) and the two paths produce byte-identical keys and results.
+00-06 scripts) and the two paths produce byte-identical keys and results.
 The scripts CANNOT drive a solo self-test: they hardcode an external grant type.`;
 
 const server = new McpServer({

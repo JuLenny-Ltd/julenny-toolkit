@@ -10,7 +10,7 @@ import { execFileSync } from 'node:child_process';
 import { homedir } from 'node:os';
 import { isAbsolute, resolve, relative, dirname, join } from 'node:path';
 
-/** The single allowed working directory, and the SAME folder the example scripts use.
+/** The single allowed working directory, and the SAME folder the scripts use.
  *
  *  Until v0.7.5 the two surfaces had roots of their own - the connector here, the
  *  scripts under ~/.julenny-collab - so a collaboration started on one could not be
@@ -22,7 +22,7 @@ import { isAbsolute, resolve, relative, dirname, join } from 'node:path';
  *                           $XDG_CONFIG_HOME/julenny/workdir elsewhere
  *    3. ~/julenny-workdir
  *
- *  Keep in step with examples/_core/lib.sh and examples/_core/lib.ps1. A mismatch does
+ *  Keep in step with scripts/_core/lib.sh and scripts/_core/lib.ps1. A mismatch does
  *  not fail loudly: each surface simply works in a different folder and reports that
  *  the other one's files are not there.
  *

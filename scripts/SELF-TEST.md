@@ -46,7 +46,7 @@ fails *inside the engine* after a credit has already been spent. Only
 
 ## Expected answers
 
-All paths are relative to `examples/`. Both sides' data is yours in a self-test, so
+Sample paths are relative to your working folder. Both sides' data is yours in a self-test, so
 "acme" and "beta" here are just the two roles, not two companies.
 
 ### `federated-average`
@@ -153,7 +153,7 @@ tells the platform which indices to expect, so declare it BEFORE building rotati
 
 | Input | File | Owner |
 |---|---|---|
-| `model` | `decision-tree-inference/golden/tree.json` | queryAnalyst |
+| `model` | `samples/decision-tree-inference/data-consumer/tree.json` | queryAnalyst |
 | `features` | `samples/decision-tree-inference/data-owner/features.json` | dataOwner |
 
 Height-2 tree, 2 features, 2 classes, soft-if degree 16, already normalized to
@@ -162,7 +162,7 @@ Height-2 tree, 2 features, 2 classes, soft-if degree 16, already normalized to
 **Expected prediction: `[0.167801, 0.832199]`**, so `argmax` is class `1`.
 
 Both inputs are encrypted bundles built by `encode_recipe` from the cleartext JSON;
-they are not single ciphertexts. Use `features.json`, not `golden/features.txt` - the
+they are not single ciphertexts. Use `features.json`, not `features.txt` - the
 `.txt` is a human-readable copy with comment lines, and the recipe parses JSON, so it
 fails on the leading `#`. Both files describe the same sample. Features and thresholds must both be scaled to
 `[-1, 1]` with the same parameters, because the soft-if polynomial only approximates

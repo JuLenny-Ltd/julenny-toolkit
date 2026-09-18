@@ -1,7 +1,7 @@
 #!/bin/sh
 # Debian post-install. dpkg has no interactive flow and runs as root, so nothing here
 # may ask a question or write into a user's home. It prints the two commands that do
-# the asking: julenny-toolkit-examples (copies the scripts) and merge-claude-config.sh
+# the asking: julenny-toolkit-scripts (copies the scripts) and merge-claude-config.sh
 # (adds the connector to Claude Desktop).
 #
 # Until v0.7.5 this text never mentioned the connector merge at all, so the script
@@ -21,7 +21,7 @@ JuLenny FHE Toolkit installed.
 ONE WORKING FOLDER
 
 Keys, datasets and results all live in a single folder, shared by the connector,
-the example scripts and the CLI. Put your own data files in it and all three can
+the scripts and the CLI. Put your own data files in it and all three can
 see them. The default is ~/julenny-workdir. To use a different one, put its path
 in ~/.config/julenny/workdir, or let the next command record it for you.
 
@@ -36,13 +36,13 @@ Close Claude Desktop first: it rewrites its configuration when it exits and
 would erase the entry. It needs jq. Run it as the user who will use Claude, not
 as root, or the connector lands in root's configuration.
 
-EXAMPLE SCRIPTS
+SCRIPTS
 
-The example scripts are the reference for integrating the toolkit into your own
-pipelines. They ship read-only under /usr/share/julenny-toolkit/examples. For a
+The scripts are the reference for integrating the toolkit into your own
+pipelines. They ship read-only under /usr/share/julenny-toolkit/scripts. For a
 copy you can run and edit:
 
-  julenny-toolkit-examples
+  julenny-toolkit-scripts
 
 It asks where to put the scripts, and places their sample data under samples/
 in your JuLenny working folder, which is where the Claude connector reads it

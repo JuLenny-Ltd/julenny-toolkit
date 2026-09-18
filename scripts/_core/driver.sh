@@ -1,8 +1,11 @@
 #!/usr/bin/env bash
-# Shared single-command driver for a JuLenny collaboration. ONE script, BOTH
-# sides. Reads the active permission's keysetupState from the platform and
-# chains the numbered scripts. Fully interactive: it inspects platform state
-# at startup and prompts; there are no flags except -h/--help.
+# The driver behind ../run.sh. ONE script, BOTH sides, every scenario. Reads the
+# active permission's keysetupState from the platform and chains the numbered
+# scripts. Fully interactive: it inspects platform state at startup and prompts;
+# there are no flags except -h/--help.
+#
+# Run ../run.sh rather than this directly; it is the documented entry point and this
+# file's location is an implementation detail.
 #
 # Which side we are (data-owner / data-consumer) comes from the PERMISSION, via the
 # collaboration's config.env that 00-init writes. lib.sh resolves it and loads the
@@ -43,7 +46,7 @@ unset _jl_run_initial_jk
 
 for arg in "$@"; do
     case "$arg" in
-        -h|--help) sed -n '2,10p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        -h|--help) sed -n '2,13p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
         *) err "Unknown argument: $arg (this script takes no flags - it asks at startup)"; exit 2 ;;
     esac
 done

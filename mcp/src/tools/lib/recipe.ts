@@ -1,5 +1,5 @@
 // Recipe executor + function-def signature verification for the MCP encrypt path.
-// TypeScript port of examples/_core/recipe/{executor,verify-def}.mjs so the MCP can
+// TypeScript port of scripts/_core/recipe/{executor,verify-def}.mjs so the MCP can
 // run a function-def input's encodingRecipe (encrypted-bundle layout) into the
 // toolkit's generic bundle-input BEFORE crypto encrypt, fail-closed on the def's
 // registry signature (pinned key). Keep in sync with the .mjs versions.

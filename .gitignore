@@ -58,7 +58,7 @@ config.local.toml
 .env
 .env.local
 
-# Demo runtime secrets - written to ~/.julenny-collab/ by the example scripts,
+# Demo runtime secrets - written to ~/.julenny-collab/ by the scripts,
 # never into the repo; ignored here as a safety net against accidental commits.
 config.env
 fhe_secret_key.bin

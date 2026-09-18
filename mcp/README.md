@@ -11,7 +11,7 @@ result back.
 The server **orchestrates** the JuLenny platform API; it does **not** do
 cryptography itself. All key generation, encryption, and decryption run locally
 through the `julenny-toolkit` CLI (the server shells out to it, exactly like the
-[`examples/`](../examples) scripts). The agent never sees your keys or
+[`scripts/`](../scripts) scripts). The agent never sees your keys or
 plaintext, and nothing crypto-related moves server-side. This is the zero-trust
 guarantee the toolkit is built on stays intact while adding full agent
 automation. Because the server is TypeScript it is write-once and
@@ -122,14 +122,14 @@ pipeline end to end: `generate_keys`, `encrypt`, `decrypt`, `sign`, `release`.
 These require explicit user confirmation on `decrypt` and especially `release`
 (an agent must never silently approve a partner to see results).
 
-## Examples as a reference for agents
+## The scripts as a reference for agents
 
-The [`examples/`](../examples) folder runs this same end-to-end flow with the
+The [`scripts/`](../scripts) folder runs this same end-to-end flow with the
 `julenny-toolkit` CLI, using the same commands and flags these MCP tools generate.
-It's a learnable reference corpus: an agent can read the examples to understand
+It's a learnable reference corpus: an agent can read the scripts to understand
 the exact phase sequence (keysetup → encrypt → execute → release → decrypt) and
 the arguments each step takes, then reproduce it through these tools. The
-examples and the MCP tools are kept in lockstep on purpose.
+scripts and the MCP tools are kept in lockstep on purpose.
 
 ## License
 

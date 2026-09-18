@@ -47,7 +47,7 @@ set -euo pipefail
 # Your own data files live flat at the top of this folder: the connector accepts plain
 # file names only, so that is where it looks for them.
 #
-# Keep this list in step with mcp/src/tools/lib/paths.ts and examples/_core/lib.ps1. A
+# Keep this list in step with mcp/src/tools/lib/paths.ts and scripts/_core/lib.ps1. A
 # mismatch does not fail loudly - each surface simply works in a different folder and
 # reports that the other one's files are not there.
 _jl_settings_file() {
@@ -287,19 +287,42 @@ wait_msg() {
     echo
 }
 
+# The SCENARIO this run belongs to: the family of functions that share sample data.
+#
+# Derived from the function the permission pinned, by dropping the variant suffix:
+#
+#     joint-record-overlap-count      -> joint-record-overlap
+#     rule-based-cross-match-itemized -> rule-based-cross-match
+#     federated-average               -> federated-average
+#
+# Nothing has to be TOLD which scenario it is running. There used to be a folder per
+# scenario whose bootstrap exported the name, and before that a folder per scenario per
+# SIDE. Both asked the operator for something the permission already says.
+#
+# JL_SCENARIO overrides it, for a function whose name falls outside the convention.
+# Prints nothing before 00-init has fetched the function definition.
+jl_scenario() {
+    if [[ -n "${JL_SCENARIO:-}" ]]; then printf '%s' "$JL_SCENARIO"; return 0; fi
+    local fn_def="$JL_WORKDIR/function-def.json" slug=""
+    [[ -n "${JL_WORKDIR:-}" && -f "$fn_def" ]] && slug="$(jq -r '.slug // empty' "$fn_def" 2>/dev/null)"
+    [[ -n "$slug" ]] || return 0
+    slug="${slug%-count}"
+    slug="${slug%-itemized}"
+    printf '%s' "$slug"
+}
+
 # Where this scenario's sample files for THIS side live.
 #
 #     <workdir>/samples/<scenario>/<data-owner|data-consumer>/
 #
-# They used to sit in the example tree, at <scenario>/<acme|beta>/data/, and the
-# per-side bootstrap exported the path. Two things were wrong with that. The copy in
-# the example tree is a SECOND copy: the connector works in the working folder and
-# could not see it, and on 2026-09-17 a stale overlap-A-50.csv in the example tree was
-# run against a fresh overlap-B-30.csv and returned a correct-looking 0. And the
-# bootstrap cannot name the folder any more, because after the two entry points merged
-# it no longer knows which side this machine is.
+# They used to sit in the script tree, at <scenario>/<acme|beta>/data/, and the per-side
+# bootstrap exported the path. Two things were wrong with that. The copy in the script
+# tree is a SECOND copy: the connector works in the working folder and could not see it,
+# and on 2026-09-17 a stale overlap-A-50.csv in the script tree was run against a fresh
+# overlap-B-30.csv and returned a correct-looking 0. And nothing can name the folder up
+# front any more, because BOTH halves of the path - the scenario and the side - are
+# things the permission decides.
 #
-# So the scenario supplies only its NAME, and the side comes from the permission.
 # JL_DATA_DIR still wins if it is set, which is how a test or an operator with files
 # elsewhere points somewhere else.
 #
@@ -307,12 +330,13 @@ wait_msg() {
 # folder", which is the same as an empty one.
 jl_data_dir() {
     if [[ -n "${JL_DATA_DIR:-}" ]]; then printf '%s' "$JL_DATA_DIR"; return 0; fi
-    [[ -n "${JL_SCENARIO:-}" ]] || return 0
+    local scenario; scenario="$(jl_scenario)"
+    [[ -n "$scenario" ]] || return 0
     case "${JULENNY_OUR_SIDE:-}" in
         data-owner|data-consumer) ;;
         *) return 0 ;;
     esac
-    printf '%s/samples/%s/%s' "$JL_ROOT" "$JL_SCENARIO" "$JULENNY_OUR_SIDE"
+    printf '%s/samples/%s/%s' "$JL_ROOT" "$scenario" "$JULENNY_OUR_SIDE"
 }
 
 # Offer the scenario's sample files for one-key selection, with 'o' for a free-text
@@ -964,7 +988,7 @@ list_functions_by_scheme() {
 create_collaboration() {
     local partner_id="$1"
     local name="$2"
-    local description="${3:-Created from the JuLenny example scripts.}"
+    local description="${3:-Created from the JuLenny scripts.}"
 
     local body
     body="$(jq -n \

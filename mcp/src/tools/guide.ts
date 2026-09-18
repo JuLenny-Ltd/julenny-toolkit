@@ -3,7 +3,7 @@
 // returns the caller's current stage plus the exact next verb(s) to call. It is
 // a family-1 read only: no crypto, no secret material, no plaintext. It does not
 // replace the per-verb security checks (the platform stays the backstop); it
-// just lets an agent navigate the flow without carrying the example scripts.
+// just lets an agent navigate the flow without carrying the scripts.
 //
 // Stage model mirrors the server instructions block:
 //   discover -> keysetup -> provide-inputs -> run -> decrypt
@@ -143,7 +143,7 @@ export function registerGuideTools(server: McpServer, api: JulennyApiClient) {
           //
           // currentRound only advances once the round it names is satisfied, so when it sits on a
           // round the peer owes, this side looked "blocked" - even when a LATER round is ours alone
-          // and needs nothing from them. That is exactly why the example scripts bundle pk-share
+          // and needs nothing from them. That is exactly why the scripts bundle pk-share
           // with relin-round1 and publish both at once: relin-round1 is owner-only and does not
           // depend on the peer's pk-share at all.
           //
@@ -236,7 +236,7 @@ export function registerGuideTools(server: McpServer, api: JulennyApiClient) {
         if (missingMine.length > 0) {
           // Check the local keys FIRST, before anything is encrypted under them.
           //
-          // The example scripts do this automatically at exactly this point. The connector
+          // The scripts do this automatically at exactly this point. The connector
           // cannot: verify_keys is a verb someone has to call, so unless it is named here
           // it never runs and the check exists on paper only. Named first in the list
           // because a key that is stale or missing makes every step after it wasted work.

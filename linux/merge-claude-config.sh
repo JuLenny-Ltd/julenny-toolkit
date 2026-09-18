@@ -7,9 +7,9 @@
 # Usage:
 #   merge-claude-config.sh <api-key> [mcp-path] [api-url] [connector-name] [workdir]
 #
-# <workdir> is the ONE folder both surfaces use (the example scripts read the same
+# <workdir> is the ONE folder both surfaces use (the scripts read the same
 # value). When given, it is written into the connector's environment AND recorded in
-# $XDG_CONFIG_HOME/julenny/workdir, which is what examples/_core/lib.sh reads. Leave it
+# $XDG_CONFIG_HOME/julenny/workdir, which is what scripts/_core/lib.sh reads. Leave it
 # out and both fall back to ~/julenny-workdir.
 set -euo pipefail
 
@@ -49,7 +49,7 @@ jq --arg name "$NAME" \
 echo "Merged '$NAME' MCP connector into $CFG"
 
 # Record the working folder where BOTH surfaces look for it. Without this the connector
-# would use the folder pinned above while the example scripts used the default, which is
+# would use the folder pinned above while the scripts used the default, which is
 # exactly the split this file is here to end.
 if [[ -n "$WORKDIR" ]]; then
     SETTINGS_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/julenny"

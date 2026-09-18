@@ -6,7 +6,7 @@
 // matches: no error, no warning, just an empty result that looks like an honest "no
 // overlap". The choice therefore has to be remembered at encrypt time, not guessed later.
 //
-// SHARED WITH THE EXAMPLE SCRIPTS. Both surfaces read and write the same two files, with
+// SHARED WITH THE SCRIPTS. Both surfaces read and write the same two files, with
 // the same names, the same keys and the same values, at the top of the working folder:
 //
 //   dataset_columns.json   { "<datasetId>": "all" | "1,3" }

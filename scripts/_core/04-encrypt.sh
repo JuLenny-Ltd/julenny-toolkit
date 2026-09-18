@@ -264,7 +264,7 @@ for ((i = 0; i < MY_INPUT_COUNT; i++)); do
             # bundle-input, then encrypt that under the joint key, then upload the
             # opaque bundle (kind=ciphertext; encrypted under the joint key, stored opaquely).
             [[ -n "$JOINT_PK" ]] || die "encrypted-bundle input needs the joint public key, but none was fetched."
-            command -v node >/dev/null 2>&1 || die "node is required to run the encodingRecipe executor (examples/_core/recipe/recipe-encode.mjs)."
+            command -v node >/dev/null 2>&1 || die "node is required to run the encodingRecipe executor (scripts/_core/recipe/recipe-encode.mjs)."
             echo
             echo "============================================================"
             echo " ENCODING + ENCRYPTING BUNDLE FOR '$INPUT_NAME': $INPUT_FILE"

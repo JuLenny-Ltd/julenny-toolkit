@@ -6,7 +6,7 @@ this once before you run anything important.
 
 ## Where the toolkit keeps things
 
-Everything lives in **one working folder**, shared by the example scripts, the
+Everything lives in **one working folder**, shared by the scripts, the
 connector (the MCP server) and the CLI. By default that is `~/julenny-workdir`
 (`%USERPROFILE%\julenny-workdir` on Windows). If you chose a different folder
 when you installed, that choice was recorded and all three use it.

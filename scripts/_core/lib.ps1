@@ -82,7 +82,7 @@ $script:JL_CORE_DIR = $PSScriptRoot
 # Your own data files live flat at the top of this folder: the connector accepts plain
 # file names only, so that is where it looks for them.
 #
-# Keep this list in step with mcp/src/tools/lib/paths.ts and examples/_core/lib.sh. A
+# Keep this list in step with mcp/src/tools/lib/paths.ts and scripts/_core/lib.sh. A
 # mismatch does not fail loudly - each surface simply works in a different folder and
 # reports that the other one's files are not there.
 function Get-JlResolvedRoot {
@@ -218,27 +218,56 @@ if (-not (Get-Variable -Name JL_PEER_LABEL -Scope Script -ErrorAction SilentlyCo
     }
 }
 
-# The scenario NAME, set by the scenario bootstrap. It arrives as an environment
-# variable because the bootstrap launches run.ps1 as a child process. JL_DATA_DIR is an
-# explicit override for the sample folder; see Get-JlDataDir.
+# Overrides, both normally unset. JL_SCENARIO names the sample family explicitly, for a
+# function whose name falls outside the convention Get-JlScenario relies on;
+# JL_DATA_DIR replaces the sample folder outright.
 $script:JL_SCENARIO = ''
 if ($env:JL_SCENARIO) { $script:JL_SCENARIO = $env:JL_SCENARIO }
 $script:JL_DATA_DIR = ''
 if ($env:JL_DATA_DIR) { $script:JL_DATA_DIR = $env:JL_DATA_DIR }
 
+# The SCENARIO this run belongs to: the family of functions that share sample data.
+#
+# Derived from the function the permission pinned, by dropping the variant suffix:
+#
+#     joint-record-overlap-count      -> joint-record-overlap
+#     rule-based-cross-match-itemized -> rule-based-cross-match
+#     federated-average               -> federated-average
+#
+# Nothing has to be TOLD which scenario it is running. There used to be a folder per
+# scenario whose bootstrap exported the name, and before that a folder per scenario per
+# SIDE. Both asked the operator for something the permission already says.
+#
+# Returns '' before 00-init has fetched the function definition.
+function Get-JlScenario {
+    if ($script:JL_SCENARIO) { return $script:JL_SCENARIO }
+    if (-not $script:JL_WORKDIR) { return '' }
+    $fnDef = Join-Path $script:JL_WORKDIR 'function-def.json'
+    if (-not (Test-Path -LiteralPath $fnDef)) { return '' }
+    try {
+        $def = Get-Content -LiteralPath $fnDef -Raw | ConvertFrom-Json
+    } catch { return '' }
+    if (-not (Test-JlHasProperty $def 'slug')) { return '' }
+    $slug = "$($def.slug)"
+    if (-not $slug) { return '' }
+    foreach ($suffix in @('-count', '-itemized')) {
+        if ($slug.EndsWith($suffix)) { $slug = $slug.Substring(0, $slug.Length - $suffix.Length) }
+    }
+    return $slug
+}
+
 # Where this scenario's sample files for THIS side live.
 #
 #     <workdir>\samples\<scenario>\<data-owner or data-consumer>\
 #
-# They used to sit in the example tree, at <scenario>\<acme or beta>\data\, and the
+# They used to sit in the script tree, at <scenario>\<acme or beta>\data\, and the
 # per-side bootstrap passed the path. Two things were wrong with that. The copy in the
-# example tree is a SECOND copy: the connector works in the working folder and could
-# not see it, and on 2026-09-17 a stale overlap-A-50.csv in the example tree was run
-# against a fresh overlap-B-30.csv and returned a correct-looking 0. And the bootstrap
-# cannot name the folder any more, because after the two entry points merged it no
-# longer knows which side this machine is.
+# script tree is a SECOND copy: the connector works in the working folder and could not
+# see it, and on 2026-09-17 a stale overlap-A-50.csv in the script tree was run against
+# a fresh overlap-B-30.csv and returned a correct-looking 0. And nothing can name the
+# folder up front any more, because BOTH halves of the path - the scenario and the side
+# - are things the permission decides.
 #
-# So the scenario supplies only its NAME, and the side comes from the permission.
 # JL_DATA_DIR still wins if it is set, which is how a test or an operator with files
 # elsewhere points somewhere else.
 #
@@ -246,9 +275,10 @@ if ($env:JL_DATA_DIR) { $script:JL_DATA_DIR = $env:JL_DATA_DIR }
 # folder", which is the same as an empty one.
 function Get-JlDataDir {
     if ($script:JL_DATA_DIR) { return $script:JL_DATA_DIR }
-    if (-not $script:JL_SCENARIO) { return '' }
+    $scenario = Get-JlScenario
+    if (-not $scenario) { return '' }
     if ($script:JULENNY_OUR_SIDE -ne 'data-owner' -and $script:JULENNY_OUR_SIDE -ne 'data-consumer') { return '' }
-    return (Join-Path (Join-Path (Join-Path $script:JL_ROOT 'samples') $script:JL_SCENARIO) $script:JULENNY_OUR_SIDE)
+    return (Join-Path (Join-Path (Join-Path $script:JL_ROOT 'samples') $scenario) $script:JULENNY_OUR_SIDE)
 }
 
 # Per-collab paths. Set-JlActiveJointKey fills these in; empty until a joint key
@@ -1216,7 +1246,7 @@ function New-JlCollaboration {
     param(
         [Parameter(Mandatory = $true)][string] $PartnerCollaborationId,
         [Parameter(Mandatory = $true)][string] $Name,
-        [string] $Description = 'Created from the JuLenny example scripts.'
+        [string] $Description = 'Created from the JuLenny scripts.'
     )
     # -AllowFailure, so a refusal comes back as empty with the reason in
     # $script:JL_LAST_API_ERROR rather than ending the run. The commonest refusal here is

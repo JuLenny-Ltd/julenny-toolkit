@@ -1,5 +1,5 @@
 ; JuLenny Toolkit - unified Windows installer (Inno Setup 6).
-; One installer, four checkbox components: UI app / CLI / MCP / example scripts.
+; One installer, four checkbox components: UI app / CLI / MCP / scripts.
 ; Per-user, no admin rights required.
 ;
 ; Build:  iscc windows\installer\julenny-toolkit.iss     (Inno Setup's compiler)
@@ -15,7 +15,7 @@
 ;   the app payload at AppSourceDir        (see the open question below)
 ;
 ; PACKAGING: option D2 (decided 2026-08-15). ONE installer carries everything -
-; app, CLI, MCP and the example scripts. There is no separate MSIX download.
+; app, CLI, MCP and the scripts. There is no separate MSIX download.
 ; JuLennyFHE.vcxproj is already configured for it (WindowsPackageType=None,
 ; WindowsAppSDKSelfContained=true), so AppSourceDir below is a real unpackaged,
 ; self-contained build: the Windows App SDK runtime ships inside it and the
@@ -49,24 +49,24 @@ UninstallDisplayIcon={app}\app\JuLennyFHE.exe
 LicenseFile=..\..\LICENSE
 
 [Types]
-Name: "full";   Description: "Everything (app, CLI, MCP server, and example scripts)"
+Name: "full";   Description: "Everything (app, CLI, MCP server, and scripts)"
 Name: "custom"; Description: "Choose what to install";               Flags: iscustom
 
 [Components]
 Name: "app"; Description: "JuLenny Toolkit desktop app (graphical UI)";        Types: full
 Name: "cli"; Description: "Command-line tool (julenny-toolkit)";              Types: full
 Name: "mcp"; Description: "MCP server for Claude Desktop (julenny-mcp)";  Types: full
-Name: "examples"; Description: "Example scripts (integration reference)"; Types: full
+Name: "examples"; Description: "Scripts (integration reference)"; Types: full
 
 ; Inno only overwrites files the new version ships; anything a previous version installed and
 ; this one no longer does is left behind forever. That is how 27 bash scripts from June were
-; still sitting in {app}\examples after the release that deliberately stopped shipping them to
+; still sitting in {app}\scripts after the release that deliberately stopped shipping them to
 ; Windows. Stale scripts are worse than clutter here: a customer can run one and get behaviour
 ; from a version we no longer support. Clear the read-only reference tree before copying, so
-; {app}\examples is always exactly what this build shipped. Only that folder: never {app}
+; {app}\scripts is always exactly what this build shipped. Only that folder: never {app}
 ; itself, which holds the app, the CLI, the MCP and the uninstaller.
 [InstallDelete]
-Type: filesandordirs; Name: "{app}\examples"; Components: examples
+Type: filesandordirs; Name: "{app}\scripts"; Components: examples
 
 [Files]
 ; --- Installer-only helper: modern folder picker (x86, called during the wizard).
@@ -89,8 +89,8 @@ Source: "merge-claude-config.ps1";                        DestDir: "{app}"; Comp
 ;     reverse engineer a map of the binary. Keep them in the build output for
 ;     crash analysis; just do not ship them.
 Source: "{#AppSourceDir}\*";                              DestDir: "{app}\app"; Components: app; Flags: ignoreversion recursesubdirs createallsubdirs; Excludes: "*.pdb"
-; --- Example scripts. Read-only reference copy under {app}, mirroring the .deb's
-;     /usr/share/julenny-toolkit/examples. The helper below copies the operator's
+; --- Scripts. Read-only reference copy under {app}, mirroring the .deb's
+;     /usr/share/julenny-toolkit/scripts. The helper below copies the operator's
 ;     chosen side out to a writable folder; it stays installed so they can re-run
 ;     it later to switch side or make another copy. ---
 ;     Excludes the bash half: nothing on Windows runs a .sh, and the .env side
@@ -99,8 +99,8 @@ Source: "{#AppSourceDir}\*";                              DestDir: "{app}\app"; 
 ; samples\ ships here too and the helper copies it on to the WORKING folder, not to
 ; the scripts folder: the connector reads it from there, and a second copy beside the
 ; scripts is what let a stale fixture be run against a fresh one.
-Source: "..\..\examples\*";                               DestDir: "{app}\examples"; Components: examples; Flags: ignoreversion recursesubdirs createallsubdirs; Excludes: "*.sh,*.env"
-Source: "julenny-toolkit-examples.ps1";                   DestDir: "{app}"; Components: examples; Flags: ignoreversion
+Source: "..\..\scripts\*";                               DestDir: "{app}\scripts"; Components: examples; Flags: ignoreversion recursesubdirs createallsubdirs; Excludes: "*.sh,*.env"
+Source: "julenny-toolkit-scripts.ps1";                   DestDir: "{app}"; Components: examples; Flags: ignoreversion
 
 [Icons]
 Name: "{autoprograms}\JuLenny Toolkit"; Filename: "{app}\app\JuLennyFHE.exe"; Components: app
@@ -120,7 +120,7 @@ Root: HKCU; Subkey: "Environment"; ValueType: expandsz; ValueName: "Path"; \
 ; existing keys and datasets became invisible to the MCP with nothing to indicate why.
 ;
 ; Written for EVERY component since v0.7.5, not only the MCP. This value is now the single
-; source of truth for the working folder and the example scripts read it too (lib.ps1's
+; source of truth for the working folder and the scripts read it too (lib.ps1's
 ; Get-JlResolvedRoot). Writing it only when the MCP was selected left a scripts-only
 ; install falling back to the default folder while the user had chosen another one here.
 Root: HKCU; Subkey: "Software\JuLenny\Toolkit"; ValueType: string; ValueName: "WorkDir"; \
@@ -145,14 +145,14 @@ Filename: "powershell.exe"; \
   Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\merge-claude-config.ps1"" -ApiKey ""{code:GetApiKey}"" -McpExePath ""{app}\julenny-mcp.exe"" -Workdir ""{code:GetWorkdir}"""; \
   StatusMsg: "Configuring the JuLenny connector in Claude Desktop..."; \
   Flags: runhidden waituntilterminated; Components: mcp
-; Copy the example scripts out to the operator's folder, and their sample data on to
+; Copy the scripts out to the operator's folder, and their sample data on to
 ; the WORKING folder, which is why -Workdir is passed. Same helper they can re-run
 ; later for a second copy; -Force because the wizard already owns the destination
 ; choice, -Yes because the wizard already confirmed it. There is no -Role: the scripts
 ; are one set for both sides.
 Filename: "powershell.exe"; \
-  Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\julenny-toolkit-examples.ps1"" -Dest ""{code:GetExamplesDest}"" -Workdir ""{code:GetWorkdir}"" -Source ""{app}\examples"" -Force -Yes"; \
-  StatusMsg: "Copying the example scripts..."; \
+  Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\julenny-toolkit-scripts.ps1"" -Dest ""{code:GetExamplesDest}"" -Workdir ""{code:GetWorkdir}"" -Source ""{app}\scripts"" -Force -Yes"; \
+  StatusMsg: "Copying the scripts..."; \
   Flags: runhidden waituntilterminated; Components: examples; Check: ShouldCopyExamples
 
 [Code]
@@ -290,7 +290,7 @@ var
 begin
   SetLength(Buf, 1024);
   try
-    n := ShowFolderDialog('Select a folder for the example scripts', ExamplesDirPage.Values[0], Buf, 1024);
+    n := ShowFolderDialog('Select a folder for the scripts', ExamplesDirPage.Values[0], Buf, 1024);
   except
     n := -1;
   end;
@@ -322,7 +322,7 @@ begin
   WorkdirPage := CreateInputDirPage(ApiKeyPage.ID,
     'JuLenny working folder',
     'Where should JuLenny keep your keys, datasets and results?',
-    'One folder is shared by everything: the connector, the example scripts and the' + #13#10 +
+    'One folder is shared by everything: the connector, the scripts and the' + #13#10 +
     'command line. Put your own data files in it and all three can see them.' + #13#10 +
     'The default is filled in below. Click Browse to choose a different folder.',
     False, '');
@@ -350,8 +350,8 @@ begin
   // which side you are comes from the permission you pick - so there is nothing to
   // choose here beyond whether to copy them at all.
   ExamplesRolePage := CreateInputOptionPage(WorkdirPage.ID,
-    'Example scripts',
-    'Copy the example scripts to a folder you can edit?',
+    'Scripts',
+    'Copy the scripts to a folder you can edit?',
     'The scripts drive a collaboration end to end and are yours to modify.' + #13#10 +
     'Their sample data goes into the working folder you chose on the last' + #13#10 +
     'page, which is where the Claude connector looks for it too.',
@@ -368,8 +368,8 @@ begin
     ExamplesRolePage.SelectedValueIndex := 0;
 
   ExamplesDirPage := CreateInputDirPage(ExamplesRolePage.ID,
-    'Example scripts folder',
-    'Where should the example scripts be copied?',
+    'Scripts folder',
+    'Where should the scripts be copied?',
     'A read-only reference copy always goes into the install folder. This is the' + #13#10 +
     'editable working copy.',
     False, '');
@@ -379,7 +379,7 @@ begin
   if PrevExamplesDir <> '' then
     ExamplesDirPage.Values[0] := PrevExamplesDir
   else
-    ExamplesDirPage.Values[0] := ExpandConstant('{userdocs}\julenny-examples');
+    ExamplesDirPage.Values[0] := ExpandConstant('{userdocs}\julenny-scripts');
   ExamplesDirPage.Buttons[0].OnClick := @ExamplesBrowseClick;
 end;
 

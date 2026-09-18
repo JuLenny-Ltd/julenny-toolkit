@@ -538,7 +538,7 @@ info "  ${JL_PEER_LABEL} (peer): ${JL_PEER_ROLE_LABEL}${PEER_COLLAB:+ (collab $P
 # -------- Default for downstream prompts --------
 # JULENNY_INPUT_CSV is referenced as a default in the o)Other fallback prompts
 # in 04-encrypt and 06-end-of-cycle. We silently populate it with the first file
-# (alphabetically) under $SCRIPT_DIR/data/, if such a file exists. No prompt
+# (alphabetically) in this side's sample folder, if such a file exists. No prompt
 # at 00-init time; the operator never has to pick a single "input" file when
 # the function actually has 4 of them. Downstream pickers still ask per-input.
 JULENNY_INPUT_CSV=""

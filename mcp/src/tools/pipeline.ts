@@ -25,7 +25,7 @@
 //     never contents.
 //   - argv arrays for all CLI calls (via runCli); never a shell string.
 //
-// Request shapes mirror examples/_core (the scripts that make these exact
+// Request shapes mirror scripts/_core (the scripts that make these exact
 // calls): main/04-encrypt.sh (data upload), lib.sh request_upload_url /
 // wrap_and_upload (keysetup messages), lead/03-finalize-keysetup.sh (final
 // keys), lib.sh releaser_flow (release: partial-decrypt + sign + multipart
@@ -84,7 +84,7 @@ export function registerPipelineTools(server: McpServer, api: JulennyApiClient) 
   );
 
   // ---- encode_recipe (cleartext bundle prep for encrypted-bundle inputs) ----
-  // Mirrors examples/_core/recipe/recipe-encode.mjs: verify the def's registry
+  // Mirrors scripts/_core/recipe/recipe-encode.mjs: verify the def's registry
   // signature (fail-closed), then run the named input's encodingRecipe over a
   // cleartext JSON source into the toolkit's generic bundle-input. The agent then
   // passes that bundle-input to `encrypt`. Pure cleartext data-structuring, no keys.
@@ -340,7 +340,7 @@ export function registerPipelineTools(server: McpServer, api: JulennyApiClient) 
         + "'collabs/<jointKeyId>/keys' when jointKeyId is given, otherwise 'keys'.",
       ),
       jointKeyId: z.string().optional().describe(
-        'Joint key id, when the keys live in the per-collaboration folder the example scripts use.',
+        'Joint key id, when the keys live in the per-collaboration folder the scripts use.',
       ),
       repair: z.boolean().optional().describe(
         'Re-download anything missing or stale (default true). Pass false to report without touching any file.',
@@ -348,7 +348,7 @@ export function registerPipelineTools(server: McpServer, api: JulennyApiClient) 
     },
     async (p) => {
       try {
-        // The example scripts keep keys in collabs/<jointKeyId>/keys inside the same
+        // The scripts keep keys in collabs/<jointKeyId>/keys inside the same
         // working folder. Since v0.7.5 that folder is shared, so verifying the scripts'
         // files is just a matter of looking in the right place.
         const dir = p.dir ?? (p.jointKeyId ? `collabs/${p.jointKeyId}/keys` : 'keys');

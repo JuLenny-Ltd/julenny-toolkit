@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# Copy the JuLenny FHE Toolkit example scripts out of the read-only package
+# Copy the JuLenny FHE Toolkit scripts out of the read-only package
 # location into a folder you can run and edit.
 #
-# The package installs the full example tree under /usr/share, which is not writable
+# The package installs the full script tree under /usr/share, which is not writable
 # and not where you want to work.
 #
 # TWO destinations, because the tree has two kinds of thing in it:
@@ -21,9 +21,9 @@
 
 set -euo pipefail
 
-SRC_DEFAULT="/usr/share/julenny-toolkit/examples"
-SRC="${JULENNY_EXAMPLES_SRC:-$SRC_DEFAULT}"
-DEST_DEFAULT="$HOME/julenny-examples"
+SRC_DEFAULT="/usr/share/julenny-toolkit/scripts"
+SRC="${JULENNY_SCRIPTS_SRC:-$SRC_DEFAULT}"
+DEST_DEFAULT="$HOME/julenny-scripts"
 
 DEST=""
 WORKDIR=""
@@ -43,12 +43,12 @@ die()     { echo "${RED}error:${RST} $*" >&2; exit 1; }
 
 usage() {
     cat <<'USAGE'
-Usage: julenny-toolkit-examples [options]
+Usage: julenny-toolkit-scripts [options]
 
-Copies the JuLenny FHE Toolkit example scripts to a writable folder.
+Copies the JuLenny FHE Toolkit scripts to a writable folder.
 
 Options:
-  --dest <path>     Where to copy the scripts. Default: ~/julenny-examples
+  --dest <path>     Where to copy the scripts. Default: ~/julenny-scripts
   --workdir <path>  The JuLenny working folder; sample data lands in its samples/
                     subfolder. Default: the folder the toolkit already uses.
   --force           Overwrite a non-empty destination.
@@ -58,8 +58,8 @@ Options:
 With no options it asks interactively.
 
 Examples:
-  julenny-toolkit-examples
-  julenny-toolkit-examples --dest /srv/julenny --yes
+  julenny-toolkit-scripts
+  julenny-toolkit-scripts --dest /srv/julenny --yes
 USAGE
 }
 
@@ -78,8 +78,8 @@ which side this machine is comes from the permission you pick."
     esac
 done
 
-[[ -d "$SRC" ]] || die "example sources not found at $SRC
-Is the julenny-toolkit package installed? Set JULENNY_EXAMPLES_SRC to override."
+[[ -d "$SRC" ]] || die "script sources not found at $SRC
+Is the julenny-toolkit package installed? Set JULENNY_SCRIPTS_SRC to override."
 
 # ---------- destination ----------
 if [[ -z "$DEST" ]]; then
@@ -97,7 +97,7 @@ Pass --force to overwrite it, or choose a different folder."
 fi
 
 # ---------- working folder ----------
-# Same resolution order as examples/_core/lib.sh and mcp/src/tools/lib/paths.ts, so all
+# Same resolution order as scripts/_core/lib.sh and mcp/src/tools/lib/paths.ts, so all
 # three surfaces agree on where the samples are. Keep them in step.
 if [[ -z "$WORKDIR" ]]; then
     if [[ -n "${JULENNY_WORKDIR:-}" ]]; then

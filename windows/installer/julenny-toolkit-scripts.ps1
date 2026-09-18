@@ -1,10 +1,10 @@
-# Copy the JuLenny FHE Toolkit example scripts out of the install directory into
-# a folder you can run and edit. Windows counterpart to linux/julenny-toolkit-examples.
+# Copy the JuLenny FHE Toolkit scripts out of the install directory into
+# a folder you can run and edit. Windows counterpart to linux/julenny-toolkit-scripts.
 #
 # The installer calls this with -Dest and -Workdir from its wizard pages. It is also
 # safe to run standalone afterwards, which is how you get a second copy or refresh one:
 #
-#   & "$env:LOCALAPPDATA\Programs\julenny-toolkit\julenny-toolkit-examples.ps1"
+#   & "$env:LOCALAPPDATA\Programs\julenny-toolkit\julenny-toolkit-scripts.ps1"
 #
 # TWO destinations, because the tree has two kinds of thing in it:
 #
@@ -50,7 +50,7 @@ if (-not (Test-Path -LiteralPath $Source)) {
     Fail "example sources not found at $Source`nPass -Source to override."
 }
 
-$destDefault = Join-Path ([Environment]::GetFolderPath('UserProfile')) 'julenny-examples'
+$destDefault = Join-Path ([Environment]::GetFolderPath('UserProfile')) 'julenny-scripts'
 
 # ---------- destination ----------
 if ([string]::IsNullOrWhiteSpace($Dest)) {
@@ -67,7 +67,7 @@ if (Test-Path -LiteralPath $Dest) {
 }
 
 # ---------- working folder ----------
-# Same resolution order as examples\_core\lib.ps1 and mcp\src\tools\lib\paths.ts, so
+# Same resolution order as scripts\_core\lib.ps1 and mcp\src\tools\lib\paths.ts, so
 # all three surfaces agree on where the samples are. Keep them in step.
 if ([string]::IsNullOrWhiteSpace($Workdir)) {
     if ($env:JULENNY_WORKDIR) {

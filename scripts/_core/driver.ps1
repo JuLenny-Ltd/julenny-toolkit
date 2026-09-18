@@ -1,12 +1,20 @@
-# Shared single-command driver for a JuLenny collaboration. ONE script, BOTH
-# sides. Reads the permission's keysetup state from the platform and chains the
-# numbered scripts. Fully interactive: it inspects platform state at startup and
-# asks; there are no flags except -Help.
+# The driver behind ..\run.ps1. ONE script, BOTH sides, every scenario. Reads the
+# permission's keysetup state from the platform and chains the numbered scripts.
+# Fully interactive: it inspects platform state at startup and asks; there are no
+# flags except -Help.
 #
-# Which side we are (data-owner / data-consumer) comes from JULENNY_OUR_SIDE, set by
-# the scenario's per-side bootstrap before this runs. lib.ps1 loads the matching side
-# profile, and the only per-side behaviour here lives in the branches marked
-# OWNER / CONSUMER.
+# Run ..\run.ps1 rather than this directly; it is the documented entry point and
+# this file's location is an implementation detail.
+#
+# Which side we are (data-owner / data-consumer) comes from the PERMISSION, via the
+# collaboration's config.env that 00-init writes. lib.ps1 resolves it and loads the
+# matching side profile; the only per-side behaviour here lives in the branches
+# marked OWNER / CONSUMER.
+#
+# On a first run there is no permission yet and so no side, which is a normal state
+# and not an error. The scenario bootstraps used to settle it by having one per side;
+# that was a question the operator should never have been asked, because picking a
+# permission answers it.
 #
 # There is ONE numbered set of phase scripts. It used to be two, _core\lead\ and
 # _core\main\, picked by the data role - which was wrong, because the keysetup role is
@@ -28,7 +36,7 @@ $ErrorActionPreference = 'Stop'
 $here = $PSScriptRoot
 
 if ($Help) {
-    Get-Content $PSCommandPath | Select-Object -Skip 1 -First 8 | ForEach-Object { $_ -replace '^#\s?', '' }
+    Get-Content $PSCommandPath | Select-Object -Skip 1 -First 10 | ForEach-Object { $_ -replace '^#\s?', '' }
     exit 0
 }
 
