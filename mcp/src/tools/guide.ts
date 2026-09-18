@@ -8,10 +8,26 @@
 // Stage model mirrors the server instructions block:
 //   discover -> keysetup -> provide-inputs -> run -> decrypt
 //
-// Role mapping (the platform uses two naming systems):
-//   permission.role  : 'dataOwner' | 'dataConsumer'
-//   keysetup party   : 'owner'     | 'consumer'      (owner == keysetup LEAD)
-//   function-def role : 'dataOwner' | 'queryAnalyst' (queryAnalyst == consumer)
+// TWO ROLES, and they are independent. Conflating them is the defect this file
+// carried until 2026-09-18, in a comment that said "owner == keysetup LEAD".
+//
+//   the DATA role     permission.role: 'dataOwner' | 'dataConsumer'. Per PERMISSION.
+//                     Says whose data goes in, who triggers, and which function-def
+//                     inputs are yours ('dataOwner' | 'queryAnalyst').
+//   the KEYSETUP role /keysetup yourKeysetupRole: 'lead' | 'main'. Per JOINT KEY,
+//                     fixed when that key was built. Says which half of the ceremony
+//                     this machine performs, which rounds it owes, and - critically -
+//                     which flag its partial decryption carries.
+//
+// They agree whenever a collaboration only runs permissions in the direction it was
+// created in. They stop agreeing the moment one is created the other way round, and
+// a partial decryption produced with the wrong flag is not an error: it is a wrong
+// answer. The scripts got a missing file as a warning; an agent passes the filename
+// itself, so there is nothing here to go wrong loudly.
+//
+// participants{} on the keysetup response is keyed by the DATA role, because it is
+// just "which collaboration id is mine". expectedParty on the round manifest is the
+// KEYSETUP role. Two different lookups, deliberately.
 
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
@@ -25,7 +41,7 @@ const fail = (error: string, extra: Record<string, unknown> = {}) => ({
   isError: true,
 });
 
-interface RoundEntry { round: number; messageType: string; description: string; expectedParty: 'both' | 'owner' | 'consumer'; }
+interface RoundEntry { round: number; messageType: string; description: string; expectedParty: 'both' | 'lead' | 'main'; }
 
 export function registerGuideTools(server: McpServer, api: JulennyApiClient) {
   server.tool(
@@ -39,10 +55,30 @@ export function registerGuideTools(server: McpServer, api: JulennyApiClient) {
         const perm = await api.get(`/api/fhe-permissions/${p.permissionId}`);
 
         const role: string = perm.role; // 'dataOwner' | 'dataConsumer'
+        // DATA role. Used for the function-def inputs, for result visibility, and to
+        // index participants{}, which is keyed that way.
         const myParty: 'owner' | 'consumer' = role === 'dataOwner' ? 'owner' : 'consumer';
         const fnRole: string = role === 'dataOwner' ? 'dataOwner' : 'queryAnalyst';
         const amViewer: boolean = perm.resultVisibility === role;
-        const leadFlag: boolean = role === 'dataOwner'; // owner == keysetup lead
+
+        // The KEYSETUP role, fetched at most once and only when a stage needs it.
+        // Null on joint keys built before the platform recorded a lead; those are not
+        // backfilled, so fall back to the old assumption, right wherever the roles agree.
+        let keysetupRoleCache: 'lead' | 'main' | null = null;
+        const keysetupRole = async (): Promise<'lead' | 'main'> => {
+          if (keysetupRoleCache) return keysetupRoleCache;
+          try {
+            const k = await api.get(`/api/fhe-permissions/${p.permissionId}/keysetup`);
+            if (k?.yourKeysetupRole === 'lead' || k?.yourKeysetupRole === 'main') {
+              const fromPlatform: 'lead' | 'main' = k.yourKeysetupRole;
+              keysetupRoleCache = fromPlatform;
+              return fromPlatform;
+            }
+          } catch { /* fall through to the data-role assumption */ }
+          const assumed: 'lead' | 'main' = role === 'dataOwner' ? 'lead' : 'main';
+          keysetupRoleCache = assumed;
+          return assumed;
+        };
 
         // An INTERNAL grant is a solo self-test: one company on both sides. It follows a
         // different sequence (see SOLO SELF-TEST in the server instructions) and, critically,
@@ -117,8 +153,18 @@ export function registerGuideTools(server: McpServer, api: JulennyApiClient) {
             return ok({ ...base, stage: 'keysetup', summary: `Keysetup is in progress (permission status: ${perm.status}). Follow STAGE 1 in the server instructions.`, nextActions: ['register_signing_key (once per crypto context)', 'keysetup_contribute / relin_contribute per round', 'publish_keysetup_message / download_keysetup_message to exchange'] });
           }
 
+          // participants{} is keyed by the DATA role: this is only "my collaboration id".
           const myCollab: string | undefined = ks?.participants?.[myParty]?.collaborationId;
           const myContribs: number[] = (myCollab && ks.contributions?.[myCollab]) || [];
+
+          // The KEYSETUP role, straight from the platform. Null on joint keys built
+          // before it was recorded; those are not backfilled, so fall back to the old
+          // assumption, which is right wherever the two roles agree.
+          const myKeysetupRole: 'lead' | 'main' =
+            (ks?.yourKeysetupRole === 'lead' || ks?.yourKeysetupRole === 'main')
+              ? ks.yourKeysetupRole
+              : (role === 'dataOwner' ? 'lead' : 'main');
+          keysetupRoleCache = myKeysetupRole;
 
           // The platform spells this 'awaiting-finalization' (lower, hyphen); this branch
           // compared against 'AWAITING_FINALIZATION' and so NEVER fired. Execution fell
@@ -150,7 +196,7 @@ export function registerGuideTools(server: McpServer, api: JulennyApiClient) {
           // Gating on currentRound alone stopped an agent one message short and stalled the whole
           // collaboration, with each side waiting on the other. Scan the manifest instead.
           const owed: RoundEntry[] = (ks.roundManifest || []).filter((e: RoundEntry) =>
-            (e.expectedParty === 'both' || e.expectedParty === myParty) && !myContribs.includes(e.round),
+            (e.expectedParty === 'both' || e.expectedParty === myKeysetupRole) && !myContribs.includes(e.round),
           ).sort((a: RoundEntry, b: RoundEntry) => a.round - b.round);
 
           if (owed.length > 0) {
@@ -282,6 +328,10 @@ export function registerGuideTools(server: McpServer, api: JulennyApiClient) {
 
         // ---- STAGE 4: decrypt / release ----
         if (released && amViewer) {
+          // --lead is set by the KEY CEREMONY role, never by the data role. Getting it
+          // wrong here does not fail: it combines two partials that do not belong
+          // together and prints a plausible number.
+          const leadFlag = (await keysetupRole()) === 'lead';
           // Which resolver applies depends on what a slot MEANS in this function's
           // output, which the agent cannot infer from the verb names. Say it here.
           const pairList = /cross-match/.test(String(base.function ?? ''));

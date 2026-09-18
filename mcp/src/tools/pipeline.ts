@@ -757,6 +757,9 @@ export function registerPipelineTools(server: McpServer, api: JulennyApiClient) 
         // at 'combining' forever with no error anywhere. guide.ts already scoped this
         // correctly; this did not.
         const perm = await api.get(`/api/fhe-permissions/${p.permissionId}`) as Record<string, unknown>;
+        // The DATA role, and correct here: participants{} is keyed that way, so this is
+        // only asking "which collaboration id is mine". It is NOT the keysetup role, and
+        // must not be reused as one - see the two-roles note at the top of guide.ts.
         const myParty: 'owner' | 'consumer' = perm.role === 'dataOwner' ? 'owner' : 'consumer';
         const participants = (ks.participants as Record<string, { collaborationId?: string }>) || {};
         const myCollab = participants[myParty]?.collaborationId;

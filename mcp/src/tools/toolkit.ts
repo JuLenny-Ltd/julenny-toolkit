@@ -208,7 +208,7 @@ export function registerToolkitTools(server: McpServer) {
       secretKey: z.string().describe('Workdir-relative secret-share file name'),
       output: z.string().describe('Workdir-relative output partial file name'),
       contextSpec: z.string().describe('Crypto context spec'),
-      lead: z.boolean().optional().describe('True for the keysetup-lead party'),
+      lead: z.boolean().optional().describe('True when this machine is the keysetup LEAD. Read it from next_step or from /keysetup yourKeysetupRole - do NOT infer it from being the data owner. The two roles differ on a permission created in the other direction inside an existing collaboration, and the wrong flag here does not error: it produces a partial that does not match the other one and a silently wrong answer.'),
     },
     async (p) => {
       try {

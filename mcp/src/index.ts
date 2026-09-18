@@ -112,8 +112,11 @@ STAGE 4 - DECRYPT (threshold; both parties contribute one partial)
   - RELEASER: wait for execution state "awaiting-release", then release (this
     partial-decrypts and uploads your partial so the viewer can combine).
   - VIEWER: wait for state "released", then download_result and download_partial
-    (the releaser's partial), partial_decrypt (your own share; pass lead:true if
-    you were the keysetup lead), and decrypt_result (combine both partials). The
+    (the releaser's partial), partial_decrypt (your own share; pass lead:true
+    when /keysetup reports yourKeysetupRole 'lead' - ASK IT, do not assume the
+    data owner leads: on a permission created in the other direction they are
+    different parties, and the wrong flag returns a wrong number rather than an
+    error), and decrypt_result (combine both partials). The
     plaintext is written to a workdir file - read it from the filesystem; the
     verb returns only the path, never the values.
 
