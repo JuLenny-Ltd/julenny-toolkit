@@ -8,6 +8,8 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <map>
+#include <memory>
 #include <optional>
 #include <set>
 #include <span>
@@ -26,6 +28,7 @@
 #include "crypto/ciphertext.h"
 #include "crypto/eval_keys.h"
 #include "crypto/signing.h"
+#include "psi/advice.h"
 #include "psi/bundle.h"
 #include "psi/digest.h"
 #include "psi/solver.h"
@@ -803,6 +806,130 @@ static fhe_toolkit::psi::Plan plan_signature_table(const fhe_toolkit::psi::Reque
 }
 
 // ---------------------------------------------------------------------------
+// signature-table accuracy advice (design §3.9, step D4), rendered the same way
+// by the encoder and its dry run: every problem in numbers, each fix as flags
+// with what it costs, and one complete command that clears them all. The rules
+// and the verification of every fix live in psi/advice.
+// ---------------------------------------------------------------------------
+static std::string shell_quote(const std::string& s) {
+    static constexpr std::string_view safe =
+        "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_./=:,+@%";
+    if (!s.empty() && s.find_first_not_of(safe) == std::string::npos) return s;
+    std::string out = "'";
+    for (const char c : s) out += c == '\'' ? std::string("'\\''") : std::string(1, c);
+    return out + "'";
+}
+
+static std::string format_double(double v) {
+    std::ostringstream out;
+    out << v;
+    return out.str();
+}
+
+static json recommendation_json(const fhe_toolkit::psi::Recommendation& rec, const std::string& command) {
+    json out;
+    out["flags"]         = rec.flags();
+    out["command"]       = command + " " + rec.flags();
+    out["cells"]         = rec.plan.cells_total;
+    if (rec.dynamic_tables) out["dynamicTables"] = true;
+    else out["tables"]   = rec.plan.levels;
+    out["limbs"]         = rec.plan.limbs;
+    out["countGroups"]   = rec.plan.count_groups;
+    out["signatureBits"] = rec.signature_bits;
+    out["ciphertextsSelf"]      = rec.estimate.ciphertexts_self;
+    out["inputBytesSelf"]       = rec.estimate.input_bytes_self;
+    out["computeChunks"]        = rec.estimate.chunks;
+    out["coreSeconds"]          = rec.estimate.core_seconds;
+    out["expectedDropRate"]     = rec.dynamic_tables ? 0.0 : rec.estimate.expected_drop_rate;
+    out["expectedFalseMatches"] = rec.estimate.expected_false_matches;
+    out["cost"]                 = rec.cost();
+    return out;
+}
+
+static json finding_json(const fhe_toolkit::psi::Finding& f, const std::string& command) {
+    json out;
+    out["code"]     = fhe_toolkit::psi::issue_code(f.issue);
+    out["severity"] = fhe_toolkit::psi::severity_name(f.severity);
+    out["message"]  = f.message;
+    json recs = json::array();
+    for (const auto& rec : f.recommendations) recs.push_back(recommendation_json(rec, command));
+    out["recommendations"] = recs;
+    return out;
+}
+
+static json advice_json(const fhe_toolkit::psi::Advice& advice, bool acknowledged, const std::string& command) {
+    json out;
+    const auto verdict = advice.verdict(acknowledged);
+    out["verdict"] = fhe_toolkit::psi::verdict_name(verdict);
+    out["acknowledgementRequired"] = advice.needs_acknowledgement();
+    out["acknowledged"] = verdict == fhe_toolkit::psi::Verdict::accepted;
+    json findings = json::array();
+    for (const auto& f : advice.findings) findings.push_back(finding_json(f, command));
+    out["findings"] = findings;
+    out["fix"] = advice.fix.empty() ? json(nullptr) : recommendation_json(advice.fix.front(), command);
+    return out;
+}
+
+static void print_advice(const fhe_toolkit::psi::Advice& advice, bool acknowledged, const std::string& command,
+                         std::ostream& os) {
+    namespace psi = fhe_toolkit::psi;
+    for (const auto& f : advice.findings) {
+        const char* label = f.severity == psi::Severity::refuse      ? "REFUSED"
+                          : f.severity == psi::Severity::acknowledge ? "WARNING"
+                                                                      : "note";
+        os << "  " << label << " [" << psi::issue_code(f.issue) << "]: " << f.message << "\n";
+        for (const auto& rec : f.recommendations) {
+            os << "    fix: " << rec.flags() << "\n"
+               << "         " << rec.cost() << "\n";
+        }
+    }
+    const auto verdict = advice.verdict(acknowledged);
+    if (verdict == psi::Verdict::ok || verdict == psi::Verdict::accepted) {
+        if (verdict == psi::Verdict::accepted) {
+            os << "  Accepted with --accept-degraded-accuracy. The other party gets the same degraded answer; "
+                  "tell them.\n";
+        }
+        return;
+    }
+    if (!advice.fix.empty()) {
+        os << "  Recommended (clears everything above; both parties must use the same sizing flags):\n"
+           << "    " << command << " " << advice.fix.front().flags() << "\n"
+           << "    costs " << advice.fix.front().cost() << "\n";
+    } else {
+        os << "  No parameter set within this context clears it; fewer records per job, or sharding (F1), would.\n";
+    }
+    if (verdict == psi::Verdict::needs_acknowledgement) {
+        os << "  To proceed with these parameters anyway, add --accept-degraded-accuracy.\n";
+    }
+}
+
+// The encoder's own command line, minus its sizing flags, for recommendations to extend.
+static std::string encrypt_command_prefix(const CryptoEncryptArgs& args, const std::string& spec_id,
+                                          const std::string& role, const std::string& domain) {
+    std::ostringstream out;
+    out << "julenny-toolkit crypto encrypt";
+    if (!args.function_def_path.empty()) {
+        out << " --function-def " << shell_quote(args.function_def_path)
+            << " --input-name " << shell_quote(args.input_name);
+    } else {
+        out << " --schema signature-table";
+        if (!args.separator.empty()) out << " --separator " << shell_quote(args.separator);
+        if (args.columns != "all") out << " --columns " << shell_quote(args.columns);
+        if (args.skip_header) out << " --skip-header";
+    }
+    out << " --input " << shell_quote(args.input_path)
+        << " --joint-public-key " << shell_quote(args.joint_public_key_path)
+        << " --output " << shell_quote(args.output_path)
+        << " --role " << role << " --context-spec " << spec_id
+        << " --domain-separator " << shell_quote(domain);
+    if (args.capacity > 0) out << " --capacity " << args.capacity;
+    if (args.target_overflow != 1e-6) out << " --target-overflow " << format_double(args.target_overflow);
+    if (args.on_overflow != "fail") out << " --on-overflow " << args.on_overflow;
+    if (args.emit_json) out << " --json";
+    return out.str();
+}
+
+// ---------------------------------------------------------------------------
 // signature-table: the exact-PSI encoder (design 2.2-2.3; steps B1-B4, D2).
 //
 // Rows -> record digests (psi/digest) -> T associative tables with sentinel
@@ -881,6 +1008,9 @@ static int encrypt_signature_table(const CryptoEncryptArgs& args,
     req.signature_bits   = args.signature_bits;
     req.target_drop_rate = args.target_overflow;
     req.context.slots    = static_cast<std::uint64_t>(slot_count);
+    // Built here rather than at encryption: its tower count prices the recommendations below.
+    fhe_toolkit::crypto::Context ctx(spec);
+    req.context.towers   = static_cast<unsigned>(ctx.tower_count());
     psi::Plan plan;
     psi::Estimate estimate;
     unsigned solved_tables = 0;
@@ -909,23 +1039,70 @@ static int encrypt_signature_table(const CryptoEncryptArgs& args,
         return 1;
     }
 
+    // Accuracy (design §3.9, step D4). The expected drop rate's 1 % floor is enforced before any
+    // table is built; everything else is judged on what the table actually holds, below.
+    const std::string command = encrypt_command_prefix(args, spec.id, role_str, domain);
+    psi::AdviceOptions advice_options;
+    advice_options.policy = policy;
+    advice_options.dynamic_tables = args.dynamic_tables;
+    {
+        auto before = psi::advise(req, estimate, advice_options);
+        if (before.refused()) {
+            std::erase_if(before.findings, [](const psi::Finding& f) { return f.severity != psi::Severity::refuse; });
+            std::cerr << "error: refused before encoding: the signature tables would not be accurate enough\n";
+            print_advice(before, false, command, std::cerr);
+            return 1;
+        }
+    }
+
+    // This data's fullest cell at any cell count, so a recommended fix is checked against the
+    // records actually read, not only the model. Memoised: the advice asks for a few sizes, repeatedly.
+    psi::Observed observed;
+    observed.fullest_cell_at = [&digests, memo = std::make_shared<std::map<std::uint64_t, std::uint64_t>>()](
+                                   std::uint64_t cells) {
+        const auto hit = memo->find(cells);
+        if (hit != memo->end()) return hit->second;
+        return (*memo)[cells] = psi::fullest_cell(digests, cells);
+    };
+
     const psi::TableParams table_params = plan.table_params();
     std::optional<psi::Table> table;
     try {
-        table.emplace(psi::build_table(std::move(digests), table_params, role, policy));
+        table.emplace(psi::build_table(digests, table_params, role, policy));
     } catch (const psi::TableOverflow& e) {
-        const auto& r = e.report();
-        std::cerr << "error: " << e.what() << "\n"
-                  << "       records " << r.records << ", cells " << table_params.cells << ", tables "
-                  << table_params.levels << "; the fullest cell held " << r.cell_max_load << " records, "
-                  << r.overflowed_cells << " cells overflowed, " << r.dropped << " records did not fit\n"
-                  << "       re-encode with --cells " << table_params.cells * 2 << " or --tables "
-                  << table_params.levels + 2 << " (both parties must use the same values)\n";
+        observed.records = e.report().records;
+        observed.dropped = e.report().dropped;
+        advice_options.observed = &observed;
+        const auto advice = psi::advise(req, estimate, advice_options);
+        std::cerr << "error: " << e.what() << "\n";
+        print_advice(advice, false, command, std::cerr);
         return 1;
     } catch (const std::exception& e) {
         std::cerr << "error: cannot build the signature tables: " << e.what() << "\n";
         return 1;
     }
+    observed.records = table->report().records;
+    observed.dropped = table->report().dropped;
+    advice_options.observed = &observed;
+    const auto advice = psi::advise(req, estimate, advice_options);
+    const auto verdict = advice.verdict(args.accept_degraded_accuracy);
+    if (verdict == psi::Verdict::refused || verdict == psi::Verdict::needs_acknowledgement) {
+        // Nothing encrypted or written: the table is cheap, the encryption is not.
+        if (args.emit_json) {
+            json out;
+            out["status"]   = fhe_toolkit::psi::verdict_name(verdict);
+            out["schema"]   = "signature-table";
+            out["accuracy"] = advice_json(advice, args.accept_degraded_accuracy, command);
+            std::cout << out.dump(2) << "\n";
+        }
+        std::cerr << (verdict == psi::Verdict::refused
+                          ? "error: refused: the signature tables are not accurate enough to encode\n"
+                          : "error: not encoded: these parameters degrade the answer, and need acknowledging\n");
+        print_advice(advice, false, command, std::cerr);
+        return verdict == psi::Verdict::refused ? 1 : 3;
+    }
+    const std::string acknowledged_at =
+        verdict == psi::Verdict::accepted ? fhe_toolkit::registry::iso8601_now_utc() : std::string();
 
     psi::BundleLayout layout;
     try {
@@ -938,7 +1115,6 @@ static int encrypt_signature_table(const CryptoEncryptArgs& args,
     // Encode + encrypt under a context built from the spec, for the reason the flat path records:
     // a freshly built context embeds itself into the ciphertext, which is what the wrapper needs.
     auto pk_bytes = read_bytes(args.joint_public_key_path);
-    fhe_toolkit::crypto::Context ctx(spec);
     auto pk = fhe_toolkit::crypto::PublicKey::deserialize(ctx, pk_bytes);
     std::vector<fhe_toolkit::crypto::Ciphertext> cts;
     cts.reserve(layout.ciphertexts);
@@ -1000,8 +1176,11 @@ static int encrypt_signature_table(const CryptoEncryptArgs& args,
         out["ciphertexts"]     = layout.ciphertexts;
         out["bytes"]           = bytes;
         out["outputPath"]      = out_path.string();
+        // Recorded with the bundle so the acknowledgement can travel to the grant (design §3.9; E5).
+        out["accuracy"] = advice_json(advice, args.accept_degraded_accuracy, command);
+        if (!acknowledged_at.empty()) out["accuracy"]["acknowledgedAt"] = acknowledged_at;
         json warnings = json::array();
-        for (const auto& w : estimate.warnings) warnings.push_back(w.message);
+        for (const auto& f : advice.findings) warnings.push_back(f.message);
         out["warnings"] = warnings;
         std::cout << out.dump(2) << "\n";
     } else {
@@ -1028,7 +1207,7 @@ static int encrypt_signature_table(const CryptoEncryptArgs& args,
                           ? "  The other party MUST encode with the same cells, limbs and groups (its tables may differ),\n"
                           : "  The other party MUST encode with the same cells, tables, limbs and groups,\n");
         std::cout << "  the opposite role, and the same domain separator '" << domain << "'.\n";
-        for (const auto& w : estimate.warnings) std::cout << "  warning: " << w.message << "\n";
+        print_advice(advice, args.accept_degraded_accuracy, command, std::cout);
     }
     return 0;
 }
@@ -1125,6 +1304,10 @@ int run_crypto_psi_estimate(const CryptoPsiEstimateArgs& args) {
         std::cerr << "error: --records must be at least 1 (the encoder refuses an empty input)\n";
         return 2;
     }
+    if (args.on_overflow != "fail" && args.on_overflow != "drop") {
+        std::cerr << "error: --on-overflow must be 'fail' or 'drop', not '" << args.on_overflow << "'\n";
+        return 2;
+    }
 
     const std::int64_t slot_count = resolve_slot_count(spec->id);
     psi::Request req;
@@ -1136,6 +1319,8 @@ int run_crypto_psi_estimate(const CryptoPsiEstimateArgs& args) {
     psi::Plan plan;
     psi::Estimate e;
     std::vector<psi::Estimate> sensitivity;
+    psi::Advice advice;
+    psi::Finding approximate;
     unsigned likely_p50 = 0, likely_p99 = 0;
     std::uint64_t bytes_at_p99 = 0;
     try {
@@ -1174,10 +1359,26 @@ int run_crypto_psi_estimate(const CryptoPsiEstimateArgs& args) {
         }
         std::sort(ks.begin(), ks.end());
         sensitivity = psi::limb_sensitivity(req, plan, ks);
+
+        // What the encoder would say about these parameters (design §3.9), from the model.
+        psi::AdviceOptions advice_options;
+        advice_options.policy = args.on_overflow == "drop" ? psi::OverflowPolicy::drop : psi::OverflowPolicy::fail;
+        advice_options.dynamic_tables = args.dynamic_tables;
+        advice = psi::advise(req, e, advice_options);
+        approximate = psi::advise_approximate(req, e);
     } catch (const std::exception& ex) {
         std::cerr << "error: cannot estimate the signature tables: " << ex.what() << "\n";
         return 1;
     }
+
+    // A dry run's own command line, minus its sizing flags, for recommendations to extend.
+    std::string command = "julenny-toolkit crypto psi-estimate --records " + std::to_string(args.records);
+    if (args.peer_records > 0) command += " --peer-records " + std::to_string(args.peer_records);
+    command += " --context-spec " + spec->id;
+    if (args.target_overflow != 1e-6) command += " --target-overflow " + format_double(args.target_overflow);
+    if (args.on_overflow != "fail") command += " --on-overflow " + args.on_overflow;
+    if (args.peer_tables > 0) command += " --peer-tables " + std::to_string(args.peer_tables);
+    if (args.emit_json) command += " --json";
 
     // The approximate variant (design §3.7): FNV-1a-64 mod 16384, one indicator per record.
     const double approx_false_matches = static_cast<double>(e.records) * static_cast<double>(e.peer_records) / 16384.0;
@@ -1245,7 +1446,9 @@ int run_crypto_psi_estimate(const CryptoPsiEstimateArgs& args) {
         for (const auto& row : sensitivity) rows.push_back(estimate_row_json(row));
         out["limbSensitivity"] = rows;
         out["approximateVariant"] = { { "contextSpec", "bfv-default-v1" },
-                                      { "expectedFalseMatches", approx_false_matches } };
+                                      { "expectedFalseMatches", approx_false_matches },
+                                      { "accuracy", finding_json(approximate, command) } };
+        out["accuracy"] = advice_json(advice, args.accept_degraded_accuracy, command);
 
         out["framing"] = { { "ciphertextBytes", req.context.ciphertext_bytes() },
                            { "archiveFixedBytes", req.context.archive_fixed_bytes },
@@ -1259,7 +1462,7 @@ int run_crypto_psi_estimate(const CryptoPsiEstimateArgs& args) {
                               { "timeP90Sec", "wall time needs the engine's thread budget and hardware (E4)" },
                               { "credits", "pricing lives on the platform (E4)" } };
         json warnings = json::array();
-        for (const auto& w : e.warnings) warnings.push_back(w.message);
+        for (const auto& f : advice.findings) warnings.push_back(f.message);
         out["warnings"] = warnings;
         std::cout << out.dump(2) << "\n";
         return 0;
@@ -1300,7 +1503,12 @@ int run_crypto_psi_estimate(const CryptoPsiEstimateArgs& args) {
         std::cout << "  Storage:      " << (headroom >= 0 ? "fits" : "DOES NOT FIT") << " the quota ("
                   << headroom << " bytes of headroom after this upload)\n";
     }
-    for (const auto& w : e.warnings) std::cout << "  warning: " << w.message << "\n";
+    if (approximate.severity == psi::Severity::acknowledge) {
+        std::cout << "  WARNING [" << psi::issue_code(approximate.issue) << "]: " << approximate.message << "\n";
+    }
+    std::cout << "  Verdict:      " << psi::verdict_name(advice.verdict(args.accept_degraded_accuracy))
+              << " (as crypto encrypt would judge these parameters, from the model)\n";
+    print_advice(advice, args.accept_degraded_accuracy, command, std::cout);
     return 0;
 }
 
@@ -3364,6 +3572,11 @@ void register_crypto(CLI::App& app,
     encrypt->add_option("--domain-separator", encrypt_args.domain_separator,
                         "signature-table: hashed in front of every record; both parties must match "
                         "(default: the function-def's, else 'julenny-psi-v1')");
+    encrypt->add_flag  ("--accept-degraded-accuracy", encrypt_args.accept_degraded_accuracy,
+                        "signature-table: encode even though the parameters degrade the answer (dropped "
+                        "records, material false matches, a count that can wrap). Without it the encoder "
+                        "stops before encrypting, exit 3, with the numbers and a verified fix. It never "
+                        "overrides the 1 % drop floor");
     encrypt->add_option("--context-spec", encrypt_args.context_spec,
                         "Crypto context spec override (default: read from function-def in mode A, "
                         "or 'bfv-default-v1' in mode B)");
@@ -3396,6 +3609,10 @@ void register_crypto(CLI::App& app,
     psi_estimate->add_option("--shards", psi_estimate_args.shards, "As crypto encrypt (only 1 is implemented)");
     psi_estimate->add_option("--target-overflow", psi_estimate_args.target_overflow,
                              "As crypto encrypt (default 1e-6)");
+    psi_estimate->add_option("--on-overflow", psi_estimate_args.on_overflow,
+                             "As crypto encrypt (default 'fail'): under 'drop', expected drops need acknowledging");
+    psi_estimate->add_flag  ("--accept-degraded-accuracy", psi_estimate_args.accept_degraded_accuracy,
+                             "As crypto encrypt: report the verdict with the acknowledgement given");
     psi_estimate->add_option("--storage-quota-bytes", psi_estimate_args.storage_quota_bytes,
                              "Your plan's storage quota, to check this upload fits (0 = no limit)");
     psi_estimate->add_option("--storage-used-bytes", psi_estimate_args.storage_used_bytes,

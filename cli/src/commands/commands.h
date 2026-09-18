@@ -115,6 +115,8 @@ struct CryptoEncryptArgs {
     double        target_overflow = 1e-6;   // expected dropped records / records
     std::string   on_overflow = "fail";     // "fail" or "drop"
     std::string   domain_separator;         // hashed in front of every record; both parties must match
+    // Design §3.9: accuracy problems short of the 1 % drop floor are refused until acknowledged.
+    bool          accept_degraded_accuracy = false;
 
     std::string context_spec;          // optional override; if empty, read from function-def or default
     bool emit_json = false;
@@ -136,6 +138,8 @@ struct CryptoPsiEstimateArgs {
     std::uint64_t count_groups = 0;
     std::uint64_t shards = 1;               // > 1 is step F1
     double        target_overflow = 1e-6;
+    std::string   on_overflow = "fail";     // as crypto encrypt: decides whether expected drops need acknowledging
+    bool          accept_degraded_accuracy = false;  // report the verdict as the encoder would reach it
     std::int64_t  storage_quota_bytes = -1; // -1 = unknown; 0 = no limit, as the platform treats it
     std::uint64_t storage_used_bytes = 0;
     bool emit_json = false;

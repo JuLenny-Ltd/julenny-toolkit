@@ -13,6 +13,7 @@ set(FHE_TOOLKIT_CORE_SOURCES
     src/psi/reference.cpp
     src/psi/solver.cpp
     src/psi/bundle.cpp
+    src/psi/advice.cpp
 )
 
 if(FHE_TOOLKIT_USE_OPENFHE)

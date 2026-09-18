@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <bit>
 #include <cmath>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <tuple>
@@ -19,6 +20,14 @@ constexpr unsigned max_levels_tied = 4096;     // the bundle header's TABLES cei
 constexpr double   drop_rate_floor = 0x1p-40;   // drop rates below this tie (decided 2026-09-17)
 
 std::uint64_t ceil_div(std::uint64_t a, std::uint64_t b) { return (a + b - 1) / b; }
+
+// Three significant digits: a group of 0.122 records must not read as "~0".
+std::string three_digits(double v) {
+    std::ostringstream out;
+    out.precision(3);
+    out << v;
+    return out.str();
+}
 
 unsigned floor_log2(std::uint64_t power_of_two) {
     return static_cast<unsigned>(std::bit_width(power_of_two) - 1);
@@ -56,6 +65,20 @@ std::uint64_t bundle_ciphertexts(std::uint64_t levels, std::uint64_t cells, std:
     return ceil_div(positions, slots) * limbs;
 }
 
+}  // namespace
+
+std::uint64_t ContextCost::ciphertext_bytes() const {
+    return 2 * slots * towers * 8;
+}
+
+std::uint64_t ContextCost::archive_bytes(std::uint64_t ciphertexts, std::uint64_t header_bytes) const {
+    return header_bytes + archive_fixed_bytes + ciphertexts * (ciphertext_bytes() + archived_ciphertext_extra);
+}
+
+std::uint64_t ContextCost::single_ciphertext_file_bytes() const {
+    return ciphertext_bytes() + single_ciphertext_extra;
+}
+
 // Partial sums the count must be split into so no group can reach t. A group
 // holds at most the records the smaller side placed in it, so the bound is per
 // group on that side; 4x headroom absorbs the spread around the mean, and each
@@ -79,20 +102,6 @@ unsigned smallest_levels(std::uint64_t records, std::uint64_t cells_total, doubl
         if (expected_dropped_records(records, cells_total, levels) <= budget) return levels;
     }
     return 0;
-}
-
-}  // namespace
-
-std::uint64_t ContextCost::ciphertext_bytes() const {
-    return 2 * slots * towers * 8;
-}
-
-std::uint64_t ContextCost::archive_bytes(std::uint64_t ciphertexts, std::uint64_t header_bytes) const {
-    return header_bytes + archive_fixed_bytes + ciphertexts * (ciphertext_bytes() + archived_ciphertext_extra);
-}
-
-std::uint64_t ContextCost::single_ciphertext_file_bytes() const {
-    return ciphertext_bytes() + single_ciphertext_extra;
 }
 
 TableParams Plan::table_params() const {
@@ -224,7 +233,7 @@ Estimate estimate(const Request& r, const Plan& p) {
             "the count comes back as " + std::to_string(e.count_groups)
             + " partial sums rather than one number, because a single sum cannot exceed 65536. "
               "Each partial sum says how many matches fell among the ~"
-            + std::to_string(std::llround(e.count_records_per_group))
+            + three_digits(e.count_records_per_group)
             + " records you placed in that group of cells, so the other party learns the "
               "intersection's spread across " + std::to_string(e.count_groups)
             + " groups, not only its size." });
@@ -232,7 +241,7 @@ Estimate estimate(const Request& r, const Plan& p) {
     if (e.count_exceeds_modulus) {
         e.warnings.push_back({ WarningCode::count_not_representable,
             "even at " + std::to_string(e.count_groups) + " partial sums, a group can hold ~"
-            + std::to_string(std::llround(e.count_records_per_group))
+            + three_digits(e.count_records_per_group)
             + " records against a per-sum ceiling of 65536, so the count can overflow and be "
               "reported wrongly. Use fewer records per execution, or shard the job further." });
     }

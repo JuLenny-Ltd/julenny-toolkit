@@ -168,6 +168,16 @@ Estimate estimate(const Request& r, const Plan& p);
 // can meet the request (e.g. a signature wider than max_limbs can carry).
 Estimate solve(const Request& r);
 
+// Smallest T whose expected drop rate at `cells_total` meets `target`, or 0 if
+// none does within the solver's search range (T <= 256).
+unsigned smallest_levels(std::uint64_t records, std::uint64_t cells_total, double target);
+
+// Partial sums the count must be split into so no group can reach t: the
+// smallest power of two leaving at most 16 384 of the smaller side's records per
+// group (4x headroom on the mean), capped at the slot count and the shard's cells.
+std::uint64_t count_groups_for(std::uint64_t smaller_side, std::uint64_t cells_per_shard,
+                               std::uint64_t slots);
+
 // Dynamic T: the fullest cell's size at `probability`, under the Poisson model -
 // the smallest T with P(every cell holds at most T records) >= probability.
 unsigned likely_fullest_cell(std::uint64_t records, std::uint64_t cells, double probability);
