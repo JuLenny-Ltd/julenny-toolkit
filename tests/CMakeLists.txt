@@ -5,6 +5,7 @@ set(FHE_TOOLKIT_TEST_SOURCES
     registry/canonical_json_test.cpp
     registry/envelope_test.cpp
     registry/signature_test.cpp
+    registry/psi_definition_test.cpp
     psi/digest_test.cpp
     psi/table_test.cpp
     psi/reference_test.cpp

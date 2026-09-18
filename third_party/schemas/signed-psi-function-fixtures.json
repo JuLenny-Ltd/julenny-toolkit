@@ -1,0 +1,171 @@
+{
+  "_comment": "Signed exact-PSI function definitions, for cross-language verification of the toolkit's fail-closed check (step E1). Same wire format as signed-function-fixture.json.",
+  "_testKey": "Deterministic test key = sha256('julenny-psi-function-fixture-v1'). NOT the registry key: a definition signed with it is refused by a production toolkit, whose registry key is pinned in the binary.",
+  "_fingerprintNote": "`family` and `variant` are catalog metadata and are OUTSIDE the signed fingerprint, so editing them cannot invalidate a live grant. `cryptoContextSpec`, `inputs` (with schemaParams) and the `opsHash` commitment ARE inside it, so the exact variant's context, encoding and circuit are all bound.",
+  "publicKeyHex": "d35e6ba73474cd20e2c94d2590238f915ee9ea9badeaa0b41b168761f038d11c",
+  "privateKeyHex": "53ba214b894026802e3393e9df698d61b9c45e6b17312ef1e2b0b0ce22f9add8",
+  "definitions": [
+    {
+      "slug": "joint-record-overlap-exact-count",
+      "signedFunctionDefinition": {
+        "name": "Joint Record Overlap — Exact (Count)",
+        "slug": "joint-record-overlap-exact-count",
+        "description": "Two parties privately count how many records they have in common, EXACTLY: every shared record is counted once, and records that are not shared are never counted. Each party hashes its records to a 256-bit digest, places them in associative signature tables, and encrypts the tables under the joint key. The platform compares every table position homomorphically with an exact equality test and sums the matches, so the answer does not depend on two different records landing in the same slot. Unlike the approximate variant, the false-match probability is set by the signature width (2^-128 by default), not by the slot count. The cost is size: the encrypted tables are far larger than an indicator vector, and both parties must encode with the same table parameters, which are pinned on the grant. The result comes back as a set of partial sums that add up to the count, because one BFV slot cannot hold a number above 65536. Neither party learns which records matched; each learns the other's table parameters, which imply a rounded upper bound on their record count, and their reported drop rate.",
+        "category": "Data Collaboration",
+        "family": "Joint Record Overlap",
+        "variant": "exact",
+        "version": "1.0.0",
+        "status": "draft",
+        "scheme": "BFV",
+        "cryptoContextSpec": "bfv-exact-psi-v1",
+        "engine": "openfhe-cpu",
+        "engineProfile": {
+          "expectedSlots": 32768,
+          "expectedDepth": 19
+        },
+        "inputs": [
+          {
+            "name": "dataset_a",
+            "role": "dataOwner",
+            "encoding": "sha256-signature-table",
+            "layout": "signature-table-bundle",
+            "schema": "signature-table",
+            "schemaParams": {
+              "domainSeparator": "julenny-psi-v1",
+              "hash": "sha256",
+              "separator": ",",
+              "skipHeader": true,
+              "columns": "all",
+              "notes": "This input's position in `inputs` decides the party's role: the first is A (empty cells hold signature 0), the second is B (empty cells hold signature 1). The two sentinels differ, so an empty cell can never match. Table sizing (cells, tables, limbs, countGroups) is pinned per grant, identical for both parties."
+            }
+          },
+          {
+            "name": "dataset_b",
+            "role": "queryAnalyst",
+            "encoding": "sha256-signature-table",
+            "layout": "signature-table-bundle",
+            "schema": "signature-table",
+            "schemaParams": {
+              "domainSeparator": "julenny-psi-v1",
+              "hash": "sha256",
+              "separator": ",",
+              "skipHeader": true,
+              "columns": "all",
+              "notes": "The second input, so this party encodes as B. It must use the same domain separator and the same grant-pinned table parameters as dataset_a, or the two encodings are not comparable."
+            }
+          }
+        ],
+        "output": {
+          "name": "overlap_count",
+          "layout": "packed-int-vector"
+        },
+        "requiredEvalKeys": [
+          "relinearization",
+          "sum"
+        ],
+        "opsHash": "364291c7665a13993092efc81584eef824846c8b094b914f546977f193d70d01",
+        "registry": {
+          "publishedAt": "2026-09-18T00:00:00.000Z",
+          "publishedBy": "platform-registry-test-key",
+          "signature": "ps3k6QU/mFe7pW0+R9Q151Fq8F8LiAWZ6Jvgi8nfVuCQnoWl7EQeFdtv12nQlhRUwCCoT3IU8COW0XbE3641AQ=="
+        }
+      },
+      "verification": {
+        "canonicalBytesHex": "7b2263727970746f436f6e7465787453706563223a226266762d65786163742d7073692d7631222c22696e70757473223a5b7b22656e636f64696e67223a227368613235362d7369676e61747572652d7461626c65222c226c61796f7574223a227369676e61747572652d7461626c652d62756e646c65222c226e616d65223a22646174617365745f61222c22726f6c65223a22646174614f776e6572222c22736368656d61223a227369676e61747572652d7461626c65222c22736368656d61506172616d73223a7b22636f6c756d6e73223a22616c6c222c22646f6d61696e536570617261746f72223a226a756c656e6e792d7073692d7631222c2268617368223a22736861323536222c226e6f746573223a225468697320696e707574277320706f736974696f6e20696e2060696e7075747360206465636964657320746865207061727479277320726f6c653a2074686520666972737420697320412028656d7074792063656c6c7320686f6c64207369676e61747572652030292c20746865207365636f6e6420697320422028656d7074792063656c6c7320686f6c64207369676e61747572652031292e205468652074776f2073656e74696e656c73206469666665722c20736f20616e20656d7074792063656c6c2063616e206e65766572206d617463682e205461626c652073697a696e67202863656c6c732c207461626c65732c206c696d62732c20636f756e7447726f757073292069732070696e6e656420706572206772616e742c206964656e746963616c20666f7220626f746820706172746965732e222c22736570617261746f72223a222c222c22736b6970486561646572223a747275657d7d2c7b22656e636f64696e67223a227368613235362d7369676e61747572652d7461626c65222c226c61796f7574223a227369676e61747572652d7461626c652d62756e646c65222c226e616d65223a22646174617365745f62222c22726f6c65223a227175657279416e616c797374222c22736368656d61223a227369676e61747572652d7461626c65222c22736368656d61506172616d73223a7b22636f6c756d6e73223a22616c6c222c22646f6d61696e536570617261746f72223a226a756c656e6e792d7073692d7631222c2268617368223a22736861323536222c226e6f746573223a22546865207365636f6e6420696e7075742c20736f207468697320706172747920656e636f64657320617320422e204974206d75737420757365207468652073616d6520646f6d61696e20736570617261746f7220616e64207468652073616d65206772616e742d70696e6e6564207461626c6520706172616d657465727320617320646174617365745f612c206f72207468652074776f20656e636f64696e677320617265206e6f7420636f6d70617261626c652e222c22736570617261746f72223a222c222c22736b6970486561646572223a747275657d7d5d2c226f707348617368223a2233363432393163373636356131333939333039326566633831353834656566383234383436633862303934623931346635343639373766313933643730643031222c226f7574707574223a7b226c61796f7574223a227061636b65642d696e742d766563746f72222c226e616d65223a226f7665726c61705f636f756e74227d2c2272657175697265644576616c4b657973223a5b2272656c696e656172697a6174696f6e222c2273756d225d2c22736368656d65223a22424656222c22736c7567223a226a6f696e742d7265636f72642d6f7665726c61702d65786163742d636f756e74222c2276657273696f6e223a22312e302e30227d",
+        "canonicalBytesUtf8": "{\"cryptoContextSpec\":\"bfv-exact-psi-v1\",\"inputs\":[{\"encoding\":\"sha256-signature-table\",\"layout\":\"signature-table-bundle\",\"name\":\"dataset_a\",\"role\":\"dataOwner\",\"schema\":\"signature-table\",\"schemaParams\":{\"columns\":\"all\",\"domainSeparator\":\"julenny-psi-v1\",\"hash\":\"sha256\",\"notes\":\"This input's position in `inputs` decides the party's role: the first is A (empty cells hold signature 0), the second is B (empty cells hold signature 1). The two sentinels differ, so an empty cell can never match. Table sizing (cells, tables, limbs, countGroups) is pinned per grant, identical for both parties.\",\"separator\":\",\",\"skipHeader\":true}},{\"encoding\":\"sha256-signature-table\",\"layout\":\"signature-table-bundle\",\"name\":\"dataset_b\",\"role\":\"queryAnalyst\",\"schema\":\"signature-table\",\"schemaParams\":{\"columns\":\"all\",\"domainSeparator\":\"julenny-psi-v1\",\"hash\":\"sha256\",\"notes\":\"The second input, so this party encodes as B. It must use the same domain separator and the same grant-pinned table parameters as dataset_a, or the two encodings are not comparable.\",\"separator\":\",\",\"skipHeader\":true}}],\"opsHash\":\"364291c7665a13993092efc81584eef824846c8b094b914f546977f193d70d01\",\"output\":{\"layout\":\"packed-int-vector\",\"name\":\"overlap_count\"},\"requiredEvalKeys\":[\"relinearization\",\"sum\"],\"scheme\":\"BFV\",\"slug\":\"joint-record-overlap-exact-count\",\"version\":\"1.0.0\"}",
+        "signatureHex": "a6cde4e9053f9857bba56d3e47d435e7516af05f0b880599e89be08bc9df56e0909e85a5ec441e15db6fd769d0961454c020a84f7214f02396d176c4dfae3501",
+        "signatureBase64": "ps3k6QU/mFe7pW0+R9Q151Fq8F8LiAWZ6Jvgi8nfVuCQnoWl7EQeFdtv12nQlhRUwCCoT3IU8COW0XbE3641AQ==",
+        "expectedVerifyResult": true
+      }
+    },
+    {
+      "slug": "joint-record-overlap-exact-itemized",
+      "signedFunctionDefinition": {
+        "name": "Joint Record Overlap — Exact (Itemized)",
+        "slug": "joint-record-overlap-exact-itemized",
+        "description": "Two parties privately identify which specific records they share, EXACTLY: a record is marked only if the other party really holds it, and every shared record is marked. Each party hashes its records to a 256-bit digest, places them in associative signature tables, and encrypts the tables under the joint key; the platform compares every table position with an exact equality test and returns one indicator per table position, in the viewing party's own layout. The viewer decrypts, after the other party approves release, and recomputes its own placement to map the marked positions back to its records — the result never names a record, only a position in the viewer's own table. Unlike the approximate variant, a mark is not produced by two different records sharing a slot: the false-match probability is set by the signature width (2^-128 by default). The cost is size: both the encrypted tables and the result are far larger than an indicator vector, and the other party has to partially decrypt a result they did not ask for. Both parties must encode with the same table parameters, which are pinned on the grant.",
+        "category": "Data Collaboration",
+        "family": "Joint Record Overlap",
+        "variant": "exact",
+        "version": "1.0.0",
+        "status": "draft",
+        "scheme": "BFV",
+        "cryptoContextSpec": "bfv-exact-psi-v1",
+        "engine": "openfhe-cpu",
+        "engineProfile": {
+          "expectedSlots": 32768,
+          "expectedDepth": 19
+        },
+        "inputs": [
+          {
+            "name": "dataset_a",
+            "role": "dataOwner",
+            "encoding": "sha256-signature-table",
+            "layout": "signature-table-bundle",
+            "schema": "signature-table",
+            "schemaParams": {
+              "domainSeparator": "julenny-psi-v1",
+              "hash": "sha256",
+              "separator": ",",
+              "skipHeader": true,
+              "columns": "all",
+              "notes": "This input's position in `inputs` decides the party's role: the first is A (empty cells hold signature 0), the second is B (empty cells hold signature 1). Table sizing (cells, tables, limbs, countGroups) is pinned per grant, identical for both parties."
+            }
+          },
+          {
+            "name": "dataset_b",
+            "role": "queryAnalyst",
+            "encoding": "sha256-signature-table",
+            "layout": "signature-table-bundle",
+            "schema": "signature-table",
+            "schemaParams": {
+              "domainSeparator": "julenny-psi-v1",
+              "hash": "sha256",
+              "separator": ",",
+              "skipHeader": true,
+              "columns": "all",
+              "notes": "The second input, so this party encodes as B. It must use the same domain separator and the same grant-pinned table parameters as dataset_a, or the two encodings are not comparable."
+            }
+          },
+          {
+            "name": "viewer",
+            "role": "queryAnalyst",
+            "encoding": "plaintext-party-tag",
+            "layout": "party-tag",
+            "schema": "raw-slots",
+            "schemaParams": {
+              "owner": "queryAnalyst",
+              "shareWith": [
+                "dataOwner"
+              ],
+              "mediaType": "text/plain",
+              "purpose": "Which party the itemized result is released to, and therefore whose table layout it comes back in: the single ASCII letter A or B, matching the role of dataset_a (A) or dataset_b (B). It is public to both parties by construction - the result has to be decrypted in someone's layout, and the other party partially decrypts it - so it travels as plaintext and is never part of anyone's secret input.",
+              "normalization": "exactly one character, A or B, optionally surrounded by whitespace; anything else is refused before the circuit runs"
+            }
+          }
+        ],
+        "output": {
+          "name": "overlap_indicators",
+          "layout": "signature-table-indicator-bundle"
+        },
+        "requiredEvalKeys": [
+          "relinearization",
+          "sum"
+        ],
+        "opsHash": "3a4b91fcdbfbc0d87073e5b6752c1cde50a1eb1329d7d688420209eb69ce4f36",
+        "registry": {
+          "publishedAt": "2026-09-18T00:00:00.000Z",
+          "publishedBy": "platform-registry-test-key",
+          "signature": "TuUvCC/COjdJBJtO4ajvbWzIhPfX/jKYJXNHWbJARtwanOZ9eGk6HW71vdG/toPdPhiN9vIvUmYLcR7kJHzqDw=="
+        }
+      },
+      "verification": {
+        "canonicalBytesHex": "7b2263727970746f436f6e7465787453706563223a226266762d65786163742d7073692d7631222c22696e70757473223a5b7b22656e636f64696e67223a227368613235362d7369676e61747572652d7461626c65222c226c61796f7574223a227369676e61747572652d7461626c652d62756e646c65222c226e616d65223a22646174617365745f61222c22726f6c65223a22646174614f776e6572222c22736368656d61223a227369676e61747572652d7461626c65222c22736368656d61506172616d73223a7b22636f6c756d6e73223a22616c6c222c22646f6d61696e536570617261746f72223a226a756c656e6e792d7073692d7631222c2268617368223a22736861323536222c226e6f746573223a225468697320696e707574277320706f736974696f6e20696e2060696e7075747360206465636964657320746865207061727479277320726f6c653a2074686520666972737420697320412028656d7074792063656c6c7320686f6c64207369676e61747572652030292c20746865207365636f6e6420697320422028656d7074792063656c6c7320686f6c64207369676e61747572652031292e205461626c652073697a696e67202863656c6c732c207461626c65732c206c696d62732c20636f756e7447726f757073292069732070696e6e656420706572206772616e742c206964656e746963616c20666f7220626f746820706172746965732e222c22736570617261746f72223a222c222c22736b6970486561646572223a747275657d7d2c7b22656e636f64696e67223a227368613235362d7369676e61747572652d7461626c65222c226c61796f7574223a227369676e61747572652d7461626c652d62756e646c65222c226e616d65223a22646174617365745f62222c22726f6c65223a227175657279416e616c797374222c22736368656d61223a227369676e61747572652d7461626c65222c22736368656d61506172616d73223a7b22636f6c756d6e73223a22616c6c222c22646f6d61696e536570617261746f72223a226a756c656e6e792d7073692d7631222c2268617368223a22736861323536222c226e6f746573223a22546865207365636f6e6420696e7075742c20736f207468697320706172747920656e636f64657320617320422e204974206d75737420757365207468652073616d6520646f6d61696e20736570617261746f7220616e64207468652073616d65206772616e742d70696e6e6564207461626c6520706172616d657465727320617320646174617365745f612c206f72207468652074776f20656e636f64696e677320617265206e6f7420636f6d70617261626c652e222c22736570617261746f72223a222c222c22736b6970486561646572223a747275657d7d2c7b22656e636f64696e67223a22706c61696e746578742d70617274792d746167222c226c61796f7574223a2270617274792d746167222c226e616d65223a22766965776572222c22726f6c65223a227175657279416e616c797374222c22736368656d61223a227261772d736c6f7473222c22736368656d61506172616d73223a7b226d6564696154797065223a22746578742f706c61696e222c226e6f726d616c697a6174696f6e223a2265786163746c79206f6e65206368617261637465722c2041206f7220422c206f7074696f6e616c6c7920737572726f756e64656420627920776869746573706163653b20616e797468696e6720656c73652069732072656675736564206265666f72652074686520636972637569742072756e73222c226f776e6572223a227175657279416e616c797374222c22707572706f7365223a22576869636820706172747920746865206974656d697a656420726573756c742069732072656c656173656420746f2c20616e64207468657265666f72652077686f7365207461626c65206c61796f757420697420636f6d6573206261636b20696e3a207468652073696e676c65204153434949206c65747465722041206f7220422c206d61746368696e672074686520726f6c65206f6620646174617365745f6120284129206f7220646174617365745f62202842292e204974206973207075626c696320746f20626f7468207061727469657320627920636f6e737472756374696f6e202d2074686520726573756c742068617320746f2062652064656372797074656420696e20736f6d656f6e652773206c61796f75742c20616e6420746865206f74686572207061727479207061727469616c6c79206465637279707473206974202d20736f2069742074726176656c7320617320706c61696e7465787420616e64206973206e657665722070617274206f6620616e796f6e6527732073656372657420696e7075742e222c22736861726557697468223a5b22646174614f776e6572225d7d7d5d2c226f707348617368223a2233613462393166636462666263306438373037336535623637353263316364653530613165623133323964376436383834323032303965623639636534663336222c226f7574707574223a7b226c61796f7574223a227369676e61747572652d7461626c652d696e64696361746f722d62756e646c65222c226e616d65223a226f7665726c61705f696e64696361746f7273227d2c2272657175697265644576616c4b657973223a5b2272656c696e656172697a6174696f6e222c2273756d225d2c22736368656d65223a22424656222c22736c7567223a226a6f696e742d7265636f72642d6f7665726c61702d65786163742d6974656d697a6564222c2276657273696f6e223a22312e302e30227d",
+        "canonicalBytesUtf8": "{\"cryptoContextSpec\":\"bfv-exact-psi-v1\",\"inputs\":[{\"encoding\":\"sha256-signature-table\",\"layout\":\"signature-table-bundle\",\"name\":\"dataset_a\",\"role\":\"dataOwner\",\"schema\":\"signature-table\",\"schemaParams\":{\"columns\":\"all\",\"domainSeparator\":\"julenny-psi-v1\",\"hash\":\"sha256\",\"notes\":\"This input's position in `inputs` decides the party's role: the first is A (empty cells hold signature 0), the second is B (empty cells hold signature 1). Table sizing (cells, tables, limbs, countGroups) is pinned per grant, identical for both parties.\",\"separator\":\",\",\"skipHeader\":true}},{\"encoding\":\"sha256-signature-table\",\"layout\":\"signature-table-bundle\",\"name\":\"dataset_b\",\"role\":\"queryAnalyst\",\"schema\":\"signature-table\",\"schemaParams\":{\"columns\":\"all\",\"domainSeparator\":\"julenny-psi-v1\",\"hash\":\"sha256\",\"notes\":\"The second input, so this party encodes as B. It must use the same domain separator and the same grant-pinned table parameters as dataset_a, or the two encodings are not comparable.\",\"separator\":\",\",\"skipHeader\":true}},{\"encoding\":\"plaintext-party-tag\",\"layout\":\"party-tag\",\"name\":\"viewer\",\"role\":\"queryAnalyst\",\"schema\":\"raw-slots\",\"schemaParams\":{\"mediaType\":\"text/plain\",\"normalization\":\"exactly one character, A or B, optionally surrounded by whitespace; anything else is refused before the circuit runs\",\"owner\":\"queryAnalyst\",\"purpose\":\"Which party the itemized result is released to, and therefore whose table layout it comes back in: the single ASCII letter A or B, matching the role of dataset_a (A) or dataset_b (B). It is public to both parties by construction - the result has to be decrypted in someone's layout, and the other party partially decrypts it - so it travels as plaintext and is never part of anyone's secret input.\",\"shareWith\":[\"dataOwner\"]}}],\"opsHash\":\"3a4b91fcdbfbc0d87073e5b6752c1cde50a1eb1329d7d688420209eb69ce4f36\",\"output\":{\"layout\":\"signature-table-indicator-bundle\",\"name\":\"overlap_indicators\"},\"requiredEvalKeys\":[\"relinearization\",\"sum\"],\"scheme\":\"BFV\",\"slug\":\"joint-record-overlap-exact-itemized\",\"version\":\"1.0.0\"}",
+        "signatureHex": "4ee52f082fc23a3749049b4ee1a8ef6d6cc884f7d7fe329825734759b24046dc1a9ce67d78693a1d6ef5bdd1bfb683dd3e188df6f22f52660b711ee4247cea0f",
+        "signatureBase64": "TuUvCC/COjdJBJtO4ajvbWzIhPfX/jKYJXNHWbJARtwanOZ9eGk6HW71vdG/toPdPhiN9vIvUmYLcR7kJHzqDw==",
+        "expectedVerifyResult": true
+      }
+    }
+  ]
+}
