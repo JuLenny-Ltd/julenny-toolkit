@@ -880,6 +880,21 @@ function Get-JlResultVisibility {
     return $vis
 }
 
+# "dataOwner" -> "data owner", for anything shown to a human.
+#
+# Reads the property defensively: under Set-StrictMode 2.0, touching a property the API
+# did not send is a terminating error, and both fields are optional on older records.
+function Get-JlSideLabel {
+    param($Obj, [string] $Property)
+    if ($null -eq $Obj) { return '?' }
+    if (-not (Test-JlHasProperty $Obj $Property)) { return '?' }
+    switch ($Obj.$Property) {
+        'dataOwner'    { return 'data owner' }
+        'dataConsumer' { return 'data consumer' }
+        default        { return '?' }
+    }
+}
+
 # The viewer downloads the encrypted result plus the peer's partial and runs the
 # final combine. The releaser produces a partial and never sees plaintext.
 function Test-JlAmViewer {
@@ -2050,9 +2065,16 @@ function Invoke-JlInitSession {
         Write-Host ""
         if ($perms.Count -gt 0) {
             Write-JlInfo "Permissions under this collaboration:"
+            # A collaboration holds permissions pointing in BOTH directions, and the list
+            # gave no clue which was which: the data role is decided per permission, not
+            # per collaboration. The platform already answers it as `yourRole`; it was
+            # simply never printed. Field order matches the bash twin.
             for ($i = 0; $i -lt $perms.Count; $i++) {
-                Write-Host ("  [{0}] {1}  |  {2} v{3}  |  keysetup: {4}" -f `
-                    ($i + 1), $perms[$i].id, $perms[$i].fheFunction, $perms[$i].functionVersion, $perms[$i].keysetupState)
+                Write-Host ("  [{0}] {1} v{2}  |  you: {3}  |  result to: {4}  |  keysetup: {5}  |  id: {6}" -f `
+                    ($i + 1), $perms[$i].fheFunction, $perms[$i].functionVersion,
+                    (Get-JlSideLabel $perms[$i] 'yourRole'),
+                    (Get-JlSideLabel $perms[$i] 'resultVisibility'),
+                    $perms[$i].keysetupState, $perms[$i].id)
             }
         } else {
             Write-JlInfo "No permissions found under this collaboration."

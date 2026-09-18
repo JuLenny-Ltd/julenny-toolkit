@@ -322,8 +322,13 @@ else
     echo
     if (( PERMISSION_COUNT > 0 )); then
         info "Active permissions in this collaboration (newest first):"
+        # A collaboration holds permissions pointing in BOTH directions, and the list gives
+        # no clue which is which without this: the data role is decided per permission, not
+        # per collaboration. The platform already answers it as `yourRole`; it was simply
+        # never printed.
         echo "$PERMISSIONS_JSON" \
-            | jq -r 'to_entries[] | "  [\(.key + 1)] \(.value.fheFunction) v\(.value.functionVersion // "?")  |  execs left: \(.value.remainingExecutions // "?")/\(.value.allowedExecutions // "?")  |  scheme: \(.value.cryptoContextSpec // "?")  |  created \(.value.createdAt // "?" | .[0:10])  |  id: \(.value.id)"'
+            | jq -r 'def side(r): if r == "dataOwner" then "data owner" elif r == "dataConsumer" then "data consumer" else "?" end;
+                     to_entries[] | "  [\(.key + 1)] \(.value.fheFunction) v\(.value.functionVersion // "?")  |  you: \(side(.value.yourRole))  |  result to: \(side(.value.resultVisibility))  |  execs left: \(.value.remainingExecutions // "?")/\(.value.allowedExecutions // "?")  |  scheme: \(.value.cryptoContextSpec // "?")  |  created \(.value.createdAt // "?" | .[0:10])  |  id: \(.value.id)"'
     else
         info "No active permissions found under this collaboration."
     fi
