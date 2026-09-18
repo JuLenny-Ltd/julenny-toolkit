@@ -260,7 +260,7 @@ struct CryptoResolveRulesArgs {
 //
 // Changed in 0.5.5 from the original dictionary-position derivation when
 // rule-based-cross-match's encoding contract switched to fnv1a hashing (see
-// plans/dual-compatibility-indicator-encoding-mismatch.md). Pure local;
+// plans/rule-based-cross-match-indicator-encoding-mismatch.md). Pure local;
 // no network, no FHE crypto. Slot count is derived from --context-spec
 // (ckks-default-v1 -> 8192).
 struct CryptoDeriveRotationIndicesArgs {
