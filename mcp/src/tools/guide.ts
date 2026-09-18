@@ -291,9 +291,11 @@ export function registerGuideTools(server: McpServer, api: JulennyApiClient) {
             + 'A key left over from an earlier index set looks identical to a current one on disk.';
           const actions = missingMine.map(i => {
             const bundle = i.layout === 'encrypted-bundle' && i.encodingRecipe;
+            // upload takes inputName: naming it here is what stops the dataset being
+            // offered for every other input later, on both sides.
             const steps = bundle
-              ? `encode_recipe -> encrypt -> upload -> declare_input_dataset`
-              : `encrypt (or upload as-is if plaintext) -> upload -> declare_input_dataset`;
+              ? `encode_recipe -> encrypt -> upload(inputName='${i.name}') -> declare_input_dataset`
+              : `encrypt (or upload as-is if plaintext) -> upload(inputName='${i.name}') -> declare_input_dataset`;
             return `input '${i.name}' (layout ${i.layout || 'n/a'}): ${steps}`;
           });
           // Hash-matched inputs need one question answered before anything is encrypted,

@@ -230,6 +230,7 @@ export function registerPipelineTools(server: McpServer, api: JulennyApiClient) 
       description: z.string().optional().describe('Optional dataset description'),
       permissionId: z.string().optional().describe('Permission id to scope the upload to'),
       projectId: z.string().optional().describe('Project id to scope the upload to'),
+      inputName: z.string().optional().describe('The function-def input this file was encrypted for (e.g. dataset_a). Pass it whenever you know it: it tags the dataset so pickers offer it for THIS input only. A dataset with no tag is offered for EVERY input, on both sides.'),
       kind: z.string().optional().describe('Dataset kind tag (e.g. "ciphertext", "plaintext")'),
       retentionDays: z.number().int().positive().optional().describe('Retention window in days'),
     },
@@ -251,6 +252,11 @@ export function registerPipelineTools(server: McpServer, api: JulennyApiClient) 
           if (p.description) form.append('description', p.description);
           if (p.permissionId) form.append('permissionId', p.permissionId);
           if (p.projectId) form.append('projectId', p.projectId);
+          // Tags the dataset with the slot it was encrypted for. The bash and PowerShell
+          // clients both send it; the connector had no way to, so everything it uploaded
+          // arrived untagged - and an untagged dataset is deliberately offered for every
+          // input, by both dataset endpoints.
+          if (p.inputName) form.append('inputName', p.inputName);
           if (p.kind) form.append('kind', p.kind);
           if (p.retentionDays !== undefined) form.append('retentionDays', String(p.retentionDays));
           const data = await api.postMultipart('/api/fhe-data-upload', form) as Record<string, unknown>;
@@ -278,6 +284,7 @@ export function registerPipelineTools(server: McpServer, api: JulennyApiClient) 
         };
         if (p.permissionId) confirmBody.permissionId = p.permissionId;
         if (p.projectId) confirmBody.projectId = p.projectId;
+        if (p.inputName) confirmBody.inputName = p.inputName;
         const confirmResp = await api.post('/api/fhe-data-upload/confirm', confirmBody) as Record<string, unknown>;
         const finalId = (confirmResp.datasetId as string) || datasetId;
         // Carry the column choice made at encrypt time across to the dataset id the
