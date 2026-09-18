@@ -341,10 +341,16 @@ for ((i = 0; i < MY_INPUT_COUNT; i++)); do
             UPLOAD_SIZE="$(stat -c%s "$CIPHERTEXT")"
             if (( UPLOAD_SIZE < JL_INLINE_THRESHOLD_BYTES )); then
                 info "Uploading to /api/fhe-data-upload (single-shot, ${UPLOAD_SIZE} bytes)..."
+                # inputName records which slot this ciphertext was encrypted for, so the
+                # picker offers it for THAT input. The PowerShell twin and
+                # upload_plaintext_dataset both send it; this one call site did not, so
+                # every ciphertext uploaded from bash arrived untagged - and an untagged
+                # dataset is deliberately offered for every input, by both endpoints.
                 UPLOAD_RESP="$(curl -sS -X POST \
                     -H "x-api-key: $JULENNY_API_KEY" \
                     -F "file=@$CIPHERTEXT" \
                     -F "name=$DATASET_NAME" \
+                    -F "inputName=$INPUT_NAME" \
                     "$JULENNY_API_BASE/api/fhe-data-upload?permissionId=$JULENNY_PERMISSION_ID")"
                 if echo "$UPLOAD_RESP" | jq -e '.error' > /dev/null 2>&1; then
                     err "Dataset upload failed:"
@@ -375,7 +381,8 @@ for ((i = 0; i < MY_INPUT_COUNT; i++)); do
                     -H "Content-Type: application/json" \
                     --data-binary "$(jq -n --arg id "$PICKED_ID" --arg n "$DATASET_NAME" \
                         --arg f "$(basename "$CIPHERTEXT")" --arg p "$JULENNY_PERMISSION_ID" \
-                        '{datasetId: $id, name: $n, kind: "ciphertext", fileName: $f, permissionId: $p, retentionDays: 90}')")"
+                        --arg in "$INPUT_NAME" \
+                        '{datasetId: $id, name: $n, kind: "ciphertext", fileName: $f, permissionId: $p, inputName: $in, retentionDays: 90}')")"
                 if echo "$CONFIRM_RESP" | jq -e '.error' > /dev/null 2>&1; then
                     err "Dataset confirm failed:"
                     echo "$CONFIRM_RESP" | jq . >&2
