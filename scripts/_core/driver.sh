@@ -117,7 +117,7 @@ pin_next_undecrypted_execution() {
     for id in $(echo "$resp" | jq -r '.executions[]?.id'); do
         if [[ ! -f "$JL_KEYS_DIR/my-partial-$id.bin" \
               && ! -f "$JL_KEYS_DIR/releaser-partial-$id.bin" ]]; then
-            echo "$id" > "$JL_WORKDIR/last_exec_id"
+            echo "$id" > "$(jl_exec_marker)"
             return 0
         fi
     done

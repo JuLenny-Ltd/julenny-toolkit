@@ -204,7 +204,7 @@ success "Execution triggered. ID: $EXEC_ID"
 
 # Persist this cycle's execution id so the viewer flow (06-end-of-cycle) waits for
 # THIS execution to be released instead of offering older released ones.
-echo "$EXEC_ID" > "$JL_WORKDIR/last_exec_id"
+echo "$EXEC_ID" > "$(jl_exec_marker)"
 
 # -------- Poll until awaiting-release --------
 info "Polling for execution to complete..."

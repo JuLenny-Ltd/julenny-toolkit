@@ -115,7 +115,7 @@ function Set-JlNextUndecryptedExecution {
         $mine     = Join-Path $script:JL_KEYS_DIR "my-partial-$($e.id).bin"
         $released = Join-Path $script:JL_KEYS_DIR "releaser-partial-$($e.id).bin"
         if ((-not (Test-Path -LiteralPath $mine)) -and (-not (Test-Path -LiteralPath $released))) {
-            Set-Content -LiteralPath (Join-Path $script:JL_WORKDIR 'last_exec_id') -Value $e.id -Encoding ascii
+            Set-Content -LiteralPath (Get-JlExecMarkerPath) -Value $e.id -Encoding ascii
             return $true
         }
     }

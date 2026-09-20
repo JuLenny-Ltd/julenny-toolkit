@@ -301,6 +301,19 @@ wait_msg() {
 #
 # JL_SCENARIO overrides it, for a function whose name falls outside the convention.
 # Prints nothing before 00-init has fetched the function definition.
+# The cycle marker: which execution THIS permission is currently waiting on.
+#
+# Keyed by permission, because JL_WORKDIR is the COLLABORATION directory and a
+# collaboration holds many permissions. A single shared marker meant a brand-new
+# permission read the previous permission's execution id: on 2026-09-20 a fresh
+# permission with no executions at all waited for one belonging to another, fetched
+# its result, and was stopped only by a 403 on the partial. Had this machine been the
+# viewer on that stale execution instead of the releaser, it would have combined it and
+# printed the previous permission's answer as this cycle's result.
+jl_exec_marker() {
+    echo "$JL_WORKDIR/last_exec_id.$JULENNY_PERMISSION_ID"
+}
+
 jl_scenario() {
     if [[ -n "${JL_SCENARIO:-}" ]]; then printf '%s' "$JL_SCENARIO"; return 0; fi
     local fn_def="$JL_WORKDIR/function-def.json" slug=""
@@ -1668,13 +1681,27 @@ viewer_flow() {
     # 1. Find the execution to decrypt.
     #
     # If THIS machine just triggered an execution, 05-run-query persisted its
-    # id in $JL_WORKDIR/last_exec_id. In that case wait for that specific
+    # id in the per-permission cycle marker (jl_exec_marker). Wait for that specific
     # execution to be released, rather than offering older released ones
     # (decrypting a stale execution was an easy operator mistake). Without a
     # marker, fall back to the released-executions picker, which supports
     # 'r' to refresh the list while the releaser side catches up.
     local want_exec=""
-    [[ -f "$JL_WORKDIR/last_exec_id" ]] && want_exec="$(cat "$JL_WORKDIR/last_exec_id")"
+    local marker; marker="$(jl_exec_marker)"
+    [[ -f "$marker" ]] && want_exec="$(cat "$marker")"
+
+    # Belt and braces: a marker can still go stale within one permission when a cycle
+    # aborts. The execution document names its own permission, so check rather than trust.
+    if [[ -n "$want_exec" ]]; then
+        local mark_doc mark_perm
+        mark_doc="$(curl_jl GET "/api/executions/$want_exec" 2>/dev/null || echo '{}')"
+        mark_perm="$(echo "$mark_doc" | jq -r '.permissionId // empty')"
+        if [[ -n "$mark_perm" && "$mark_perm" != "$JULENNY_PERMISSION_ID" ]]; then
+            warn "Ignoring a cycle marker for execution $want_exec; it belongs to permission $mark_perm, not this one."
+            rm -f "$marker"
+            want_exec=""
+        fi
+    fi
 
     local elapsed=0 delay=5
     local list_resp count exec_id="" exec_when=""
@@ -1694,14 +1721,14 @@ viewer_flow() {
                 released)
                     exec_id="$want_exec"
                     exec_when="$(echo "$want_doc" | jq -r '.releasedAt // .triggeredAt // "unknown date"')"
-                    rm -f "$JL_WORKDIR/last_exec_id"
+                    rm -f "$marker"
                     success "This cycle's execution is released: $exec_id ($exec_when)"
                     break
                     ;;
                 failed)
                     warn "Execution $want_exec failed; falling back to the released-executions picker."
                     echo "$want_doc" | jq . >&2
-                    rm -f "$JL_WORKDIR/last_exec_id"
+                    rm -f "$marker"
                     want_exec=""
                     continue
                     ;;

@@ -880,6 +880,19 @@ function Get-JlResultVisibility {
     return $vis
 }
 
+# The cycle marker: which execution THIS permission is currently waiting on.
+#
+# Keyed by permission, because JL_WORKDIR is the COLLABORATION directory and a
+# collaboration holds many permissions. A single shared marker meant a brand-new
+# permission read the previous permission's execution id: on 2026-09-20 a fresh
+# permission with no executions at all waited for one belonging to another, fetched its
+# result, and was stopped only by a 403 on the partial. Had this machine been the viewer
+# on that stale execution rather than the releaser, it would have combined it and printed
+# the previous permission's answer as this cycle's result. Twin of jl_exec_marker.
+function Get-JlExecMarkerPath {
+    return (Join-Path $script:JL_WORKDIR "last_exec_id.$($script:JULENNY_PERMISSION_ID)")
+}
+
 # "dataOwner" -> "data owner", for anything shown to a human.
 #
 # Reads the property defensively: under Set-StrictMode 2.0, touching a property the API
@@ -3220,10 +3233,22 @@ function Invoke-JlViewerFlow {
     # If THIS machine just triggered an execution, 05-run-query persisted its id.
     # Wait for that specific execution rather than offering older released ones:
     # decrypting a stale execution is an easy mistake to make.
-    $lastExecFile = Join-Path $script:JL_WORKDIR 'last_exec_id'
+    $lastExecFile = Get-JlExecMarkerPath
     $wantExec = ''
     if (Test-Path -LiteralPath $lastExecFile) {
         $wantExec = ([System.IO.File]::ReadAllText($lastExecFile)).Trim()
+    }
+
+    # Belt and braces: a marker can still go stale within one permission when a cycle
+    # aborts. The execution document names its own permission, so check rather than trust.
+    if ($wantExec) {
+        $markDoc = Invoke-JlApi GET "/api/executions/$wantExec" -AllowFailure
+        if ($null -ne $markDoc -and (Test-JlHasProperty $markDoc 'permissionId') `
+                -and $markDoc.permissionId -ne $script:JULENNY_PERMISSION_ID) {
+            Write-JlWarn "Ignoring a cycle marker for execution $wantExec; it belongs to permission $($markDoc.permissionId), not this one."
+            Remove-Item -LiteralPath $lastExecFile -Force -ErrorAction SilentlyContinue
+            $wantExec = ''
+        }
     }
 
     $elapsed = 0

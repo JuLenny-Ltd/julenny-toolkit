@@ -243,7 +243,7 @@ Write-JlSuccess "Execution triggered. ID: $execId"
 # Persist this cycle's execution id so the viewer flow (06-end-of-cycle) waits for
 # THIS execution rather than offering older released ones.
 $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
-[System.IO.File]::WriteAllText((Join-Path $script:JL_WORKDIR 'last_exec_id'), $execId, $utf8NoBom)
+[System.IO.File]::WriteAllText((Get-JlExecMarkerPath), $execId, $utf8NoBom)
 
 # -------- Poll until the computation is done --------
 Write-JlInfo "Polling for execution to complete..."
