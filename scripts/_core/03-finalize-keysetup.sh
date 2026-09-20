@@ -221,17 +221,25 @@ info "  joint_public_key: $JOINT_PK_SHA"
 [[ "$NEEDS_SUM" == "yes" ]] && info "  eval_sum_key:     $SUM_SHA"
 
 # -------- 4. Request upload URLs, PUT each blob to object storage --------
+# Ask before uploading. These keys belong to the COLLABORATION and never change, so a
+# second permission in the same collaboration was re-sending identical bytes - about
+# 154 MB across the two parties once a 77 MB sum key is involved. Sending the digest
+# lets the platform answer "already stored" with the object it holds, and the PUT is
+# skipped. An EMPTY url in the returned "url|key" pair means exactly that.
 request_final_key_upload_url() {
     local key_type="$1"
-    local resp
-    resp="$(curl_jl POST "/api/fhe-permissions/$JULENNY_PERMISSION_ID/keysetup/final-keys/upload-url" \
-        -H "Content-Type: application/json" \
-        --data-binary "$(jq -n --arg t "$key_type" '{keyType: $t}')")"
-    local url key
-    url="$(echo "$resp" | jq -r '.uploadUrl // empty')"
+    local sha="${2:-}"
+    local payload resp url key
+    payload="$(jq -n --arg t "$key_type" --arg s "$sha" '{keyType: $t} + (if $s == "" then {} else {sha256Hex: $s} end)')"
+    resp="$(curl_jl POST "/api/fhe-permissions/$JULENNY_PERMISSION_ID/keysetup/final-keys/upload-url" -H "Content-Type: application/json" --data-binary "$payload")"
     key="$(echo "$resp" | jq -r '.objectKey // empty')"
-    [[ -n "$url" && -n "$key" ]] \
-        || die "upload-url for $key_type failed: $resp"
+    if [[ "$(echo "$resp" | jq -r '.alreadyStored // false')" == "true" ]]; then
+        [[ -n "$key" ]] || die "upload-url said alreadyStored for $key_type but returned no objectKey: $resp"
+        echo "|${key}"
+        return 0
+    fi
+    url="$(echo "$resp" | jq -r '.uploadUrl // empty')"
+    [[ -n "$url" && -n "$key" ]] || die "upload-url for $key_type failed: $resp"
     echo "${url}|${key}"
 }
 
@@ -248,34 +256,46 @@ put_blob_to_storage() {
 }
 
 info "Requesting upload URLs (3 keyTypes)..."
-JPK_URL_AND_KEY="$(request_final_key_upload_url joint_public_key)"
+JPK_URL_AND_KEY="$(request_final_key_upload_url joint_public_key "$JOINT_PK_SHA")"
 JPK_URL="${JPK_URL_AND_KEY%|*}"
 JPK_OBJ="${JPK_URL_AND_KEY#*|}"
 
 REL_OBJ=""
 if [[ "$NEEDS_RELIN" == "yes" ]]; then
-    REL_URL_AND_KEY="$(request_final_key_upload_url joint_relin_key)"
+    REL_URL_AND_KEY="$(request_final_key_upload_url joint_relin_key "$RELIN_SHA")"
     REL_URL="${REL_URL_AND_KEY%|*}"
     REL_OBJ="${REL_URL_AND_KEY#*|}"
 fi
 
 SUM_OBJ=""
 if [[ "$NEEDS_SUM" == "yes" ]]; then
-    SUM_URL_AND_KEY="$(request_final_key_upload_url eval_sum_key)"
+    SUM_URL_AND_KEY="$(request_final_key_upload_url eval_sum_key "$SUM_SHA")"
     SUM_URL="${SUM_URL_AND_KEY%|*}"
     SUM_OBJ="${SUM_URL_AND_KEY#*|}"
 fi
 
-info "Uploading the three final keys to object storage..."
-put_blob_to_storage "$JPK_URL" "$JOINT_PK"
-success "  joint_public_key -> $JPK_OBJ"
+info "Uploading the final keys (skipping any this collaboration already holds)..."
+if [[ -n "$JPK_URL" ]]; then
+    put_blob_to_storage "$JPK_URL" "$JOINT_PK"
+    success "  joint_public_key -> $JPK_OBJ"
+else
+    info "  joint_public_key already held by this collaboration; not uploaded again."
+fi
 if [[ "$NEEDS_RELIN" == "yes" ]]; then
-    put_blob_to_storage "$REL_URL" "$FINAL_RELIN"
-    success "  joint_relin_key  -> $REL_OBJ"
+    if [[ -n "$REL_URL" ]]; then
+        put_blob_to_storage "$REL_URL" "$FINAL_RELIN"
+        success "  joint_relin_key  -> $REL_OBJ"
+    else
+        info "  joint_relin_key already held by this collaboration; not uploaded again."
+    fi
 fi
 if [[ "$NEEDS_SUM" == "yes" ]]; then
-    put_blob_to_storage "$SUM_URL" "$FINAL_SUM"
-    success "  eval_sum_key     -> $SUM_OBJ"
+    if [[ -n "$SUM_URL" ]]; then
+        put_blob_to_storage "$SUM_URL" "$FINAL_SUM"
+        success "  eval_sum_key     -> $SUM_OBJ"
+    else
+        info "  eval_sum_key already held by this collaboration; not uploaded again."
+    fi
 fi
 
 # -------- 5. Build to-sign JSON (mimics web UI's emitted file) --------

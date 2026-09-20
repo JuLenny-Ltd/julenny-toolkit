@@ -2628,20 +2628,39 @@ function Invoke-JlEncryptAndUploadInputs {
 # "mine first". Both sides must produce byte-identical keys, because the
 # platform compares their SHA-256 hashes to decide the keysetup is sound.
 
+# Ask before uploading. These keys belong to the COLLABORATION and never change, so a
+# second permission in the same collaboration was re-sending identical bytes - about
+# 154 MB across the two parties once a 77 MB sum key is involved. Sending the digest lets
+# the platform answer "already stored" with the object it holds, and the PUT is skipped.
+# An EMPTY UploadUrl in the returned pair means exactly that. Twin of
+# request_final_key_upload_url in 03-finalize-keysetup.sh.
 function Request-JlFinalKeyUploadUrl {
-    param([Parameter(Mandatory = $true)][string] $KeyType)
+    param(
+        [Parameter(Mandatory = $true)][string] $KeyType,
+        [string] $Sha256Hex = ''
+    )
+    $body = @{ keyType = $KeyType }
+    if ($Sha256Hex) { $body.sha256Hex = $Sha256Hex }
     $resp = Invoke-JlApi POST "/api/fhe-permissions/$($script:JULENNY_PERMISSION_ID)/keysetup/final-keys/upload-url" `
-                         -Body @{ keyType = $KeyType }
+                         -Body $body
     $url = ''
     $key = ''
+    $already = $false
     if ($resp) {
-        if ((Test-JlHasProperty $resp 'uploadUrl')) { $url = $resp.uploadUrl }
-        if ((Test-JlHasProperty $resp 'objectKey')) { $key = $resp.objectKey }
+        if ((Test-JlHasProperty $resp 'uploadUrl'))     { $url = $resp.uploadUrl }
+        if ((Test-JlHasProperty $resp 'objectKey'))     { $key = $resp.objectKey }
+        if ((Test-JlHasProperty $resp 'alreadyStored')) { $already = [bool] $resp.alreadyStored }
+    }
+    if ($already) {
+        if ([string]::IsNullOrWhiteSpace($key)) {
+            Stop-JlWithError "upload-url said alreadyStored for $KeyType but returned no objectKey."
+        }
+        return @{ UploadUrl = ''; ObjectKey = $key; AlreadyStored = $true }
     }
     if ([string]::IsNullOrWhiteSpace($url) -or [string]::IsNullOrWhiteSpace($key)) {
         Stop-JlWithError "upload-url for $KeyType did not return both an uploadUrl and an objectKey."
     }
-    return @{ UploadUrl = $url; ObjectKey = $key }
+    return @{ UploadUrl = $url; ObjectKey = $key; AlreadyStored = $false }
 }
 
 function Send-JlBlobToStorage {
@@ -2933,22 +2952,34 @@ function Invoke-JlFinalizeKeysetup {
 
     # -------- 4. Upload URLs, then PUT each blob --------
     Write-JlInfo "Requesting upload URLs..."
-    $jpkTarget = Request-JlFinalKeyUploadUrl 'joint_public_key'
+    $jpkTarget = Request-JlFinalKeyUploadUrl 'joint_public_key' -Sha256Hex $jointPkSha
     $relTarget = $null
-    if ($needsRelin) { $relTarget = Request-JlFinalKeyUploadUrl 'joint_relin_key' }
+    if ($needsRelin) { $relTarget = Request-JlFinalKeyUploadUrl 'joint_relin_key' -Sha256Hex $relinSha }
     $sumTarget = $null
-    if ($needsSum) { $sumTarget = Request-JlFinalKeyUploadUrl 'eval_sum_key' }
+    if ($needsSum) { $sumTarget = Request-JlFinalKeyUploadUrl 'eval_sum_key' -Sha256Hex $sumSha }
 
-    Write-JlInfo "Uploading the final keys to object storage..."
-    Send-JlBlobToStorage -Url $jpkTarget.UploadUrl -Path $jointPk
-    Write-JlSuccess "  joint_public_key -> $($jpkTarget.ObjectKey)"
+    Write-JlInfo "Uploading the final keys (skipping any this collaboration already holds)..."
+    if ($jpkTarget.UploadUrl) {
+        Send-JlBlobToStorage -Url $jpkTarget.UploadUrl -Path $jointPk
+        Write-JlSuccess "  joint_public_key -> $($jpkTarget.ObjectKey)"
+    } else {
+        Write-JlInfo "  joint_public_key already held by this collaboration; not uploaded again."
+    }
     if ($needsRelin) {
-        Send-JlBlobToStorage -Url $relTarget.UploadUrl -Path $finalRelin
-        Write-JlSuccess "  joint_relin_key  -> $($relTarget.ObjectKey)"
+        if ($relTarget.UploadUrl) {
+            Send-JlBlobToStorage -Url $relTarget.UploadUrl -Path $finalRelin
+            Write-JlSuccess "  joint_relin_key  -> $($relTarget.ObjectKey)"
+        } else {
+            Write-JlInfo "  joint_relin_key already held by this collaboration; not uploaded again."
+        }
     }
     if ($needsSum) {
-        Send-JlBlobToStorage -Url $sumTarget.UploadUrl -Path $finalSum
-        Write-JlSuccess "  eval_sum_key     -> $($sumTarget.ObjectKey)"
+        if ($sumTarget.UploadUrl) {
+            Send-JlBlobToStorage -Url $sumTarget.UploadUrl -Path $finalSum
+            Write-JlSuccess "  eval_sum_key     -> $($sumTarget.ObjectKey)"
+        } else {
+            Write-JlInfo "  eval_sum_key already held by this collaboration; not uploaded again."
+        }
     }
 
     # -------- 5. Build the to-sign JSON --------

@@ -643,7 +643,9 @@ export function registerPipelineTools(server: McpServer, api: JulennyApiClient) 
 
   // ---- publish_final_keys (auto: encrypted final key blobs) ----
   // Mirrors lead/03-finalize-keysetup.sh:
-  //   1. POST /keysetup/final-keys/upload-url  body {keyType}  -> {objectKey, uploadUrl}
+  //   1. POST /keysetup/final-keys/upload-url  body {keyType, sha256Hex}
+  //      -> {objectKey, uploadUrl}, or {objectKey, alreadyStored:true} when the
+  //      collaboration already holds that exact key and step 2 should be skipped
   //      (one per keyType: joint_public_key, joint_relin_key, eval_sum_key)
   //   2. PUT each key blob to its signed uploadUrl (no api key)
   //   3. POST /keysetup/final-keys  body = the SIGNED ENVELOPE produced by the
@@ -680,13 +682,26 @@ export function registerPipelineTools(server: McpServer, api: JulennyApiClient) 
             rs.on('end', () => resolve(h.digest('hex')));
             rs.on('error', reject);
           });
+          // Send the digest and let the platform say whether it already holds this key.
+          // These keys belong to the COLLABORATION and never change, so each new
+          // permission in one collaboration was re-sending identical bytes - the sum key
+          // alone is ~71MB. When the answer is alreadyStored there is nothing to upload
+          // and the existing object is registered instead.
           const urlResp = await api.post(
             `/api/fhe-permissions/${p.permissionId}/keysetup/final-keys/upload-url`,
-            { keyType: k.keyType },
+            { keyType: k.keyType, sha256Hex },
           ) as Record<string, unknown>;
           const uploadUrl = urlResp.uploadUrl as string | undefined;
           const objectKey = urlResp.objectKey as string | undefined;
-          if (!uploadUrl || !objectKey) {
+          const alreadyStored = urlResp.alreadyStored === true;
+          if (!objectKey) {
+            return fail(`upload-url for ${k.keyType} did not return an objectKey`);
+          }
+          if (alreadyStored) {
+            uploaded.push({ keyType: k.keyType, objectKey, sha256Hex });
+            continue;
+          }
+          if (!uploadUrl) {
             return fail(`upload-url for ${k.keyType} did not return uploadUrl + objectKey`);
           }
           await api.putSignedUrlFromFile(uploadUrl, keyPath);
