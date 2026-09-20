@@ -11,6 +11,7 @@ set(FHE_TOOLKIT_TEST_SOURCES
     psi/reference_test.cpp
     psi/solver_test.cpp
     psi/bundle_test.cpp
+    psi/shard_test.cpp
     psi/advice_test.cpp
 )
 

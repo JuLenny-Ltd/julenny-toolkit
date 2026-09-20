@@ -25,6 +25,33 @@
 //
 // Sentinel remapping of signatures that land on the reserved empty-cell values
 // is placement's job (psi/table), not this file's.
+//
+// SHARDING (design §2.7 item 1, step F1). Above ~10^6 records one table does not
+// fit in memory or in one upload, so the key space is split into P shards and
+// each is an independent PSI over ~n/P records. The split has to be a function
+// of the record alone - "shard p holds the records with h(x) mod P == p" - so
+// that both parties shard identically without exchanging anything.
+//
+// The bits it uses are NOT free. Taking the shard from the low log2(P) bits of
+// the address and then computing the in-shard cell as `address mod cells` would
+// leave every record of a shard agreeing on those low bits, collapsing the
+// shard's effective cell count from m to m/P and multiplying its collisions by
+// P - silently, since the encoding would still "work". So the position is SPLIT
+// rather than re-derived:
+//
+//   position  = address mod cells_total       log2(cells_total) bits
+//   shard     = position mod P                the low  log2(P) bits
+//   cell      = position div P                the high log2(cells_total/P) bits
+//
+// Shard and cell together reconstruct the position exactly, so the union of the
+// P sharded tables has the same occupancy - cell for cell, collision for
+// collision - as one unsharded table of cells_total cells. That is what makes a
+// sharded run and an unsharded run of the same data give the same number, and
+// what makes P = 1 identical to not sharding at all rather than merely similar.
+//
+// `shard = position mod P` is `address mod P` (P divides cells_total, both
+// powers of two), which is the design's wording; it is written in terms of the
+// position because that is the quantity whose bits must not be spent twice.
 
 #include <array>
 #include <cstddef>
@@ -58,6 +85,28 @@ std::uint32_t address(const Digest& d) noexcept;
 // address(d) mod cells. Throws std::invalid_argument unless `cells` is a power
 // of two in [1, 2^32].
 std::uint32_t position(const Digest& d, std::uint64_t cells);
+
+// Which shard this record belongs to: the low log2(shards) bits of its position,
+// which is `address(d) mod shards`. Throws std::invalid_argument unless `shards`
+// is a power of two in [1, 2^32].
+std::uint32_t shard_of(const Digest& d, std::uint64_t shards);
+
+// The cell this record takes inside its own shard: the remaining high bits of
+// its position, `position(d, cells_total) / shards`. A shard therefore holds
+// cells_total / shards cells. Throws std::invalid_argument unless both are
+// powers of two and `shards` divides `cells_total`.
+//
+// Invariant, checked by the tests:
+//   position(d, cells_total) == position_in_shard(d, cells_total, P) * P + shard_of(d, P)
+std::uint32_t position_in_shard(const Digest& d, std::uint64_t cells_total, std::uint64_t shards);
+
+// Split digests into `shards` buckets by shard_of, preserving order within each.
+// Done once for a whole dataset rather than filtering per shard, which would be
+// O(P * n); the buckets are then what each shard's table is built from. Because
+// the split is a function of the digest, duplicates land in the same bucket, so
+// deduping the buckets is the same as deduping the whole set.
+std::vector<std::vector<Digest>> partition_by_shard(const std::vector<Digest>& digests,
+                                                    std::uint64_t shards);
 
 // Limb j of the signature, digest[4+2j .. 6+2j) little-endian. Throws
 // std::out_of_range unless j < max_limbs.

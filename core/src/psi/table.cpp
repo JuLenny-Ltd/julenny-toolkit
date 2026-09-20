@@ -26,6 +26,19 @@ void validate(const TableParams& p) {
         throw std::invalid_argument("PSI table of " + std::to_string(p.levels) + " levels x "
                                     + std::to_string(p.cells) + " cells is not addressable");
     }
+    if (p.shards == 0 || !std::has_single_bit(p.shards)) {
+        throw std::invalid_argument("PSI shard count must be a power of two, got "
+                                    + std::to_string(p.shards));
+    }
+    if (p.shard >= p.shards) {
+        throw std::invalid_argument("PSI shard index " + std::to_string(p.shard)
+                                    + " is outside [0, " + std::to_string(p.shards) + ")");
+    }
+    if (p.shards > max_cells / p.cells) {
+        throw std::invalid_argument("PSI key space of " + std::to_string(p.shards) + " shards x "
+                                    + std::to_string(p.cells) + " cells exceeds the 2^32 the address "
+                                    "word can hold");
+    }
 }
 
 // True when the first `limbs` limbs of d spell a sentinel: 0 (all zero) or 1
@@ -126,6 +139,16 @@ std::uint64_t fullest_cell(std::vector<Digest> digests, std::uint64_t cells) {
     return fullest;
 }
 
+bool drop_floor_exceeded(std::uint64_t records, std::uint64_t dropped) noexcept {
+    return dropped * 100 > records * max_drop_percent;
+}
+
+std::string drop_floor_message(std::uint64_t records, std::uint64_t dropped) {
+    return "PSI table drop rate " + percent(dropped, records) + " (" + std::to_string(dropped)
+         + " of " + std::to_string(records) + " records) exceeds the "
+         + std::to_string(max_drop_percent) + " % ceiling. Re-encode with more cells or tables.";
+}
+
 Table build_table(std::vector<Digest> digests, const TableParams& params, Role role,
                   OverflowPolicy policy) {
     validate(params);
@@ -133,6 +156,15 @@ Table build_table(std::vector<Digest> digests, const TableParams& params, Role r
     t.params_ = params;
     t.role_ = role;
     PlacementReport& r = t.report_;
+
+    // Records of other shards are dropped here, before anything else, so the whole report describes
+    // THIS shard and `records == rows - duplicates` still holds for it. Filtering before deduping is
+    // equivalent to deduping first, because the shard is a function of the digest and duplicates
+    // therefore always land in the same shard. Handing the whole dataset to each of P shards is
+    // correct but O(P*n); psi::partition_by_shard is the cheap way.
+    if (params.shards > 1) {
+        std::erase_if(digests, [&](const Digest& d) { return shard_of(d, params.shards) != params.shard; });
+    }
     r.rows = digests.size();
     r.duplicates = dedupe(digests);  // also sorts: placement order is digest order
     r.records = digests.size();
@@ -141,10 +173,13 @@ Table build_table(std::vector<Digest> digests, const TableParams& params, Role r
     }
 
     const std::uint64_t cells = params.cells;
+    const std::uint64_t cells_total = cells * params.shards;
     t.occupant_.assign(static_cast<std::size_t>(params.levels * cells), Table::empty);
     std::vector<std::uint32_t> load(static_cast<std::size_t>(cells), 0);
     for (std::size_t i = 0; i < digests.size(); ++i) {
-        const std::uint32_t cell = position(digests[i], cells);
+        const std::uint32_t cell = params.shards == 1
+            ? position(digests[i], cells)
+            : position_in_shard(digests[i], cells_total, params.shards);
         const std::uint32_t level = load[cell]++;
         if (level < params.levels) {
             t.occupant_[level * cells + cell] = static_cast<std::uint32_t>(i);
@@ -170,12 +205,15 @@ Table build_table(std::vector<Digest> digests, const TableParams& params, Role r
                                 + "). Re-encode with more cells or tables.",
                             r);
     }
-    if (r.dropped * 100 > r.records * max_drop_percent) {
-        throw TableOverflow("PSI table drop rate " + percent(r.dropped, r.records) + " ("
-                                + std::to_string(r.dropped) + " of " + std::to_string(r.records)
-                                + " records) exceeds the " + std::to_string(max_drop_percent)
-                                + " % ceiling. Re-encode with more cells or tables.",
-                            r);
+    // The 1 % ceiling is a promise about the DATASET, and a shard is not a dataset: a shard holds
+    // n/P records in m/P cells, so its drop rate has the same mean as the whole but far more
+    // variance, and one unlucky shard can pass 1 % while the encoding as a whole is well under it.
+    // Refusing there would refuse an acceptable encoding for a reason the customer cannot see or
+    // act on - the shard count is chosen by the solver, not by them. So a sharded build defers the
+    // ceiling to the caller, which sums the shards and calls drop_floor_exceeded on the total.
+    // OverflowPolicy::fail is unaffected: "no record may be dropped" is per table and still is.
+    if (params.shards == 1 && drop_floor_exceeded(r.records, r.dropped)) {
+        throw TableOverflow(drop_floor_message(r.records, r.dropped), r);
     }
     return t;
 }

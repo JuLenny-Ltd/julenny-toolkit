@@ -80,6 +80,50 @@ std::uint32_t position(const Digest& d, std::uint64_t cells) {
     return static_cast<std::uint32_t>(address(d) & (cells - 1));
 }
 
+namespace {
+
+void validate_shards(std::uint64_t shards) {
+    if (shards == 0 || shards > max_cells || !std::has_single_bit(shards)) {
+        throw std::invalid_argument("PSI shard count must be a power of two in [1, 2^32], got "
+                                    + std::to_string(shards));
+    }
+}
+
+}  // namespace
+
+std::uint32_t shard_of(const Digest& d, std::uint64_t shards) {
+    validate_shards(shards);
+    return static_cast<std::uint32_t>(address(d) & (shards - 1));
+}
+
+std::uint32_t position_in_shard(const Digest& d, std::uint64_t cells_total, std::uint64_t shards) {
+    validate_shards(shards);
+    if (shards > cells_total) {
+        throw std::invalid_argument("PSI shard count " + std::to_string(shards)
+                                    + " cannot exceed the cell count " + std::to_string(cells_total)
+                                    + ": a shard would hold less than one cell");
+    }
+    // position() validates cells_total, and shards divides it because both are powers of two.
+    return position(d, cells_total) / static_cast<std::uint32_t>(shards);
+}
+
+std::vector<std::vector<Digest>> partition_by_shard(const std::vector<Digest>& digests,
+                                                    std::uint64_t shards) {
+    validate_shards(shards);
+    std::vector<std::vector<Digest>> buckets(static_cast<std::size_t>(shards));
+    if (shards == 1) {
+        buckets[0] = digests;
+        return buckets;
+    }
+    // Counted first so each bucket is allocated once: at 10^7 records over 2048 shards the
+    // reallocation churn of a naive push_back loop is the dominant cost of this function.
+    std::vector<std::size_t> counts(static_cast<std::size_t>(shards), 0);
+    for (const auto& d : digests) ++counts[shard_of(d, shards)];
+    for (std::size_t p = 0; p < buckets.size(); ++p) buckets[p].reserve(counts[p]);
+    for (const auto& d : digests) buckets[shard_of(d, shards)].push_back(d);
+    return buckets;
+}
+
 std::uint16_t limb(const Digest& d, unsigned j) {
     if (j >= max_limbs) {
         throw std::out_of_range("PSI limb index " + std::to_string(j) + " out of range (max "

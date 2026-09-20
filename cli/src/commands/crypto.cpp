@@ -7,6 +7,7 @@
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
+#include <iomanip>
 #include <iostream>
 #include <map>
 #include <memory>
@@ -781,13 +782,30 @@ int encrypt_bundle(const std::string& input_path,
 // the estimate describes the bundle the encoder will actually write rather than
 // one it could have written. The solver picks what the flags do not pin.
 //
-// One shard, always: the encoder cannot shard yet (F1), and the solver's shard
-// count is advisory. Handing it to the encoder would size one shard's table for
-// every record.
+// Sharding (step F1): `shards` pins P, 0 leaves the solver's choice. The cell
+// count is the WHOLE key space either way - a shard holds cells_total / P of it
+// - so pinning --cells and --shards together says "this many cells, split this
+// many ways", not "this many cells per shard". P must divide cells_total, and
+// never so far that a shard holds fewer cells than the solver's own floor.
 // ---------------------------------------------------------------------------
+// Splitting past one ciphertext of cells per shard is legal but wasteful, and the waste is not
+// obvious: every shard rounds its slot layout up to a whole ciphertext, so P shards of m/P cells
+// store P times the ciphertexts one table of m cells would. The solver never chooses it; a user who
+// pins --shards can, so say what it costs rather than refusing a choice that may be deliberate.
+static std::string shard_granularity_note(const fhe_toolkit::psi::Plan& plan, std::uint64_t slots) {
+    if (plan.shards <= 1 || plan.cells_per_shard() >= slots) return {};
+    return "note: " + std::to_string(plan.shards) + " shards of " + std::to_string(plan.cells_per_shard())
+         + " cells each are smaller than one ciphertext of " + std::to_string(slots)
+         + " slots, so every shard rounds up to a whole ciphertext and the upload is about "
+         + std::to_string(slots / plan.cells_per_shard()) + "x what "
+         + std::to_string(plan.cells_total) + " cells in one shard would cost. Use fewer shards, or "
+           "more cells, unless the split is what you are after.";
+}
+
 static fhe_toolkit::psi::Plan plan_signature_table(const fhe_toolkit::psi::Request& req,
                                                    std::uint64_t cells, unsigned tables,
-                                                   unsigned limbs, std::uint64_t count_groups) {
+                                                   unsigned limbs, std::uint64_t count_groups,
+                                                   std::uint64_t shards = 0) {
     namespace psi = fhe_toolkit::psi;
     psi::Plan plan;
     if (cells > 0 && tables > 0) {
@@ -800,7 +818,20 @@ static fhe_toolkit::psi::Plan plan_signature_table(const fhe_toolkit::psi::Reque
         if (tables > 0) plan.levels = tables;
         if (count_groups > 0) plan.count_groups = count_groups;
     }
-    plan.shards = 1;
+    if (shards > 0) plan.shards = shards;
+    if (plan.shards == 0 || (plan.shards & (plan.shards - 1)) != 0) {
+        throw std::invalid_argument("--shards must be a power of two, got " + std::to_string(plan.shards));
+    }
+    if (plan.cells_total % plan.shards != 0) {
+        throw std::invalid_argument("--shards " + std::to_string(plan.shards) + " does not divide the "
+                                    + std::to_string(plan.cells_total) + " cells; a shard must hold a whole "
+                                    "number of cells");
+    }
+    if (plan.count_groups > plan.cells_per_shard()) {
+        throw std::invalid_argument("--count-groups " + std::to_string(plan.count_groups)
+                                    + " cannot exceed the " + std::to_string(plan.cells_per_shard())
+                                    + " cells in one shard: a group is a residue class of a shard's cells");
+    }
     plan.limbs = limbs > 0 ? limbs : psi::limbs_for(req.signature_bits, plan.cells_total, req.context.max_limbs);
     return plan;
 }
@@ -965,10 +996,6 @@ static int encrypt_signature_table(const CryptoEncryptArgs& args,
         return 2;
     }
     const psi::Role role = role_str == "A" ? psi::Role::A : psi::Role::B;
-    if (args.shards > 1) {
-        std::cerr << "error: --shards " << args.shards << ": sharding is not implemented yet (step F1)\n";
-        return 2;
-    }
     psi::OverflowPolicy policy;
     if (args.on_overflow == "fail") policy = psi::OverflowPolicy::fail;
     else if (args.on_overflow == "drop") policy = psi::OverflowPolicy::drop;
@@ -1019,7 +1046,7 @@ static int encrypt_signature_table(const CryptoEncryptArgs& args,
             if (args.tables > 0) throw std::invalid_argument("--dynamic-tables and --tables are exclusive");
             req.per_level_only = true;
         }
-        plan = plan_signature_table(req, args.cells, args.tables, args.limbs, args.count_groups);
+        plan = plan_signature_table(req, args.cells, args.tables, args.limbs, args.count_groups, args.shards);
         solved_tables = plan.levels;
         if (args.dynamic_tables) {
             // Per-level only: a prealigned bundle lays its slots out by both parties' T.
@@ -1038,6 +1065,8 @@ static int encrypt_signature_table(const CryptoEncryptArgs& args,
         std::cerr << "error: cannot size the signature tables: " << e.what() << "\n";
         return 1;
     }
+    const std::string shard_note = shard_granularity_note(plan, static_cast<std::uint64_t>(slot_count));
+    if (!shard_note.empty() && !args.emit_json) std::cerr << shard_note << "\n";
 
     // Accuracy (design §3.9, step D4). The expected drop rate's 1 % floor is enforced before any
     // table is built; everything else is judged on what the table actually holds, below.
@@ -1065,10 +1094,27 @@ static int encrypt_signature_table(const CryptoEncryptArgs& args,
         return (*memo)[cells] = psi::fullest_cell(digests, cells);
     };
 
-    const psi::TableParams table_params = plan.table_params();
-    std::optional<psi::Table> table;
+    // One table per shard (step F1). The buckets are computed once - filtering the whole dataset P
+    // times would be O(P*n) - and every report is summed, because the accuracy promises are about
+    // the dataset, not about whichever shard a record happened to land in.
+    const std::uint64_t shard_count = plan.shards;
+    std::vector<psi::Table> tables;
+    psi::PlacementReport totals;
     try {
-        table.emplace(psi::build_table(digests, table_params, role, policy));
+        const auto buckets = psi::partition_by_shard(digests, shard_count);
+        tables.reserve(static_cast<std::size_t>(shard_count));
+        for (std::uint64_t p = 0; p < shard_count; ++p) {
+            tables.push_back(psi::build_table(buckets[p], plan.table_params(p), role, policy));
+            const auto& rep = tables.back().report();
+            totals.rows += rep.rows;
+            totals.duplicates += rep.duplicates;
+            totals.records += rep.records;
+            totals.placed += rep.placed;
+            totals.dropped += rep.dropped;
+            totals.overflowed_cells += rep.overflowed_cells;
+            totals.remapped += rep.remapped;
+            totals.cell_max_load = std::max(totals.cell_max_load, rep.cell_max_load);
+        }
     } catch (const psi::TableOverflow& e) {
         observed.records = e.report().records;
         observed.dropped = e.report().dropped;
@@ -1081,8 +1127,21 @@ static int encrypt_signature_table(const CryptoEncryptArgs& args,
         std::cerr << "error: cannot build the signature tables: " << e.what() << "\n";
         return 1;
     }
-    observed.records = table->report().records;
-    observed.dropped = table->report().dropped;
+    // The 1 % floor, on the dataset. build_table applies it itself only when unsharded, because a
+    // single shard's rate has far more variance than the whole and refusing on it would refuse an
+    // acceptable encoding (psi/table). Applied here so a sharded run is held to exactly the same
+    // promise as an unsharded one.
+    if (shard_count > 1 && psi::drop_floor_exceeded(totals.records, totals.dropped)) {
+        observed.records = totals.records;
+        observed.dropped = totals.dropped;
+        advice_options.observed = &observed;
+        const auto advice = psi::advise(req, estimate, advice_options);
+        std::cerr << "error: " << psi::drop_floor_message(totals.records, totals.dropped) << "\n";
+        print_advice(advice, false, command, std::cerr);
+        return 1;
+    }
+    observed.records = totals.records;
+    observed.dropped = totals.dropped;
     advice_options.observed = &observed;
     const auto advice = psi::advise(req, estimate, advice_options);
     const auto verdict = advice.verdict(args.accept_degraded_accuracy);
@@ -1106,7 +1165,8 @@ static int encrypt_signature_table(const CryptoEncryptArgs& args,
 
     psi::BundleLayout layout;
     try {
-        layout = psi::bundle_layout(table_params, plan.count_groups, static_cast<std::uint64_t>(slot_count));
+        layout = psi::bundle_layout(plan.table_params(0), plan.count_groups,
+                                    static_cast<std::uint64_t>(slot_count));
     } catch (const std::exception& e) {
         std::cerr << "error: " << e.what() << "\n";
         return 1;
@@ -1116,27 +1176,108 @@ static int encrypt_signature_table(const CryptoEncryptArgs& args,
     // a freshly built context embeds itself into the ciphertext, which is what the wrapper needs.
     auto pk_bytes = read_bytes(args.joint_public_key_path);
     auto pk = fhe_toolkit::crypto::PublicKey::deserialize(ctx, pk_bytes);
-    std::vector<fhe_toolkit::crypto::Ciphertext> cts;
-    cts.reserve(layout.ciphertexts);
-    std::vector<std::int64_t> slots(static_cast<std::size_t>(layout.slots));
-    for (std::uint64_t i = 0; i < layout.ciphertexts; ++i) {
-        psi::bundle_slots(*table, layout, i, std::span<std::int64_t>(slots));
-        cts.push_back(ctx.encrypt(pk, ctx.encode_packed(slots)));
-    }
-    const auto payload = ctx.serialize_ciphertext_vector(cts);
-    const std::string header = psi::bundle_header(layout, role);
 
+    // One file per shard. Unsharded runs write exactly the path they were given, byte for byte as
+    // before; a sharded run writes <output>.shard-NNNNN beside it plus <output>.manifest.json, so
+    // `ls <output>*` shows the whole dataset and nothing is hidden inside a surprise directory.
     const fs::path out_path(args.output_path);
     if (out_path.has_parent_path()) fs::create_directories(out_path.parent_path());
-    {
-        std::ofstream out(out_path, std::ios::binary | std::ios::trunc);
-        if (!out) { std::cerr << "error: cannot open for writing: " << out_path.string() << "\n"; return 1; }
-        out.write(header.data(), static_cast<std::streamsize>(header.size()));
-        out.write(reinterpret_cast<const char*>(payload.data()), static_cast<std::streamsize>(payload.size()));
-        if (!out) { std::cerr << "error: write failed: " << out_path.string() << "\n"; return 1; }
+    const auto shard_path = [&](std::uint64_t p) {
+        if (shard_count == 1) return out_path;
+        std::ostringstream name;
+        name << out_path.filename().string() << ".shard-" << std::setw(5) << std::setfill('0') << p;
+        return out_path.parent_path() / name.str();
+    };
+
+    std::uint64_t bytes = 0;
+    json shard_manifest = json::array();
+    std::vector<std::int64_t> slots(static_cast<std::size_t>(layout.slots));
+    for (std::uint64_t p = 0; p < shard_count; ++p) {
+        psi::BundleLayout shard_layout = layout;
+        shard_layout.shard = p;
+        std::vector<fhe_toolkit::crypto::Ciphertext> cts;
+        cts.reserve(shard_layout.ciphertexts);
+        for (std::uint64_t i = 0; i < shard_layout.ciphertexts; ++i) {
+            psi::bundle_slots(tables[p], shard_layout, i, std::span<std::int64_t>(slots));
+            cts.push_back(ctx.encrypt(pk, ctx.encode_packed(slots)));
+        }
+        const auto payload = ctx.serialize_ciphertext_vector(cts);
+        const std::string header = psi::bundle_header(shard_layout, role);
+        const fs::path path = shard_path(p);
+        {
+            std::ofstream out(path, std::ios::binary | std::ios::trunc);
+            if (!out) { std::cerr << "error: cannot open for writing: " << path.string() << "\n"; return 1; }
+            out.write(header.data(), static_cast<std::streamsize>(header.size()));
+            out.write(reinterpret_cast<const char*>(payload.data()), static_cast<std::streamsize>(payload.size()));
+            if (!out) { std::cerr << "error: write failed: " << path.string() << "\n"; return 1; }
+        }
+        const std::uint64_t shard_bytes = header.size() + payload.size();
+        bytes += shard_bytes;
+        if (shard_count > 1) {
+            // Hashed from the bytes just written rather than by re-reading the file: at 10^7 records
+            // the manifest would otherwise double the I/O of the whole encode.
+            std::string whole = header;
+            whole.append(reinterpret_cast<const char*>(payload.data()), payload.size());
+            const auto digest = psi::sha256(whole);
+            std::ostringstream hex;
+            for (const auto byte : digest) hex << std::hex << std::setw(2) << std::setfill('0')
+                                               << static_cast<unsigned>(byte);
+            const auto& rep = tables[p].report();
+            shard_manifest.push_back({
+                { "shard", p },
+                { "file", path.filename().string() },
+                { "bytes", shard_bytes },
+                { "ciphertexts", shard_layout.ciphertexts },
+                { "records", rep.records },
+                { "recordsDropped", rep.dropped },
+                { "cellMaxLoad", rep.cell_max_load },
+                { "sha256", hex.str() },
+            });
+        }
+        // Freed before the next shard is encrypted: at 10^7 records holding every shard's
+        // ciphertexts at once is the difference between fitting in memory and not.
+        cts.clear();
+        cts.shrink_to_fit();
     }
-    const std::uint64_t bytes = header.size() + payload.size();
-    const auto& report = table->report();
+
+    fs::path manifest_path;
+    if (shard_count > 1) {
+        // The shard manifest (design §2.7 item 4). It is what ties P files into one dataset: the
+        // parameters both parties must agree on, every shard's identity and checksum, and the
+        // dataset-wide record and drop counts the 1 % floor is judged on. A consumer that has this
+        // does not need to parse P bundle headers to know what it is holding.
+        json manifest;
+        manifest["schema"]          = "psi-shard-manifest v1";
+        manifest["role"]            = role_str;
+        manifest["contextSpec"]     = spec.id;
+        manifest["domainSeparator"] = domain;
+        manifest["slotCount"]       = slot_count;
+        manifest["cellsTotal"]      = plan.cells_total;
+        manifest["cellsPerShard"]   = plan.cells_per_shard();
+        manifest["shards"]          = shard_count;
+        manifest["tables"]          = layout.tables;
+        manifest["limbs"]           = layout.limbs;
+        manifest["countGroups"]     = layout.groups;
+        manifest["layout"]          = layout.layout_name();
+        manifest["records"]         = totals.records;
+        manifest["recordsDropped"]  = totals.dropped;
+        manifest["impliedDropRate"] = totals.drop_rate();
+        manifest["bytes"]           = bytes;
+        if (!fn_slug.empty()) {
+            manifest["functionSlug"]    = fn_slug;
+            manifest["functionVersion"] = fn_version;
+            manifest["inputName"]       = args.input_name;
+        }
+        if (!acknowledged_at.empty()) manifest["acknowledgedAt"] = acknowledged_at;
+        manifest["shardFiles"] = shard_manifest;
+        manifest_path = out_path.parent_path() / (out_path.filename().string() + ".manifest.json");
+        std::ofstream mf(manifest_path, std::ios::trunc);
+        if (!mf) { std::cerr << "error: cannot write the shard manifest: " << manifest_path.string() << "\n"; return 1; }
+        mf << manifest.dump(2) << "\n";
+        if (!mf) { std::cerr << "error: write failed: " << manifest_path.string() << "\n"; return 1; }
+    }
+
+    const psi::PlacementReport& report = totals;
 
     if (args.emit_json) {
         json out;
@@ -1172,10 +1313,19 @@ static int encrypt_signature_table(const CryptoEncryptArgs& args,
         out["remappedSignatures"]   = report.remapped;
         out["expectedDropRate"]     = estimate.expected_drop_rate;
         out["expectedFalseMatches"] = estimate.expected_false_matches;
-        out["chunks"]          = layout.chunks;
-        out["ciphertexts"]     = layout.ciphertexts;
+        out["chunks"]          = layout.chunks * shard_count;
+        out["ciphertexts"]     = layout.ciphertexts * shard_count;
         out["bytes"]           = bytes;
-        out["outputPath"]      = out_path.string();
+        out["shards"]          = shard_count;
+        out["cellsTotal"]      = plan.cells_total;
+        if (!shard_note.empty()) out["shardGranularityNote"] = shard_note;
+        if (shard_count > 1) {
+            out["outputPath"]   = shard_path(0).string();
+            out["manifestPath"] = manifest_path.string();
+            out["shardFiles"]   = shard_manifest;
+        } else {
+            out["outputPath"]  = out_path.string();
+        }
         // Recorded with the bundle so the acknowledgement can travel to the grant (design §3.9; E5).
         out["accuracy"] = advice_json(advice, args.accept_degraded_accuracy, command);
         if (!acknowledged_at.empty()) out["accuracy"]["acknowledgedAt"] = acknowledged_at;
@@ -1188,7 +1338,7 @@ static int encrypt_signature_table(const CryptoEncryptArgs& args,
         std::cout << "  Role:            " << role_str << " (empty cells hold this role's sentinel)\n";
         std::cout << "  Records read:    " << records_read << " (" << report.duplicates
                   << " repeated, counted once; " << lines_skipped << " lines skipped)\n";
-        std::cout << "  Table:           " << layout.cells << " cells x " << layout.tables
+        std::cout << "  Table:           " << plan.cells_total << " cells x " << layout.tables
                   << " tables, " << layout.limbs << " limbs of 16 bits"
                   << (args.dynamic_tables ? " (tables set by the data; the model expected "
                                                 + std::to_string(solved_tables) + ")" : "")
@@ -1198,14 +1348,23 @@ static int encrypt_signature_table(const CryptoEncryptArgs& args,
         std::cout << "  Fullest cell:    " << report.cell_max_load << " records ("
                   << report.overflowed_cells << " cells overflowed, " << report.dropped << " dropped, "
                   << report.drop_rate() * 100.0 << " %)\n";
-        std::cout << "  Bundle:          " << layout.ciphertexts << " ciphertexts, " << layout.chunks
-                  << " comparisons, " << layout.layout_name() << " layout, " << bytes << " bytes\n";
-        std::cout << "  Output:          " << out_path.string() << "\n";
+        std::cout << "  Bundle:          " << layout.ciphertexts * shard_count << " ciphertexts, "
+                  << layout.chunks * shard_count << " comparisons, " << layout.layout_name()
+                  << " layout, " << bytes << " bytes\n";
+        if (shard_count > 1) {
+            std::cout << "  Shards:          " << shard_count << " x " << plan.cells_per_shard()
+                      << " cells, " << layout.ciphertexts << " ciphertexts each\n";
+            std::cout << "  Output:          " << shard_path(0).string() << " .. "
+                      << shard_path(shard_count - 1).filename().string() << "\n";
+            std::cout << "  Manifest:        " << manifest_path.string() << "\n";
+        } else {
+            std::cout << "  Output:          " << out_path.string() << "\n";
+        }
         std::cout << "  Context:         " << spec.id << " (BFV, slots=" << slot_count
                   << ", t=" << spec.plaintext_modulus << ")\n";
         std::cout << (args.dynamic_tables
-                          ? "  The other party MUST encode with the same cells, limbs and groups (its tables may differ),\n"
-                          : "  The other party MUST encode with the same cells, tables, limbs and groups,\n");
+                          ? "  The other party MUST encode with the same cells, limbs, groups and shards (its tables may differ),\n"
+                          : "  The other party MUST encode with the same cells, tables, limbs, groups and shards,\n");
         std::cout << "  the opposite role, and the same domain separator '" << domain << "'.\n";
         print_advice(advice, args.accept_degraded_accuracy, command, std::cout);
     }
@@ -1296,10 +1455,6 @@ int run_crypto_psi_estimate(const CryptoPsiEstimateArgs& args) {
                   << spec->id << "' (" << spec->scheme << ", t = " << spec->plaintext_modulus << ")\n";
         return 2;
     }
-    if (args.shards > 1) {
-        std::cerr << "error: --shards " << args.shards << ": sharding is not implemented yet (step F1)\n";
-        return 2;
-    }
     if (args.records == 0) {
         std::cerr << "error: --records must be at least 1 (the encoder refuses an empty input)\n";
         return 2;
@@ -1329,7 +1484,7 @@ int run_crypto_psi_estimate(const CryptoPsiEstimateArgs& args) {
             req.per_level_only = true;
         }
         // Sized exactly as the encoder sizes: from this party's count alone.
-        plan = plan_signature_table(req, args.cells, args.tables, args.limbs, args.count_groups);
+        plan = plan_signature_table(req, args.cells, args.tables, args.limbs, args.count_groups, args.shards);
         if (args.dynamic_tables && plan.cells_total < static_cast<std::uint64_t>(slot_count)) {
             throw std::invalid_argument("--dynamic-tables needs at least " + std::to_string(slot_count)
                                         + " cells (per-level tables), not " + std::to_string(plan.cells_total));
@@ -1411,6 +1566,10 @@ int run_crypto_psi_estimate(const CryptoPsiEstimateArgs& args) {
         }
         out["limbs"]          = plan.limbs;
         out["shards"]         = plan.shards;
+        {
+            const auto note = shard_granularity_note(plan, static_cast<std::uint64_t>(slot_count));
+            if (!note.empty()) out["shardGranularityNote"] = note;
+        }
         out["countGroups"]    = plan.count_groups;
         out["layout"]         = e.prealigned ? "prealigned" : "per-level";
         out["signatureBits"]          = args.signature_bits;
@@ -1470,9 +1629,14 @@ int run_crypto_psi_estimate(const CryptoPsiEstimateArgs& args) {
 
     std::cout << "Dry run: signature-table for " << e.records << " records (peer " << e.peer_records
               << "), nothing encrypted or written.\n";
+    if (const auto note = shard_granularity_note(plan, static_cast<std::uint64_t>(slot_count)); !note.empty())
+        std::cout << "  " << note << "\n";
     std::cout << "  Table:        " << plan.cells_total << " cells x " << plan.levels << " tables, "
               << plan.limbs << " limbs, " << plan.count_groups << " count groups, "
-              << (e.prealigned ? "prealigned" : "per-level") << " layout\n";
+              << (e.prealigned ? "prealigned" : "per-level") << " layout"
+              << (plan.shards > 1 ? " (" + std::to_string(plan.shards) + " shards of "
+                                        + std::to_string(plan.cells_per_shard()) + " cells)" : "")
+              << "\n";
     if (args.dynamic_tables) {
         std::cout << "  Tables:       set by the data (--dynamic-tables): the fullest cell is likely " << likely_p50
                   << ", at most " << likely_p99 << " in 99 % of datasets (" << human_bytes(bytes_at_p99)
@@ -3561,7 +3725,8 @@ void register_crypto(CLI::App& app,
     encrypt->add_option("--count-groups", encrypt_args.count_groups,
                         "signature-table: partial sums the count comes back as (default: solved)");
     encrypt->add_option("--shards", encrypt_args.shards,
-                        "signature-table: number of shards (only 1 is implemented)");
+                        "signature-table: split the dataset into this many shards, a power of two dividing "
+                        "--cells (default: the solver's choice). Writes <output>.shard-NNNNN plus a manifest");
     encrypt->add_option("--capacity", encrypt_args.capacity,
                         "signature-table: size the tables for this many records (default: the ones read)");
     encrypt->add_option("--target-overflow", encrypt_args.target_overflow,
@@ -3606,7 +3771,7 @@ void register_crypto(CLI::App& app,
                              "As crypto encrypt (default: derived from --signature-bits)");
     psi_estimate->add_option("--count-groups", psi_estimate_args.count_groups,
                              "As crypto encrypt (default: solved)");
-    psi_estimate->add_option("--shards", psi_estimate_args.shards, "As crypto encrypt (only 1 is implemented)");
+    psi_estimate->add_option("--shards", psi_estimate_args.shards, "As crypto encrypt");
     psi_estimate->add_option("--target-overflow", psi_estimate_args.target_overflow,
                              "As crypto encrypt (default 1e-6)");
     psi_estimate->add_option("--on-overflow", psi_estimate_args.on_overflow,

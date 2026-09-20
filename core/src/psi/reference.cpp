@@ -42,6 +42,14 @@ void check_compatible(const Table& x, const Table& y) {
             "PSI tables are both the same party's: their empty cells share a sentinel and "
             "would all match each other");
     }
+    // Shard 3 against shard 7 would compare two disjoint slices of the key space and return a
+    // number - a small one, and a wrong one, with nothing to distinguish it from a true answer.
+    if (p.shards != q.shards || p.shard != q.shard) {
+        throw std::invalid_argument(
+            "PSI tables are different shards: " + std::to_string(p.shard) + " of "
+            + std::to_string(p.shards) + " vs " + std::to_string(q.shard) + " of "
+            + std::to_string(q.shards) + "; each shard is compared only with the same shard");
+    }
 }
 
 // Limb 0 of every level, row by row: the comparison loop streams these, and
@@ -129,6 +137,41 @@ CountResult reference_count(const Table& a, const Table& b, unsigned groups) {
         r.group_sums[g] = static_cast<std::uint32_t>(totals[g] % t);
     }
     return r;
+}
+
+CountResult reference_count_sharded(const std::vector<Table>& a, const std::vector<Table>& b,
+                                    unsigned groups) {
+    if (a.size() != b.size()) {
+        throw std::invalid_argument("PSI sharded count needs the same number of shards on both sides, got "
+                                    + std::to_string(a.size()) + " and " + std::to_string(b.size()));
+    }
+    if (a.empty()) throw std::invalid_argument("PSI sharded count needs at least one shard");
+
+    CountResult total;
+    total.groups = groups;
+    total.group_sums.assign(groups, 0);
+    // Integer totals first, exactly as the per-shard function does: a group that would wrap has to
+    // be visible rather than silently reduced, and it is the SUM over shards that can wrap even
+    // when no single shard does.
+    std::vector<std::uint64_t> group_totals(groups, 0);
+    for (std::size_t p = 0; p < a.size(); ++p) {
+        if (a[p].params().shard != p || a[p].params().shards != a.size()) {
+            throw std::invalid_argument("PSI sharded count: shard " + std::to_string(p)
+                                        + " is out of order or has the wrong shard count");
+        }
+        const CountResult shard = reference_count(a[p], b[p], groups);
+        // Cells are concatenated in shard order, which is the order the platform will aggregate
+        // them in; per_cell is kept whole so a caller can still locate a match.
+        total.per_cell.insert(total.per_cell.end(), shard.per_cell.begin(), shard.per_cell.end());
+        total.matches += shard.matches;
+        for (unsigned g = 0; g < groups; ++g) group_totals[g] += shard.group_sums[g];
+    }
+    total.count_mod_t = static_cast<std::uint32_t>(total.matches % t);
+    for (unsigned g = 0; g < groups; ++g) {
+        total.group_wrapped = total.group_wrapped || group_totals[g] >= t;
+        total.group_sums[g] = static_cast<std::uint32_t>(group_totals[g] % t);
+    }
+    return total;
 }
 
 std::uint64_t count_from_groups(const std::vector<std::uint32_t>& group_sums) {

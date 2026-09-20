@@ -104,11 +104,15 @@ unsigned smallest_levels(std::uint64_t records, std::uint64_t cells_total, doubl
     return 0;
 }
 
-TableParams Plan::table_params() const {
+TableParams Plan::table_params() const { return table_params(0); }
+
+TableParams Plan::table_params(std::uint64_t which_shard) const {
     TableParams p;
     p.cells = cells_per_shard();
     p.levels = levels;
     p.limbs = limbs;
+    p.shards = shards;
+    p.shard = which_shard;
     return p;
 }
 
@@ -191,6 +195,12 @@ Estimate estimate(const Request& r, const Plan& p) {
     header_layout.slots = n;
     header_layout.per_level = m >= n;
     header_layout.ciphertexts = shard_ciphertexts;
+    header_layout.shards = p.shards;
+    // The last shard's index is the longest one to print, so its header is the largest; quoting the
+    // largest keeps the estimate an upper bound on every shard rather than a figure only shard 0
+    // meets. The difference is single digits of bytes, but "predicted <= written" is the property
+    // step D3's evidence rests on.
+    header_layout.shard = p.shards - 1;
     const std::uint64_t header_bytes = bundle_header(header_layout, Role::A).size();
 
     e.prealigned = m < n;

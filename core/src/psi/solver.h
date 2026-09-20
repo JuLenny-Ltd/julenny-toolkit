@@ -86,7 +86,8 @@ struct Plan {
     unsigned      peer_levels  = 0;
 
     std::uint64_t cells_per_shard() const { return cells_total / shards; }
-    TableParams   table_params() const;  // what build_table takes, for one shard
+    TableParams   table_params() const;                      // shard 0
+    TableParams   table_params(std::uint64_t which_shard) const;  // what build_table takes, per shard
 };
 
 struct Request {

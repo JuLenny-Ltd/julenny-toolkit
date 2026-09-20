@@ -48,10 +48,23 @@ enum class OverflowPolicy { fail, drop };
 // Hard ceiling under OverflowPolicy::drop: dropped * 100 <= records * max_drop_percent.
 constexpr std::uint64_t max_drop_percent = 1;
 
+// The ceiling, as a test and as its message. Exposed because a SHARDED encoding has to apply it to
+// the dataset - the sum over shards - rather than to any one shard: a shard's drop rate has the
+// same mean as the whole dataset's but far more variance, so one unlucky shard passing 1 % is not
+// an encoding anyone should be asked to fix. build_table applies it itself only when shards == 1.
+bool        drop_floor_exceeded(std::uint64_t records, std::uint64_t dropped) noexcept;
+std::string drop_floor_message(std::uint64_t records, std::uint64_t dropped);
+
 struct TableParams {
-    std::uint64_t cells  = 0;  // m: a power of two in [1, 2^32]
+    std::uint64_t cells  = 0;  // m: cells in THIS shard, a power of two in [1, 2^32]
     unsigned      levels = 0;  // T >= 1   (number of tables - to deal with collision at the client)
     unsigned      limbs  = 0;  // k in [1, max_limbs]  (number of limbs to allow large id at each hash cell)
+    // Sharding (design §2.7, step F1). `cells` is this shard's cell count, so the whole key space is
+    // cells * shards cells and a record's place in it is split as psi/digest describes: the low
+    // log2(shards) bits of its position pick the shard, the rest pick the cell. P = 1 is the
+    // unsharded table, bit for bit.
+    std::uint64_t shards = 1;  // P: a power of two
+    std::uint64_t shard  = 0;  // p in [0, P): which shard this table is
 };
 
 struct PlacementReport {
@@ -88,9 +101,17 @@ std::vector<std::uint16_t> sentinel(Role role, unsigned limbs);
 // that places every record. Dynamic T (--dynamic-tables) builds with exactly
 // this many levels - more when the data collides more than expected, fewer
 // when the levels above it would be empty. 0 for an empty set.
+//
+// `cells` is the WHOLE key space, not one shard's: sharding splits the same
+// positions, so the fullest cell of the union is the fullest cell of any shard,
+// and one pass over every record answers it for every shard at once.
 std::uint64_t fullest_cell(std::vector<Digest> digests, std::uint64_t cells);
 
 class Table;
+// Builds ONE shard's table. `digests` may be the whole dataset or just this
+// shard's bucket (psi::partition_by_shard); records belonging to another shard
+// are ignored either way, and the report counts only this shard's. Passing the
+// whole set to each of P shards is correct but O(P*n); partition once instead.
 Table build_table(std::vector<Digest> digests, const TableParams& params, Role role,
                   OverflowPolicy policy);
 

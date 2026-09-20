@@ -27,12 +27,18 @@ BundleLayout bundle_layout(const TableParams& params, std::uint64_t groups, std:
         refuse("GROUPS " + std::to_string(groups) + " must be a power of two no larger than CELLS "
                + std::to_string(params.cells) + " or SLOTS " + std::to_string(slots));
 
+    if (!power_of_two(params.shards)) refuse("SHARDS " + std::to_string(params.shards) + " must be a power of two");
+    if (params.shard >= params.shards)
+        refuse("SHARD " + std::to_string(params.shard) + " is outside [0, " + std::to_string(params.shards) + ")");
+
     BundleLayout l;
     l.cells = params.cells;
     l.tables = params.levels;
     l.limbs = params.limbs;
     l.groups = groups;
     l.slots = slots;
+    l.shards = params.shards;
+    l.shard = params.shard;
     l.per_level = l.cells >= l.slots;
     if (l.per_level) {
         l.blocks = l.cells / l.slots;
@@ -56,8 +62,13 @@ std::string bundle_header(const BundleLayout& layout, Role role) {
         << "GROUPS " << layout.groups << "\n"
         << "SLOTS " << layout.slots << "\n"
         << "LAYOUT " << layout.layout_name() << "\n"
-        << "CIPHERTEXTS " << layout.ciphertexts << "\n"
-        << "PAYLOAD\n";
+        << "CIPHERTEXTS " << layout.ciphertexts << "\n";
+    // Only when sharded: see the note in bundle.h on why an unsharded bundle keeps the old bytes.
+    if (layout.shards > 1) {
+        out << "SHARDS " << layout.shards << "\n"
+            << "SHARD " << layout.shard << "\n";
+    }
+    out << "PAYLOAD\n";
     return out.str();
 }
 

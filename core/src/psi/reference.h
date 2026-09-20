@@ -103,6 +103,21 @@ struct CountResult {
 // if `groups` is not a valid grouping.
 CountResult reference_count(const Table& a, const Table& b, unsigned groups = 1);
 
+// The same count over a sharded dataset (design §2.7 item 1, step F1): every
+// shard compared with the SAME shard of the other party, and the per-shard
+// results added. `a[p]` and `b[p]` must both be shard p of P.
+//
+// This is the plaintext twin of what the platform will do homomorphically in
+// step F2, and the reason F2 must add the shard ciphertexts rather than decrypt
+// them one by one: P decrypted shard counts would disclose how the intersection
+// is spread across hash space, which the single aggregated count does not.
+//
+// Because sharding only splits the positions of one key space (psi/digest), the
+// result is the same as the unsharded count of the same records at the same
+// cells_total - that equality is the property step F1 exists to establish.
+CountResult reference_count_sharded(const std::vector<Table>& a, const std::vector<Table>& b,
+                                    unsigned groups = 1);
+
 // What the client does with the grouped result: add the partial sums. Decoded
 // slots must be put back in [0, t) with residue() first.
 std::uint64_t count_from_groups(const std::vector<std::uint32_t>& group_sums);

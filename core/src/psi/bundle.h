@@ -7,7 +7,16 @@
 // BUNDLE contract; design §2.2-2.3).
 //
 //   PSI-TABLE v1 / ROLE / CELLS / TABLES / LIMBS / GROUPS / SLOTS / LAYOUT /
-//   CIPHERTEXTS, then "PAYLOAD\n", then one cereal archive of the ciphertexts.
+//   CIPHERTEXTS [/ SHARDS / SHARD], then "PAYLOAD\n", then one cereal archive of
+//   the ciphertexts.
+//
+// SHARDS and SHARD are written only when the dataset is sharded (P > 1, step
+// F1), for two reasons. An unsharded bundle stays byte-identical to what every
+// earlier step measured and committed, and a server that predates sharding
+// refuses a sharded bundle outright ("unknown header key SHARDS") instead of
+// comparing shard 3 of one party against shard 7 of the other and returning a
+// number that is wrong with no way to tell. A reader that does not see them
+// must treat the bundle as P = 1, shard 0.
 //
 // Nothing here encrypts. Layout is the part that has to agree with the server
 // and with the other party, so it is kept apart from the crypto and tested on
@@ -34,11 +43,13 @@
 namespace fhe_toolkit::psi {
 
 struct BundleLayout {
-    std::uint64_t cells       = 0;  // m
+    std::uint64_t cells       = 0;  // m: cells in THIS shard
     std::uint64_t tables      = 0;  // T
     std::uint64_t limbs       = 0;  // k
     std::uint64_t groups      = 1;  // L: partial sums the count comes back as
     std::uint64_t slots       = 0;  // N: the ring dimension this was laid out for
+    std::uint64_t shards      = 1;  // P: shards the dataset was split into
+    std::uint64_t shard       = 0;  // p: which one this bundle is
     bool          per_level   = false;
     std::uint64_t blocks      = 1;  // per-level: m / N, else 1
     std::uint64_t chunks      = 0;  // slot-aligned comparisons the server will run
