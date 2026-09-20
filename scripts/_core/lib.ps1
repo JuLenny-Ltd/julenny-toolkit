@@ -1250,10 +1250,22 @@ function Publish-JlEnvelope {
 # Writes the permission's function definition to the workdir and returns it.
 function Update-JlFunctionDef {
     $perm = Get-JlPermission
-    $slug = $perm.functionSlug
-    $version = $perm.functionVersion
+    # The API calls this field `fheFunction`. This read `functionSlug`, which does not
+    # exist on that object, so under Set-StrictMode 2.0 the access threw, the caller's
+    # try/catch swallowed it, and every Windows run printed "Could not refresh the
+    # function definition; using the local copy" and carried on with a cached file. Not
+    # an offline fallback: the refresh had never once succeeded on this side. The bash
+    # twin reads the right field, which is why only Windows was affected.
+    $slug = ''
+    if (Test-JlHasProperty $perm 'fheFunction')  { $slug = "$($perm.fheFunction)" }
+    if (-not $slug -and (Test-JlHasProperty $perm 'functionSlug')) { $slug = "$($perm.functionSlug)" }
+    $version = ''
+    if (Test-JlHasProperty $perm 'functionVersion') { $version = "$($perm.functionVersion)" }
     if ([string]::IsNullOrWhiteSpace($slug)) {
-        Stop-JlWithError "Permission $($script:JULENNY_PERMISSION_ID) has no functionSlug."
+        Stop-JlWithError "Permission $($script:JULENNY_PERMISSION_ID) reports no function slug (looked for fheFunction and functionSlug)."
+    }
+    if ([string]::IsNullOrWhiteSpace($version)) {
+        Stop-JlWithError "Permission $($script:JULENNY_PERMISSION_ID) reports no functionVersion; cannot fetch a version-exact definition."
     }
     # /api/functions/<slug>/<version>/definition is the route the platform serves, and
     # the same one the bash library and the grant-creation path below already use.
@@ -2410,12 +2422,26 @@ function Invoke-JlEncryptAndUploadInputs {
         $pickedId = ''
         if ($existing.Count -gt 0) {
             Write-JlInfo "Existing dataset(s) in this project:"
+            # Show the COLUMN CHOICE on every line. Two ciphertexts of the same CSV, one
+            # hashed on all columns and one on column 2, are otherwise indistinguishable
+            # here, and picking the one the peer did not use returns 0 matches with no
+            # error. The choice was printed only after the pick, which is too late to
+            # choose by. Twin of the jq list in 04-encrypt.sh.
+            $colsMapForList = $null
+            $colsFileForList = Join-Path $script:JL_ROOT 'dataset_columns.json'
+            if (Test-Path -LiteralPath $colsFileForList) {
+                try { $colsMapForList = Get-Content -LiteralPath $colsFileForList -Raw | ConvertFrom-Json } catch { }
+            }
             for ($i = 0; $i -lt $existing.Count; $i++) {
                 $created = '?'
                 if ((Test-JlHasProperty $existing[$i] 'createdAt') -and $existing[$i].createdAt) {
                     $created = "$($existing[$i].createdAt)".Substring(0, [Math]::Min(10, "$($existing[$i].createdAt)".Length))
                 }
-                Write-Host ("  {0}) {1}  (id: {2}, uploaded {3})" -f ($i + 1), $existing[$i].name, $existing[$i].id, $created)
+                $cols = 'not recorded'
+                if ($null -ne $colsMapForList -and (Test-JlHasProperty $colsMapForList $existing[$i].id)) {
+                    $cols = "$($colsMapForList.($existing[$i].id))"
+                }
+                Write-Host ("  {0}) {1}  |  columns: {2}  (id: {3}, uploaded {4})" -f ($i + 1), $existing[$i].name, $cols, $existing[$i].id, $created)
             }
             Write-Host "  u) Upload a NEW dataset"
             Write-Host ""
@@ -3607,6 +3633,17 @@ function Invoke-JlViewerFlow {
                 if ($myDsetId -and (Test-Path -LiteralPath $csvMapFile)) {
                     $csvMap = Get-Content -LiteralPath $csvMapFile -Raw | ConvertFrom-Json
                     if ((Test-JlHasProperty $csvMap $myDsetId)) { $inputCsv = $csvMap.$myDsetId }
+                }
+
+                # The connector writes a BARE NAME here (it addresses files relative to the
+                # workdir root), bash writes an absolute path. Both surfaces share this one
+                # map by design, so resolve a relative entry against the root before calling
+                # it missing. Without this, a dataset uploaded through the connector could
+                # not be resolved by the scripts and the operator was told the file "no
+                # longer exists" while it sat in the workdir.
+                if ($inputCsv -and -not (Test-Path -LiteralPath $inputCsv) -and -not [System.IO.Path]::IsPathRooted($inputCsv)) {
+                    $rooted = Join-Path $script:JL_ROOT $inputCsv
+                    if (Test-Path -LiteralPath $rooted) { $inputCsv = $rooted }
                 }
 
                 if ($inputCsv -and (Test-Path -LiteralPath $inputCsv)) {

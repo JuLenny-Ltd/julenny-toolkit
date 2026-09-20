@@ -2022,6 +2022,16 @@ viewer_flow() {
                     fi
                     [[ -n "$my_dset_id" ]] && info "Your dataset for this execution: '$my_dset_name' ($my_dset_id)"
 
+                    # The connector writes a BARE NAME here (it addresses files relative to
+                    # the workdir root), bash writes an absolute path. Both surfaces share
+                    # this one map by design, so resolve a relative entry against the root
+                    # before calling it missing. Without this, a dataset uploaded through
+                    # the connector could not be resolved by the scripts and the operator
+                    # was told the file "no longer exists" while it sat in the workdir.
+                    if [[ -n "$input_csv" && ! -f "$input_csv" && "$input_csv" != /* && -f "$JL_ROOT/$input_csv" ]]; then
+                        input_csv="$JL_ROOT/$input_csv"
+                    fi
+
                     if [[ -n "$input_csv" && -f "$input_csv" ]]; then
                         info "Originating CSV (from dataset map): $input_csv"
                     else

@@ -120,8 +120,14 @@ for ((i = 0; i < MY_INPUT_COUNT; i++)); do
     PICKED_ID=""
     if (( EXISTING_COUNT > 0 )); then
         info "Existing ${JL_OUR_LABEL} dataset(s) in this project:"
+        # Show the COLUMN CHOICE on every line. Two ciphertexts of the same CSV, one hashed
+        # on all columns and one on column 2, are otherwise indistinguishable here, and
+        # picking the one the peer did not use returns 0 matches with no error. The choice
+        # was printed only after the pick, which is too late to choose by.
+        COLS_MAP='{}'
+        [[ -f "$JL_ROOT/dataset_columns.json" ]] && COLS_MAP="$(cat "$JL_ROOT/dataset_columns.json")"
         echo "$EXISTING" \
-            | jq -r 'to_entries[] | "  \(.key + 1)) \(.value.name)  (id: \(.value.id), uploaded \((.value.createdAt // "?") | .[0:10]))"'
+            | jq -r --argjson cols "$COLS_MAP" 'to_entries[] | "  \(.key + 1)) \(.value.name)  |  columns: \($cols[.value.id] // "not recorded")  (id: \(.value.id), uploaded \((.value.createdAt // "?") | .[0:10]))"'
         echo "  u) Upload a NEW dataset"
         echo
 
