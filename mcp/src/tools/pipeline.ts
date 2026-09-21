@@ -212,15 +212,20 @@ export function registerPipelineTools(server: McpServer, api: JulennyApiClient) 
   // NEEDS A READ-WRITE MCP KEY (the default read-only key will 403).
   server.tool(
     'upload',
-    'Upload an encrypted dataset file to the platform (size-aware: inline multipart for small files, signed-URL object-storage flow for large ones past the ~32MB cap). Bytes are ciphertext; returns the dataset id, never the contents. Requires a read-write MCP key (the default read-only key will 403).',
+    'Upload an encrypted dataset file to the platform (size-aware: inline multipart for small files, signed-URL object-storage flow for large ones past the ~32MB cap). '
+      + 'A SHARDED exact-PSI encode is detected automatically: when `encrypt` was run with shards > 1 it wrote <file>.shard-NNNNN plus <file>.manifest.json, and this sends all P shards and the manifest as one dataset. '
+      + "Pass `encodingReport` (the file `encrypt`'s reportOutput wrote) so the platform can quote the job and check the drop floor — an opaque bundle tells it nothing on its own. "
+      + 'Bytes are ciphertext; returns the dataset id, never the contents. Requires a read-write MCP key (the default read-only key will 403).',
     {
-      file: z.string().describe('Workdir-relative ciphertext/bundle file name to upload'),
+      file: z.string().describe('Workdir-relative ciphertext/bundle file name to upload. For a sharded encode, the OUTPUT name that was passed to encrypt (the shards and manifest sit beside it).'),
       name: z.string().describe('Display name for the dataset'),
       description: z.string().optional().describe('Optional dataset description'),
       permissionId: z.string().optional().describe('Permission id to scope the upload to'),
       projectId: z.string().optional().describe('Project id to scope the upload to'),
       kind: z.string().optional().describe('Dataset kind tag (e.g. "ciphertext", "plaintext")'),
       retentionDays: z.number().int().positive().optional().describe('Retention window in days'),
+      encodingReport: z.string().optional().describe("Workdir-relative file holding the encoder's JSON report (encrypt's reportOutput). Forwarded as psiEncoding."),
+      manifest: z.string().optional().describe('Workdir-relative shard manifest. Defaults to <file>.manifest.json when that exists.'),
     },
     async (p) => {
       try {
@@ -228,6 +233,36 @@ export function registerPipelineTools(server: McpServer, api: JulennyApiClient) 
           return fail('provide permissionId and/or projectId to scope the upload');
         }
         const resolved = resolveInWorkdir(p.file);
+
+        // The encoder's own report about an opaque bundle: how many records went in, how many were
+        // dropped, and the shape they were encoded to (design §3.5 B6/B3b). The platform cannot
+        // learn any of it from the bytes, so without this it cannot quote the job or check the 1 %
+        // drop floor. Only the fields the platform's schema accepts are forwarded; the rest of the
+        // report is local diagnostics.
+        let psiEncoding: Record<string, unknown> | undefined;
+        if (p.encodingReport) {
+          const report = JSON.parse(await readFile(resolveInWorkdir(p.encodingReport), 'utf-8')) as Record<string, unknown>;
+          const pick = ['records', 'rows', 'duplicates', 'cells', 'tables', 'limbs', 'countGroups', 'ciphertexts'] as const;
+          psiEncoding = { dropped: report.recordsDropped ?? 0 };
+          for (const key of pick) if (report[key] !== undefined) psiEncoding[key] = report[key];
+          if (report.recordsRead !== undefined) psiEncoding.rows = report.recordsRead;
+          if (report.duplicateRows !== undefined) psiEncoding.duplicates = report.duplicateRows;
+          const acknowledgedAt = (report.accuracy as Record<string, unknown> | undefined)?.acknowledgedAt;
+          if (typeof acknowledgedAt === 'string') psiEncoding.acknowledgedAt = acknowledgedAt;
+        }
+
+        // A sharded encode (step F1) is P files plus a manifest, and the manifest is what ties them
+        // into one dataset. `encrypt --shards P` writes no <file> at all, so its absence beside a
+        // manifest is the detection rather than a flag the caller has to remember to set.
+        const manifestPath = p.manifest ? resolveInWorkdir(p.manifest) : `${resolved}.manifest.json`;
+        const manifestExists = await stat(manifestPath).then(() => true).catch(() => false);
+        if (manifestExists) {
+          // AWAITED on purpose: returning the promise from inside this try would hand its
+          // rejection straight to the MCP transport instead of to the fail(...) below, and the
+          // agent would see a crashed tool rather than a message saying what was wrong.
+          return await uploadSharded(api, { ...p, manifestPath, psiEncoding });
+        }
+
         const { size } = await stat(resolved);
         const INLINE_DATASET_THRESHOLD_BYTES = 15 * 1024 * 1024;
 
@@ -242,6 +277,7 @@ export function registerPipelineTools(server: McpServer, api: JulennyApiClient) 
           if (p.projectId) form.append('projectId', p.projectId);
           if (p.kind) form.append('kind', p.kind);
           if (p.retentionDays !== undefined) form.append('retentionDays', String(p.retentionDays));
+          if (psiEncoding) form.append('psiEncoding', JSON.stringify(psiEncoding));
           const data = await api.postMultipart('/api/fhe-data-upload', form) as Record<string, unknown>;
           if (!data.datasetId) return fail('upload succeeded but no datasetId returned');
           return ok({ datasetId: data.datasetId, via: 'multipart', bytes: size });
@@ -266,6 +302,7 @@ export function registerPipelineTools(server: McpServer, api: JulennyApiClient) 
         };
         if (p.permissionId) confirmBody.permissionId = p.permissionId;
         if (p.projectId) confirmBody.projectId = p.projectId;
+        if (psiEncoding) confirmBody.psiEncoding = psiEncoding;
         const confirmResp = await api.post('/api/fhe-data-upload/confirm', confirmBody) as Record<string, unknown>;
         return ok({ datasetId: (confirmResp.datasetId as string) || datasetId, via: 'signed-url', bytes: size });
       } catch (e) {
@@ -744,4 +781,89 @@ export function registerPipelineTools(server: McpServer, api: JulennyApiClient) 
       }
     },
   );
+}
+
+/**
+ * Send a SHARDED exact-PSI dataset: P bundle files plus the manifest that ties them together
+ * (design §2.7 item 4, plan steps F1/E3).
+ *
+ * The shards go one at a time through the signed-URL flow, streamed from disk — at design §2.7
+ * sizes the dataset is gigabytes and a shard is tens of megabytes, so neither the whole dataset nor
+ * one shard is ever held in memory here. URLs come back in windows because a signed URL is ~1 KB of
+ * signature and P can be thousands; the platform says where to continue.
+ *
+ * The manifest is sent to `confirm` LAST and is what makes the P objects one dataset: the platform
+ * checks every shard is in storage at the size the manifest declares (and verifies its checksum
+ * when the dataset is small enough to read back), then records the shard list the execution's
+ * fan-out reads. Nothing is registered until every shard is there, so an interrupted upload leaves
+ * no half-dataset behind — only objects, which re-running this replaces.
+ */
+async function uploadSharded(
+    api: JulennyApiClient,
+    p: {
+        file: string; name: string; description?: string; permissionId?: string; projectId?: string;
+        kind?: string; retentionDays?: number; manifestPath: string; psiEncoding?: Record<string, unknown>;
+    },
+) {
+    const manifest = JSON.parse(await readFile(p.manifestPath, 'utf-8')) as Record<string, unknown>;
+    const shardFiles = manifest.shardFiles as Array<{ shard: number; file: string; bytes: number }> | undefined;
+    const shards = Number(manifest.shards);
+    if (!Array.isArray(shardFiles) || !Number.isInteger(shards) || shardFiles.length !== shards) {
+        return fail(`${p.file}.manifest.json does not describe ${shardFiles?.length ?? 0} shards consistently; re-run encrypt`);
+    }
+
+    // The manifest names each shard by its own FILE NAME, written beside the output the encoder was
+    // given. Resolving each through the workdir keeps the confinement contract: a manifest is data,
+    // and data does not get to name paths outside the working folder.
+    const byShard = new Map<number, { path: string; bytes: number }>();
+    for (const entry of shardFiles) {
+        byShard.set(entry.shard, { path: resolveInWorkdir(entry.file), bytes: entry.bytes });
+    }
+
+    const urlBody: Record<string, unknown> = { name: p.name, shards };
+    if (p.permissionId) urlBody.permissionId = p.permissionId;
+    if (p.projectId) urlBody.projectId = p.projectId;
+
+    let datasetId: string | undefined;
+    let from: number | null = 0;
+    let uploaded = 0;
+    let bytes = 0;
+    while (from !== null) {
+        const resp = await api.post('/api/fhe-data-upload/upload-url',
+            { ...urlBody, ...(datasetId ? { datasetId } : {}), shardFrom: from }) as Record<string, unknown>;
+        datasetId = (resp.datasetId as string | undefined) ?? datasetId;
+        const urls = resp.shardUrls as Array<{ shard: number; uploadUrl: string }> | undefined;
+        if (!datasetId || !Array.isArray(urls)) {
+            return fail(`upload-url did not return a shard window: ${JSON.stringify(resp)}`);
+        }
+        for (const { shard, uploadUrl } of urls) {
+            const local = byShard.get(shard);
+            if (!local) return fail(`the manifest has no entry for shard ${shard}`);
+            await api.putSignedUrlFromFile(uploadUrl, local.path);
+            uploaded++;
+            bytes += local.bytes;
+        }
+        from = (resp.nextShard as number | null) ?? null;
+    }
+
+    const confirmBody: Record<string, unknown> = {
+        datasetId,
+        name: p.name,
+        kind: p.kind || 'ciphertext',
+        fileName: p.file,
+        retentionDays: p.retentionDays ?? 90,
+        shardManifest: manifest,
+    };
+    if (p.description) confirmBody.description = p.description;
+    if (p.permissionId) confirmBody.permissionId = p.permissionId;
+    if (p.projectId) confirmBody.projectId = p.projectId;
+    if (p.psiEncoding) confirmBody.psiEncoding = p.psiEncoding;
+    const confirmResp = await api.post('/api/fhe-data-upload/confirm', confirmBody) as Record<string, unknown>;
+    return ok({
+        datasetId: (confirmResp.datasetId as string) || datasetId,
+        via: 'signed-url-sharded',
+        shards: uploaded,
+        bytes,
+        integrity: confirmResp.integrity ?? null,
+    });
 }

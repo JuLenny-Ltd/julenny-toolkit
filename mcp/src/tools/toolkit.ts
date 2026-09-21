@@ -127,15 +127,31 @@ export function registerToolkitTools(server: McpServer) {
   // ---- encrypt (auto) ----
   server.tool(
     'encrypt',
-    'Encrypt a local input file under a joint public key. Returns the ciphertext path, never contents.',
+    'Encrypt a local input file under a joint public key. Returns the ciphertext path, never contents. '
+      + 'For an exact-PSI (signature-table) input, pass the table parameters PINNED ON THE GRANT '
+      + '(cells, tables, limbs, countGroups, shards) — they are per-grant, not in the function definition, '
+      + 'and both parties must use the same ones or their tables are not comparable. With shards > 1 the '
+      + 'encoder writes <output>.shard-NNNNN plus <output>.manifest.json, which `upload` then sends together.',
     {
       input: z.string().describe('Workdir-relative input file name'),
       jointPublicKey: z.string().describe('Workdir-relative joint public key file name'),
       output: z.string().describe('Workdir-relative output ciphertext file name'),
       functionDef: z.string().optional().describe('Workdir-relative function-def JSON name (mode A)'),
       inputName: z.string().optional().describe('Function-def input name (mode A; required with functionDef)'),
-      schema: z.enum(['indicator-hash', 'weight-vector', 'binary-indicator']).optional().describe('Encoding schema (mode B)'),
+      schema: z.enum(['indicator-hash', 'weight-vector', 'binary-indicator', 'signature-table']).optional().describe('Encoding schema (mode B)'),
       contextSpec: z.string().optional().describe('Crypto context spec override'),
+      role: z.enum(['A', 'B']).optional().describe("This party's role for a signature table: the grant's first input is A, the second B"),
+      cells: z.number().int().positive().optional().describe('Signature table: cells per table, from the grant (psiParams.cells)'),
+      tables: z.number().int().positive().optional().describe('Signature table: parallel tables, from the grant (psiParams.tables)'),
+      limbs: z.number().int().positive().optional().describe('Signature table: 16-bit limbs per signature, from the grant (psiParams.limbs)'),
+      countGroups: z.number().int().positive().optional().describe('Signature table: partial sums the count comes back as, from the grant (psiParams.countGroups)'),
+      shards: z.number().int().positive().optional().describe('Signature table: shards to split the dataset into, from the grant (psiParams.shards). Writes P files plus a manifest.'),
+      signatureBits: z.number().int().positive().optional().describe('Signature table: target signature width'),
+      domainSeparator: z.string().optional().describe('Digest domain separator (mode B; mode A takes it from the definition)'),
+      skipHeader: z.boolean().optional().describe('Treat the input CSV as having no header row'),
+      dynamicTables: z.boolean().optional().describe('Let the encoder solve the table count for this dataset'),
+      acceptDegradedAccuracy: z.boolean().optional().describe('Proceed despite accuracy findings the encoder raises'),
+      reportOutput: z.string().optional().describe("Workdir-relative file to write the encoder's full JSON report to, for `upload` to forward as psiEncoding"),
     },
     async (p) => {
       try {
@@ -154,11 +170,38 @@ export function registerToolkitTools(server: McpServer) {
           return fail('provide either functionDef+inputName (mode A) or schema (mode B)');
         }
         if (p.contextSpec) args.push('--context-spec', p.contextSpec);
+        // Signature-table sizing. These live on the GRANT, not in the function definition (the
+        // definition is registry-signed and cannot know how many records a party holds), so the
+        // caller has to pass what the grant pinned — read it from the permission's psiParams.
+        if (p.role) args.push('--role', p.role);
+        if (p.cells !== undefined) args.push('--cells', String(p.cells));
+        if (p.tables !== undefined) args.push('--tables', String(p.tables));
+        if (p.limbs !== undefined) args.push('--limbs', String(p.limbs));
+        if (p.countGroups !== undefined) args.push('--count-groups', String(p.countGroups));
+        if (p.shards !== undefined && p.shards > 1) args.push('--shards', String(p.shards));
+        if (p.signatureBits !== undefined) args.push('--signature-bits', String(p.signatureBits));
+        if (p.domainSeparator) args.push('--domain-separator', p.domainSeparator);
+        if (p.skipHeader) args.push('--skip-header');
+        if (p.dynamicTables) args.push('--dynamic-tables');
+        if (p.acceptDegradedAccuracy) args.push('--accept-degraded-accuracy');
         args.push('--json');
         const r = await runCli(args);
         if (!r.ok) return fail(r.error || 'encrypt failed', { exitCode: r.exitCode });
         const j = (r.json ?? {}) as Record<string, unknown>;
-        return ok({ outputPath: j.outputPath ?? p.output, slotCount: j.slotCount, ciphertextBytes: j.ciphertextBytes });
+        // The full report is what `upload` forwards as psiEncoding: it is the only way the platform
+        // can learn how many records are in an opaque bundle, and therefore the only way it can
+        // quote the job or check the 1 % drop floor. Written to a file rather than returned,
+        // because every verb here returns references, not contents.
+        if (p.reportOutput) await writeFile(resolveInWorkdir(p.reportOutput), JSON.stringify(j, null, 2));
+        return ok({
+          outputPath: j.outputPath ?? p.output,
+          slotCount: j.slotCount,
+          ciphertextBytes: j.ciphertextBytes,
+          ...(j.shards !== undefined && Number(j.shards) > 1
+            ? { shards: j.shards, manifestPath: j.manifestPath, records: j.records, recordsDropped: j.recordsDropped }
+            : {}),
+          ...(p.reportOutput ? { reportPath: p.reportOutput } : {}),
+        });
       } catch (e) {
         return fail(e instanceof Error ? e.message : 'invalid parameters');
       }
