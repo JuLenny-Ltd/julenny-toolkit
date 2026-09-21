@@ -214,10 +214,12 @@ export function registerPipelineTools(server: McpServer, api: JulennyApiClient) 
     'upload',
     'Upload an encrypted dataset file to the platform (size-aware: inline multipart for small files, signed-URL object-storage flow for large ones past the ~32MB cap). '
       + 'A SHARDED exact-PSI encode is detected automatically: when `encrypt` was run with shards > 1 it wrote <file>.shard-NNNNN plus <file>.manifest.json, and this sends all P shards and the manifest as one dataset. '
+      + 'A sharded upload is RESUMABLE: if it fails part-way the error names the datasetId to pass back as `resumeDatasetId`, and only the shards not already in storage are sent again. '
       + "Pass `encodingReport` (the file `encrypt`'s reportOutput wrote) so the platform can quote the job and check the drop floor — an opaque bundle tells it nothing on its own. "
       + 'Bytes are ciphertext; returns the dataset id, never the contents. Requires a read-write MCP key (the default read-only key will 403).',
     {
       file: z.string().describe('Workdir-relative ciphertext/bundle file name to upload. For a sharded encode, the OUTPUT name that was passed to encrypt (the shards and manifest sit beside it).'),
+      resumeDatasetId: z.string().optional().describe('Resume an interrupted sharded upload: the datasetId a previous upload returned or reported. Only the shards not already in storage are sent.'),
       name: z.string().describe('Display name for the dataset'),
       description: z.string().optional().describe('Optional dataset description'),
       permissionId: z.string().optional().describe('Permission id to scope the upload to'),
@@ -261,6 +263,9 @@ export function registerPipelineTools(server: McpServer, api: JulennyApiClient) 
           // rejection straight to the MCP transport instead of to the fail(...) below, and the
           // agent would see a crashed tool rather than a message saying what was wrong.
           return await uploadSharded(api, { ...p, manifestPath, psiEncoding });
+        }
+        if (p.resumeDatasetId) {
+          return fail(`resumeDatasetId only applies to a sharded upload, and ${p.file}.manifest.json is not there`);
         }
 
         const { size } = await stat(resolved);
@@ -792,6 +797,13 @@ export function registerPipelineTools(server: McpServer, api: JulennyApiClient) 
  * one shard is ever held in memory here. URLs come back in windows because a signed URL is ~1 KB of
  * signature and P can be thousands; the platform says where to continue.
  *
+ * RESUMABLE (step F3). `declaredBytes` goes up front so the platform can refuse an upload that
+ * cannot fit the storage quota BEFORE gigabytes move, rather than after. With `resumeDatasetId`
+ * the windows carry only the shards not already in storage — which the platform decides by looking
+ * at the objects, not by believing this client, since a client that crashed does not know what
+ * arrived. And when a PUT fails, the failure names the datasetId to resume from, because an agent
+ * that loses it has no way back to the gigabytes it already sent.
+ *
  * The manifest is sent to `confirm` LAST and is what makes the P objects one dataset: the platform
  * checks every shard is in storage at the size the manifest declares (and verifies its checksum
  * when the dataset is small enough to read back), then records the shard list the execution's
@@ -803,6 +815,7 @@ async function uploadSharded(
     p: {
         file: string; name: string; description?: string; permissionId?: string; projectId?: string;
         kind?: string; retentionDays?: number; manifestPath: string; psiEncoding?: Record<string, unknown>;
+        resumeDatasetId?: string;
     },
 ) {
     const manifest = JSON.parse(await readFile(p.manifestPath, 'utf-8')) as Record<string, unknown>;
@@ -820,26 +833,55 @@ async function uploadSharded(
         byShard.set(entry.shard, { path: resolveInWorkdir(entry.file), bytes: entry.bytes });
     }
 
-    const urlBody: Record<string, unknown> = { name: p.name, shards };
+    // Declared up front so the platform can refuse an upload that cannot fit the plan's storage
+    // quota before any of it moves, and so a RESUME can tell a shard that arrived from one that
+    // arrived half-way: without the expected sizes the platform can only see that an object
+    // exists, and a PUT that died leaves one that does. Both are claims; `confirm` checks them
+    // against the manifest and the bytes actually stored.
+    const urlBody: Record<string, unknown> = {
+        name: p.name,
+        shards,
+        declaredBytes: Number(manifest.bytes) || 0,
+        shardBytes: Array.from({ length: shards }, (_, i) => byShard.get(i)?.bytes ?? 0),
+    };
     if (p.permissionId) urlBody.permissionId = p.permissionId;
     if (p.projectId) urlBody.projectId = p.projectId;
+    const resuming = typeof p.resumeDatasetId === 'string' && p.resumeDatasetId.length > 0;
 
-    let datasetId: string | undefined;
+    let datasetId: string | undefined = resuming ? p.resumeDatasetId : undefined;
     let from: number | null = 0;
     let uploaded = 0;
     let bytes = 0;
+    let skipped = 0;
     while (from !== null) {
-        const resp = await api.post('/api/fhe-data-upload/upload-url',
-            { ...urlBody, ...(datasetId ? { datasetId } : {}), shardFrom: from }) as Record<string, unknown>;
+        const resp = await api.post('/api/fhe-data-upload/upload-url', {
+            ...urlBody,
+            ...(datasetId ? { datasetId } : {}),
+            ...(resuming ? { resume: true } : {}),
+            shardFrom: from,
+        }) as Record<string, unknown>;
         datasetId = (resp.datasetId as string | undefined) ?? datasetId;
         const urls = resp.shardUrls as Array<{ shard: number; uploadUrl: string }> | undefined;
         if (!datasetId || !Array.isArray(urls)) {
             return fail(`upload-url did not return a shard window: ${JSON.stringify(resp)}`);
         }
+        if (typeof resp.missingShards === 'number') skipped = shards - resp.missingShards;
         for (const { shard, uploadUrl } of urls) {
             const local = byShard.get(shard);
             if (!local) return fail(`the manifest has no entry for shard ${shard}`);
-            await api.putSignedUrlFromFile(uploadUrl, local.path);
+            try {
+                await api.putSignedUrlFromFile(uploadUrl, local.path);
+            } catch (e) {
+                // An agent that loses the datasetId has no way back to the gigabytes already sent,
+                // so the failure carries it rather than only saying that a PUT failed.
+                return fail(
+                    `shard ${shard} failed to upload: ${e instanceof Error ? e.message : String(e)}`,
+                    {
+                        datasetId, shardsUploaded: uploaded, shards,
+                        resumeWith: { tool: 'upload', file: p.file, resumeDatasetId: datasetId },
+                    },
+                );
+            }
             uploaded++;
             bytes += local.bytes;
         }
@@ -861,8 +903,10 @@ async function uploadSharded(
     const confirmResp = await api.post('/api/fhe-data-upload/confirm', confirmBody) as Record<string, unknown>;
     return ok({
         datasetId: (confirmResp.datasetId as string) || datasetId,
-        via: 'signed-url-sharded',
-        shards: uploaded,
+        via: resuming ? 'signed-url-sharded-resumed' : 'signed-url-sharded',
+        shards,
+        shardsUploaded: uploaded,
+        ...(skipped > 0 ? { shardsAlreadyPresent: skipped } : {}),
         bytes,
         integrity: confirmResp.integrity ?? null,
     });
