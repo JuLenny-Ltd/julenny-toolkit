@@ -2715,9 +2715,26 @@ function Invoke-JlVerifyLocalKeys {
         rotation         = 'rotation-combined.bin'
     }
 
+    # The manifest can exist with NOTHING in it: on a fresh permission where only one
+    # side has finalized so far, the platform answers with an empty keys object. The
+    # guard above only proves `keys` is present, and under Set-StrictMode 2.0 reading
+    # .Name off an empty property collection is a terminating error, which killed the
+    # run right after a successful finalize on 2026-09-22. The bash twin has always
+    # handled this; only PowerShell was missing it.
+    # Accumulate with foreach. Do NOT reach for .Name or .Count on the property
+    # collection: on an object with zero properties both are terminating errors under
+    # Set-StrictMode 2.0, which is the trap described on Test-JlHasProperty. foreach over
+    # an empty or null collection simply does not iterate.
+    $keyTypes = @()
+    foreach ($pr in $manifest.keys.PSObject.Properties) { $keyTypes += $pr.Name }
+    if ($keyTypes.Count -eq 0) {
+        Write-JlInfo "No checksums available yet; nothing to check."
+        return
+    }
+
     $checked = 0
     $repaired = 0
-    foreach ($keyType in $manifest.keys.PSObject.Properties.Name) {
+    foreach ($keyType in $keyTypes) {
         $entry = $manifest.keys.$keyType
         $file  = if ($keyFiles.ContainsKey($keyType)) { $keyFiles[$keyType] } else { "$keyType.bin" }
         $path  = Join-Path $script:JL_KEYS_DIR $file
@@ -3275,7 +3292,15 @@ function Get-JlNonZeroSlots {
     param([Parameter(Mandatory = $true)] $CombineJson)
     $map = Get-JlResultSlotMap $CombineJson
     if ($null -eq $map) { return @() }
-    return @($map.PSObject.Properties.Name | Sort-Object { [int] $_ })
+    # An EMPTY map is the legitimate answer 0: no slot matched. Enumerating .Name on a
+    # zero-property collection is a terminating error under Set-StrictMode 2.0 (see the
+    # note on Test-JlHasProperty), so a correct zero would have crashed the viewer here.
+    # It never fired because no Windows run had yet decrypted a zero; the NUC reached one
+    # on 2026-09-19 and bash has no such trap.
+    $names = @()
+    foreach ($pr in $map.PSObject.Properties) { $names += $pr.Name }
+    if ($names.Count -eq 0) { return @() }
+    return @($names | Sort-Object { [int] $_ })
 }
 
 function Invoke-JlViewerFlow {
