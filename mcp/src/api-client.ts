@@ -117,6 +117,21 @@ export class JulennyApiClient {
   }
 
   /**
+   * GET an ABSOLUTE pre-signed URL with NO x-api-key (the URL already carries its own
+   * authorization, and sending the key to object storage would leak it to a host that
+   * has no business holding it). Used to re-fetch public key material named by the key
+   * manifest.
+   */
+  async getBytesFromUrl(absoluteUrl: string): Promise<Buffer> {
+    const res = await fetch(absoluteUrl);
+    if (!res.ok) {
+      throw new Error(`download failed with HTTP ${res.status}`);
+    }
+    const ab = await res.arrayBuffer();
+    return Buffer.from(ab);
+  }
+
+  /**
    * PUT bytes to an ABSOLUTE pre-signed URL with NO x-api-key (the URL is
    * already authorized). Used for signed-URL key-exchange uploads.
    */

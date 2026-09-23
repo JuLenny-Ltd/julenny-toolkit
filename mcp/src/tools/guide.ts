@@ -3,15 +3,31 @@
 // returns the caller's current stage plus the exact next verb(s) to call. It is
 // a family-1 read only: no crypto, no secret material, no plaintext. It does not
 // replace the per-verb security checks (the platform stays the backstop); it
-// just lets an agent navigate the flow without carrying the example scripts.
+// just lets an agent navigate the flow without carrying the scripts.
 //
 // Stage model mirrors the server instructions block:
 //   discover -> keysetup -> provide-inputs -> run -> decrypt
 //
-// Role mapping (the platform uses two naming systems):
-//   permission.role  : 'dataOwner' | 'dataConsumer'
-//   keysetup party   : 'owner'     | 'consumer'      (owner == keysetup LEAD)
-//   function-def role : 'dataOwner' | 'queryAnalyst' (queryAnalyst == consumer)
+// TWO ROLES, and they are independent. Conflating them is the defect this file
+// carried until 2026-09-18, in a comment that said "owner == keysetup LEAD".
+//
+//   the DATA role     permission.role: 'dataOwner' | 'dataConsumer'. Per PERMISSION.
+//                     Says whose data goes in, who triggers, and which function-def
+//                     inputs are yours ('dataOwner' | 'queryAnalyst').
+//   the KEYSETUP role /keysetup yourKeysetupRole: 'lead' | 'main'. Per JOINT KEY,
+//                     fixed when that key was built. Says which half of the ceremony
+//                     this machine performs, which rounds it owes, and - critically -
+//                     which flag its partial decryption carries.
+//
+// They agree whenever a collaboration only runs permissions in the direction it was
+// created in. They stop agreeing the moment one is created the other way round, and
+// a partial decryption produced with the wrong flag is not an error: it is a wrong
+// answer. The scripts got a missing file as a warning; an agent passes the filename
+// itself, so there is nothing here to go wrong loudly.
+//
+// participants{} on the keysetup response is keyed by the DATA role, because it is
+// just "which collaboration id is mine". expectedParty on the round manifest is the
+// KEYSETUP role. Two different lookups, deliberately.
 
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
@@ -25,7 +41,7 @@ const fail = (error: string, extra: Record<string, unknown> = {}) => ({
   isError: true,
 });
 
-interface RoundEntry { round: number; messageType: string; description: string; expectedParty: 'both' | 'owner' | 'consumer'; }
+interface RoundEntry { round: number; messageType: string; description: string; expectedParty: 'both' | 'lead' | 'main'; }
 
 export function registerGuideTools(server: McpServer, api: JulennyApiClient) {
   server.tool(
@@ -39,10 +55,30 @@ export function registerGuideTools(server: McpServer, api: JulennyApiClient) {
         const perm = await api.get(`/api/fhe-permissions/${p.permissionId}`);
 
         const role: string = perm.role; // 'dataOwner' | 'dataConsumer'
+        // DATA role. Used for the function-def inputs, for result visibility, and to
+        // index participants{}, which is keyed that way.
         const myParty: 'owner' | 'consumer' = role === 'dataOwner' ? 'owner' : 'consumer';
         const fnRole: string = role === 'dataOwner' ? 'dataOwner' : 'queryAnalyst';
         const amViewer: boolean = perm.resultVisibility === role;
-        const leadFlag: boolean = role === 'dataOwner'; // owner == keysetup lead
+
+        // The KEYSETUP role, fetched at most once and only when a stage needs it.
+        // Null on joint keys built before the platform recorded a lead; those are not
+        // backfilled, so fall back to the old assumption, right wherever the roles agree.
+        let keysetupRoleCache: 'lead' | 'main' | null = null;
+        const keysetupRole = async (): Promise<'lead' | 'main'> => {
+          if (keysetupRoleCache) return keysetupRoleCache;
+          try {
+            const k = await api.get(`/api/fhe-permissions/${p.permissionId}/keysetup`);
+            if (k?.yourKeysetupRole === 'lead' || k?.yourKeysetupRole === 'main') {
+              const fromPlatform: 'lead' | 'main' = k.yourKeysetupRole;
+              keysetupRoleCache = fromPlatform;
+              return fromPlatform;
+            }
+          } catch { /* fall through to the data-role assumption */ }
+          const assumed: 'lead' | 'main' = role === 'dataOwner' ? 'lead' : 'main';
+          keysetupRoleCache = assumed;
+          return assumed;
+        };
 
         // An INTERNAL grant is a solo self-test: one company on both sides. It follows a
         // different sequence (see SOLO SELF-TEST in the server instructions) and, critically,
@@ -69,6 +105,37 @@ export function registerGuideTools(server: McpServer, api: JulennyApiClient) {
           return ok({ ...base, stage: 'expired', summary: 'This permission has expired; no further actions are possible.', nextActions: [] });
         }
 
+        // ---- A key the COLLABORATION does not have ----
+        //
+        // Reached with keysetup COMPLETE and the permission active, so every stage below
+        // would happily walk past it: the joint key genuinely exists, it was just built for
+        // a function needing fewer evaluation keys than this one needs. The rounds that make
+        // the missing key have to be run first, by BOTH parties, and until they are every
+        // run is refused.
+        //
+        // Checked before the keysetup stage because that stage only fires when keysetup is
+        // unfinished, which this is not.
+        const readiness = perm.runReadiness as { canRun?: boolean; code?: string; reason?: string; missingEvalKeys?: string[] } | undefined;
+        if (readiness && readiness.code === 'missing-eval-key') {
+          const missing = readiness.missingEvalKeys ?? [];
+          const rounds = missing.includes('sum')
+            ? "sum-round1 (owner, round 5) then sum-round1-continue (consumer, round 6)"
+            : "the rounds this key needs, from the keysetup round manifest";
+          return ok({
+            ...base,
+            stage: 'keysetup-augment',
+            missingEvalKeys: missing,
+            summary: readiness.reason
+              ?? `This collaboration is missing: ${missing.join(', ')}. Both parties must build it before this permission can run.`,
+            nextActions: [
+              `sum_contribute / the matching contribute verb for: ${missing.join(', ')}, using the secret share you ALREADY have. Do not run keysetup_contribute again - it would make a new share that does not match this collaboration's joint key.`,
+              `publish_keysetup_message for ${rounds}.`,
+              'publish_final_keys with the newly built key once both sides have contributed. It is merged into the collaboration, so every later permission gets it too.',
+              'TELL THE USER the other party has to do their half as well; this cannot complete from one side.',
+            ],
+          });
+        }
+
         // ---- STAGE 1: keysetup (permission not active, OR keysetup unfinished) ----
         //
         // Gate on keysetupState as well as status. A permission can be
@@ -86,10 +153,28 @@ export function registerGuideTools(server: McpServer, api: JulennyApiClient) {
             return ok({ ...base, stage: 'keysetup', summary: `Keysetup is in progress (permission status: ${perm.status}). Follow STAGE 1 in the server instructions.`, nextActions: ['register_signing_key (once per crypto context)', 'keysetup_contribute / relin_contribute per round', 'publish_keysetup_message / download_keysetup_message to exchange'] });
           }
 
+          // participants{} is keyed by the DATA role: this is only "my collaboration id".
           const myCollab: string | undefined = ks?.participants?.[myParty]?.collaborationId;
           const myContribs: number[] = (myCollab && ks.contributions?.[myCollab]) || [];
 
-          if (ks.state === 'AWAITING_FINALIZATION') {
+          // The KEYSETUP role, straight from the platform. Null on joint keys built
+          // before it was recorded; those are not backfilled, so fall back to the old
+          // assumption, which is right wherever the two roles agree.
+          const myKeysetupRole: 'lead' | 'main' =
+            (ks?.yourKeysetupRole === 'lead' || ks?.yourKeysetupRole === 'main')
+              ? ks.yourKeysetupRole
+              : (role === 'dataOwner' ? 'lead' : 'main');
+          keysetupRoleCache = myKeysetupRole;
+
+          // The platform spells this 'awaiting-finalization' (lower, hyphen); this branch
+          // compared against 'AWAITING_FINALIZATION' and so NEVER fired. Execution fell
+          // through to the round-manifest lookup, where finalization sits at currentRound 5
+          // in a manifest of 4 rounds, found no entry, and reported "BLOCKED on the other
+          // party" - sending the side that owed the finalize off to chase the side that was
+          // already waiting for it. Normalise instead of swapping the literal, so either
+          // spelling works.
+          const ksStateNorm = String(ks.state || '').toUpperCase().replace(/-/g, '_');
+          if (ksStateNorm === 'AWAITING_FINALIZATION') {
             const iFinalized = !!(myCollab && ks.finalKeySubmissions?.[myCollab]);
             if (iFinalized) {
               return ok({ ...base, stage: 'keysetup-finalize-wait', keysetup: { state: ks.state }, summary: 'You have submitted final keys. BLOCKED on the other party to finalize theirs before the permission activates. TELL THE USER to ask them to run their finalize step; polling alone will not unblock it.', nextActions: ['TELL THE USER to ask the other party to finalize', 'then call next_step again'] });
@@ -104,14 +189,14 @@ export function registerGuideTools(server: McpServer, api: JulennyApiClient) {
           //
           // currentRound only advances once the round it names is satisfied, so when it sits on a
           // round the peer owes, this side looked "blocked" - even when a LATER round is ours alone
-          // and needs nothing from them. That is exactly why the example scripts bundle pk-share
+          // and needs nothing from them. That is exactly why the scripts bundle pk-share
           // with relin-round1 and publish both at once: relin-round1 is owner-only and does not
           // depend on the peer's pk-share at all.
           //
           // Gating on currentRound alone stopped an agent one message short and stalled the whole
           // collaboration, with each side waiting on the other. Scan the manifest instead.
           const owed: RoundEntry[] = (ks.roundManifest || []).filter((e: RoundEntry) =>
-            (e.expectedParty === 'both' || e.expectedParty === myParty) && !myContribs.includes(e.round),
+            (e.expectedParty === 'both' || e.expectedParty === myKeysetupRole) && !myContribs.includes(e.round),
           ).sort((a: RoundEntry, b: RoundEntry) => a.round - b.round);
 
           if (owed.length > 0) {
@@ -167,7 +252,7 @@ export function registerGuideTools(server: McpServer, api: JulennyApiClient) {
         let def: any;
         try { def = await api.get(`/api/functions/${perm.fheFunction}/${v}/definition`); }
         catch (e) { return fail(`could not load function definition for ${perm.fheFunction} ${v}: ${(e as Error).message}`); }
-        const inputs: Array<{ name: string; role: string; layout?: string; encodingRecipe?: unknown }> = def.inputs || [];
+        const inputs: Array<{ name: string; role: string; layout?: string; schema?: string; encodingRecipe?: unknown }> = def.inputs || [];
 
         // Rotation state lives on the keysetup document, not the permission, and nothing
         // else in the MCP surfaced it - an agent that had submitted all three rounds had
@@ -195,14 +280,43 @@ export function registerGuideTools(server: McpServer, api: JulennyApiClient) {
 
         // ---- STAGE 2: provide your inputs ----
         if (missingMine.length > 0) {
+          // Check the local keys FIRST, before anything is encrypted under them.
+          //
+          // The scripts do this automatically at exactly this point. The connector
+          // cannot: verify_keys is a verb someone has to call, so unless it is named here
+          // it never runs and the check exists on paper only. Named first in the list
+          // because a key that is stale or missing makes every step after it wasted work.
+          const keyCheck = `verify_keys(permissionId=${p.permissionId}) FIRST: confirm the public keys on this `
+            + 'machine are still the ones this collaboration agreed on, and re-download any that are not. '
+            + 'A key left over from an earlier index set looks identical to a current one on disk.';
           const actions = missingMine.map(i => {
             const bundle = i.layout === 'encrypted-bundle' && i.encodingRecipe;
+            // upload takes inputName: naming it here is what stops the dataset being
+            // offered for every other input later, on both sides.
             const steps = bundle
-              ? `encode_recipe -> encrypt -> upload -> declare_input_dataset`
-              : `encrypt (or upload as-is if plaintext) -> upload -> declare_input_dataset`;
+              ? `encode_recipe -> encrypt -> upload(inputName='${i.name}') -> declare_input_dataset`
+              : `encrypt (or upload as-is if plaintext) -> upload(inputName='${i.name}') -> declare_input_dataset`;
             return `input '${i.name}' (layout ${i.layout || 'n/a'}): ${steps}`;
           });
-          return ok({ ...base, stage: 'provide-inputs', summary: `Provide your ${missingMine.length} undeclared input(s). Get the signed def first with get_function_definition(saveAs) if you have not.`, yourUndeclaredInputs: missingMine.map(i => i.name), nextActions: actions });
+          // Hash-matched inputs need one question answered before anything is encrypted,
+          // and the encoding is the only place it is visible. Asked afterwards it is too
+          // late in the worst way: the run completes and reports no matches, because
+          // every row was hashed with fields the other side does not hold.
+          // `schema`, NOT `encoding`. They are different fields with different vocabularies:
+          // the overlap family is encoding 'integer-packed' and schema 'indicator-hash'.
+          // Comparing a schema name against an encoding name matches nothing, so the
+          // question would never be raised.
+          const hashed = myInputs.some(i => i.schema === 'indicator-hash');
+          if (hashed) {
+            actions.push(
+              "BEFORE encrypting, ASK THE USER which columns of each file identify a record: the whole line "
+              + "('all', the default), or specific columns like '1,3'. Pass the answer to encrypt as `columns`. "
+              + 'Both sides must hash the SAME FIELDS in the SAME ORDER; a file carrying extra fields the '
+              + 'other party does not hold will match nothing, and the run will report that as no overlap. '
+              + 'Do not read the file to decide, and do not ask for its contents.',
+            );
+          }
+          return ok({ ...base, stage: 'provide-inputs', summary: `Provide your ${missingMine.length} undeclared input(s). Get the signed def first with get_function_definition(saveAs) if you have not.`, yourUndeclaredInputs: missingMine.map(i => i.name), nextActions: [keyCheck, ...actions] });
         }
 
         // ---- your inputs are in; look at executions ----
@@ -216,6 +330,10 @@ export function registerGuideTools(server: McpServer, api: JulennyApiClient) {
 
         // ---- STAGE 4: decrypt / release ----
         if (released && amViewer) {
+          // --lead is set by the KEY CEREMONY role, never by the data role. Getting it
+          // wrong here does not fail: it combines two partials that do not belong
+          // together and prints a plausible number.
+          const leadFlag = (await keysetupRole()) === 'lead';
           // Which resolver applies depends on what a slot MEANS in this function's
           // output, which the agent cannot infer from the verb names. Say it here.
           const pairList = /cross-match/.test(String(base.function ?? ''));

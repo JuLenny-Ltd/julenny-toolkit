@@ -12,7 +12,7 @@
 # maintainer scripts. Not covered by *.sh above, and a CRLF shebang fails hard
 # on Linux ("bad interpreter: /usr/bin/env bash^M"). The postinst matters most:
 # a broken maintainer script makes the package fail to configure.
-linux/julenny-toolkit-examples  text eol=lf
+linux/julenny-toolkit-scripts  text eol=lf
 linux/debian/*                  text eol=lf
 
 # PowerShell, cmd, and batch scripts always run on Windows; force CRLF.
@@ -20,13 +20,12 @@ linux/debian/*                  text eol=lf
 *.cmd   text eol=crlf
 *.bat   text eol=crlf
 
-# Example input data is encrypted and then matched byte-for-byte against the
+# Sample input data is encrypted and then matched byte-for-byte against the
 # OTHER party's data, which may have been checked out on a different OS. A CRLF
 # checkout would append \r to every record, so a Windows-side record would never
 # match the identical Linux-side one and the result would be silently wrong
 # (e.g. an overlap count of 0 instead of 2). Force LF regardless of platform.
-examples/**/data/**     text eol=lf
-examples/**/golden/**   text eol=lf
+scripts/samples/**     text eol=lf
 
 # Binary asset categories - never EOL-normalize.
 *.png   binary

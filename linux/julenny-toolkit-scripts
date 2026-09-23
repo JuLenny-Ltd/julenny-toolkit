@@ -1,0 +1,212 @@
+#!/usr/bin/env bash
+# Copy the JuLenny FHE Toolkit scripts out of the read-only package
+# location into a folder you can run and edit.
+#
+# The package installs the full script tree under /usr/share, which is not writable
+# and not where you want to work.
+#
+# TWO destinations, because the tree has two kinds of thing in it:
+#
+#   the SCRIPTS go to --dest, a folder you own and can edit;
+#   the SAMPLE DATA goes to <workdir>/samples/, because that is where the scripts and
+#     the connector both look for it. Keeping a second copy beside the scripts is what
+#     let a stale fixture be run against a fresh one on 2026-09-17 and return a
+#     correct-looking zero.
+#
+# There is no --role any more. The scripts no longer come in two halves: which side of
+# a collaboration this machine is comes from the permission, so there is nothing to
+# choose at install time.
+#
+# Interactive by default. For CI or scripted installs, pass --dest.
+
+set -euo pipefail
+
+SRC_DEFAULT="/usr/share/julenny-toolkit/scripts"
+SRC="${JULENNY_SCRIPTS_SRC:-$SRC_DEFAULT}"
+DEST_DEFAULT="$HOME/julenny-scripts"
+
+DEST=""
+WORKDIR=""
+FORCE=false
+ASSUME_YES=false
+
+# ---------- output helpers ----------
+if [[ -t 1 ]]; then
+    B=$'\033[1m'; DIM=$'\033[2m'; GRN=$'\033[32m'; YLW=$'\033[33m'; RED=$'\033[31m'; RST=$'\033[0m'
+else
+    B=""; DIM=""; GRN=""; YLW=""; RED=""; RST=""
+fi
+info()    { echo "${DIM}$*${RST}"; }
+success() { echo "${GRN}$*${RST}"; }
+warn()    { echo "${YLW}$*${RST}" >&2; }
+die()     { echo "${RED}error:${RST} $*" >&2; exit 1; }
+
+usage() {
+    cat <<'USAGE'
+Usage: julenny-toolkit-scripts [options]
+
+Copies the JuLenny FHE Toolkit scripts to a writable folder.
+
+Options:
+  --dest <path>     Where to copy the scripts. Default: ~/julenny-scripts
+  --workdir <path>  The JuLenny working folder; sample data lands in its samples/
+                    subfolder. Default: the folder the toolkit already uses.
+  --force           Overwrite a non-empty destination.
+  --yes             Skip the final confirmation.
+  -h, --help        Show this help.
+
+With no options it asks interactively.
+
+Examples:
+  julenny-toolkit-scripts
+  julenny-toolkit-scripts --dest /srv/julenny --yes
+USAGE
+}
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --dest)    DEST="${2:-}"; shift 2 ;;
+        --workdir) WORKDIR="${2:-}"; shift 2 ;;
+        --role)
+            die "--role is no longer used. The scripts are one set for both sides, and
+which side this machine is comes from the permission you pick."
+            ;;
+        --force)  FORCE=true; shift ;;
+        --yes|-y) ASSUME_YES=true; shift ;;
+        -h|--help) usage; exit 0 ;;
+        *) die "unknown argument: $1 (try --help)" ;;
+    esac
+done
+
+[[ -d "$SRC" ]] || die "script sources not found at $SRC
+Is the julenny-toolkit package installed? Set JULENNY_SCRIPTS_SRC to override."
+
+# ---------- destination ----------
+if [[ -z "$DEST" ]]; then
+    echo
+    read -r -p "Where should the scripts go? [$DEST_DEFAULT]: " _dest
+    DEST="${_dest:-$DEST_DEFAULT}"
+fi
+
+# Expand a leading ~ typed by hand (the shell does not do it for read input).
+[[ "$DEST" == "~"* ]] && DEST="${HOME}${DEST#\~}"
+
+if [[ -e "$DEST" && -n "$(ls -A "$DEST" 2>/dev/null || true)" ]] && ! $FORCE; then
+    die "$DEST exists and is not empty.
+Pass --force to overwrite it, or choose a different folder."
+fi
+
+# ---------- working folder ----------
+# Same resolution order as scripts/_core/lib.sh and mcp/src/tools/lib/paths.ts, so all
+# three surfaces agree on where the samples are. Keep them in step.
+if [[ -z "$WORKDIR" ]]; then
+    if [[ -n "${JULENNY_WORKDIR:-}" ]]; then
+        WORKDIR="$JULENNY_WORKDIR"
+    else
+        _settings="${XDG_CONFIG_HOME:-$HOME/.config}/julenny/workdir"
+        if [[ -f "$_settings" ]]; then
+            WORKDIR="$(tr -d '\r' < "$_settings" | head -n 1 | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')"
+        fi
+    fi
+    [[ -n "$WORKDIR" ]] || WORKDIR="$HOME/julenny-workdir"
+fi
+[[ "$WORKDIR" == "~"* ]] && WORKDIR="${HOME}${WORKDIR#\~}"
+SAMPLES_DEST="$WORKDIR/samples"
+
+# ---------- confirm ----------
+if ! $ASSUME_YES; then
+    echo
+    echo "  scripts:     $DEST"
+    echo "  sample data: $SAMPLES_DEST"
+    echo
+    read -r -p "Proceed? [Y/n]: " _ok
+    case "${_ok:-Y}" in
+        [Yy]*) ;;
+        *) info "Cancelled. Nothing was copied."; exit 0 ;;
+    esac
+fi
+
+# ---------- copy the scripts ----------
+# Copy the whole tree, then drop what this machine cannot run. Pruning rather than
+# enumerating what to include means a newly added shared file is picked up
+# automatically instead of being silently left behind.
+mkdir -p "$DEST"
+cp -R "$SRC"/. "$DEST"/
+chmod -R u+w "$DEST"
+
+# Nothing is pruned by side any more.
+#
+#   _core/lead and _core/main no longer exist. There is one numbered set of phase
+#   scripts, and each phase branches internally on whichever role governs it.
+#
+#   NEITHER side profile is dropped, even though only one is used at a time. A
+#   permission created in the other direction inside the same collaboration makes this
+#   machine the other data role, and the scripts follow that by loading the other
+#   profile mid-run. Deleting it would turn a supported case into a missing file.
+
+# Drop the Windows scripts. This machine cannot run a .ps1, and leaving them
+# beside their .sh twins invites someone to try the wrong one.
+find "$DEST" -name '*.ps1' -delete
+
+find "$DEST" -name '*.sh' -exec chmod +x {} +
+
+# ---------- place the sample data in the working folder ----------
+# Overwrite rather than skip. These are shipped fixtures, not the operator's own data,
+# and a stale one is the failure this move exists to prevent. The operator's own files
+# live flat at the top of the working folder and are never touched here.
+rm -rf "$DEST/samples"   # never leave a second copy beside the scripts
+if [[ -d "$SRC/samples" ]]; then
+    mkdir -p "$SAMPLES_DEST"
+    cp -R "$SRC"/samples/. "$SAMPLES_DEST"/
+    chmod -R u+w "$SAMPLES_DEST"
+    success "Sample data installed to $SAMPLES_DEST"
+else
+    info "No samples/ folder in $SRC; skipping sample data."
+fi
+
+# ---------- next steps ----------
+echo
+success "Scripts installed to $DEST"
+
+# List what was actually copied, and give a command that can be pasted as-is.
+# A "<scenario>" placeholder is not a next step; the operator should not have to
+# go and work out what the options are.
+_scenarios=()
+for _d in "$DEST"/*/; do
+    _name="$(basename "$_d")"
+    [[ "$_name" == "_core" || "$_name" == "samples" ]] && continue
+    _scenarios+=("$_name")
+done
+
+echo
+echo "${B}Scenarios available${RST}"
+for _name in "${_scenarios[@]}"; do
+    if [[ "$_name" == "joint-record-overlap" ]]; then
+        echo "  $_name   (simplest: exact whole-number answers)"
+    else
+        echo "  $_name"
+    fi
+done
+
+# Prefer joint-record-overlap for the worked example: BFV, so the answer is an
+# exact integer the operator can check by hand.
+_first="joint-record-overlap"
+if [[ ! -d "$DEST/$_first" ]]; then
+    _first="${_scenarios[0]:-<scenario>}"
+fi
+
+echo
+echo "${B}To start${RST}"
+echo "  cd $DEST/$_first"
+echo "  ./run.sh"
+echo
+info "run.sh is menu-driven and resumes wherever you left off. It waits when it"
+info "needs the other side to act. It does not ask which side you are: that comes"
+info "from the permission you pick."
+info "Each scenario's README.md gives its sample data and the expected answer, so"
+info "you can confirm the result is correct. $DEST/README.md has the full phase breakdown."
+echo
+info "To drive BOTH sides from this one host, give each shell its own root:"
+info "export JL_ROOT=\$HOME/julenny-workdir-acme (and -beta in the other shell)."
+info "NOT JL_WORKDIR - that one is derived per collaboration and is overwritten as"
+info "soon as a joint key is selected. See README.md."

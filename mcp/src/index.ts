@@ -112,8 +112,11 @@ STAGE 4 - DECRYPT (threshold; both parties contribute one partial)
   - RELEASER: wait for execution state "awaiting-release", then release (this
     partial-decrypts and uploads your partial so the viewer can combine).
   - VIEWER: wait for state "released", then download_result and download_partial
-    (the releaser's partial), partial_decrypt (your own share; pass lead:true if
-    you were the keysetup lead), and decrypt_result (combine both partials). The
+    (the releaser's partial), partial_decrypt (your own share; pass lead:true
+    when /keysetup reports yourKeysetupRole 'lead' - ASK IT, do not assume the
+    data owner leads: on a permission created in the other direction they are
+    different parties, and the wrong flag returns a wrong number rather than an
+    error), and decrypt_result (combine both partials). The
     plaintext is written to a workdir file - read it from the filesystem; the
     verb returns only the path, never the values.
 
@@ -146,6 +149,11 @@ SOLO SELF-TEST (one company, no partner) - a DIFFERENT sequence
    4. publish_final_keys with the JOINT public key and the FINAL relin key.
       For an internal grant your single submission is compared against itself and
       completes immediately.
+   4b. verify_keys, before encrypting anything. It compares the public keys on this
+      machine against the platform and replaces any that are stale or missing. A key
+      built for an index set that has since changed looks identical on disk, and
+      computing with one wastes the whole run. The scripts do this
+      automatically at this point; here it has to be called.
    5. encrypt under the JOINT public key (not the lead's contribution), upload,
       declare_input_dataset. A two-input function needs BOTH inputs from you.
       Use list_workdir_files and ASK THE USER which file is which input.
@@ -167,7 +175,7 @@ SOLO SELF-TEST (one company, no partner) - a DIFFERENT sequence
   rotation indices must be derived from the rule_pairs file first).
 
   ALWAYS CHECK THE ANSWER. Every function ships sample data with a documented expected
-  result in examples/SELF-TEST.md. A run that merely completes proves the pipeline works;
+  result in scripts/SELF-TEST.md. A run that merely completes proves the pipeline works;
   only a run that MATCHES the expected value proves the encoding, keys, circuit and
   decryption are all correct. Partial data corruption produces a successful run with a
   plausible wrong answer, and without a reference there is no way to tell them apart. If
@@ -179,7 +187,7 @@ SOLO SELF-TEST (one company, no partner) - a DIFFERENT sequence
   (rows_A x rows_B) / slots. There are never false negatives.
 
 SCRIPTS PARITY: the two-party flow also ships as interactive shell scripts (the
-00-06 example scripts) and the two paths produce byte-identical keys and results.
+00-06 scripts) and the two paths produce byte-identical keys and results.
 The scripts CANNOT drive a solo self-test: they hardcode an external grant type.`;
 
 const server = new McpServer({

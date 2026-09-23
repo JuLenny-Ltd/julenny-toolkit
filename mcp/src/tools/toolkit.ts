@@ -30,6 +30,7 @@ import { readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { runCli } from './lib/cli.js';
 import { resolveInWorkdir, workdir } from './lib/paths.js';
+import { rememberPendingColumns, columnsForDataset, columnsForFile } from './lib/columns.js';
 
 const ok = (obj: Record<string, unknown>) => ({
   content: [{ type: 'text' as const, text: JSON.stringify({ ok: true, ...obj }, null, 2) }],
@@ -128,6 +129,12 @@ export function registerToolkitTools(server: McpServer) {
   server.tool(
     'encrypt',
     'Encrypt a local input file under a joint public key. Returns the ciphertext path, never contents. '
+      + 'BEFORE calling this for a hash-matched input (a customer list, an id list, anything matched record '
+      + 'by record), ASK THE USER whether the whole line should be matched on or only certain columns. All '
+      + 'columns is the default and is right for a file that is nothing but the identifier; a file with '
+      + 'extra fields (a date, an amount, a note) will match nothing unless the other side happens to hold '
+      + 'byte-identical extra fields, so the choice matters. Do not read the file to decide, and do not ask '
+      + 'for its contents: ask the user which columns identify a record. '
       + 'For an exact-PSI (signature-table) input, pass the table parameters PINNED ON THE GRANT '
       + '(cells, tables, limbs, countGroups, shards) — they are per-grant, not in the function definition, '
       + 'and both parties must use the same ones or their tables are not comparable. With shards > 1 the '
@@ -140,6 +147,13 @@ export function registerToolkitTools(server: McpServer) {
       inputName: z.string().optional().describe('Function-def input name (mode A; required with functionDef)'),
       schema: z.enum(['indicator-hash', 'weight-vector', 'binary-indicator', 'signature-table']).optional().describe('Encoding schema (mode B)'),
       contextSpec: z.string().optional().describe('Crypto context spec override'),
+      columns: z.string().optional().describe(
+        "Which columns of the file identify a record: 'all' (the default), or 1-based column numbers "
+        + "like '1' or '1,3'. Each party picks its own, because the same field can sit in a different "
+        + "position in each file; what the two sides must agree on is WHICH FIELDS, and their ORDER when "
+        + 'there is more than one, since they are joined in the order given before hashing. The choice is '
+        + 'remembered and reused when the result is resolved.',
+      ),
       role: z.enum(['A', 'B']).optional().describe("This party's role for a signature table: the grant's first input is A, the second B"),
       cells: z.number().int().positive().optional().describe('Signature table: cells per table, from the grant (psiParams.cells)'),
       tables: z.number().int().positive().optional().describe('Signature table: parallel tables, from the grant (psiParams.tables)'),
@@ -155,6 +169,10 @@ export function registerToolkitTools(server: McpServer) {
     },
     async (p) => {
       try {
+        const columns = (p.columns ?? '').trim();
+        if (columns && columns !== 'all' && !/^\d+(,\d+)*$/.test(columns)) {
+          return fail(`columns must be 'all' or 1-based column numbers like '1,3' (got '${columns}')`);
+        }
         const args = [
           'crypto', 'encrypt',
           '--input', resolveInWorkdir(p.input),
@@ -169,6 +187,9 @@ export function registerToolkitTools(server: McpServer) {
         } else {
           return fail('provide either functionDef+inputName (mode A) or schema (mode B)');
         }
+        // 'all' is the CLI's own default, so there is no need to pass it; recording it
+        // below is what matters.
+        if (columns && columns !== 'all') args.push('--columns', columns);
         if (p.contextSpec) args.push('--context-spec', p.contextSpec);
         // Signature-table sizing. These live on the GRANT, not in the function definition (the
         // definition is registry-signed and cannot know how many records a party holds), so the
@@ -188,15 +209,25 @@ export function registerToolkitTools(server: McpServer) {
         const r = await runCli(args);
         if (!r.ok) return fail(r.error || 'encrypt failed', { exitCode: r.exitCode });
         const j = (r.json ?? {}) as Record<string, unknown>;
+
+        // Remember how this file was composed, EVEN WHEN it was all columns. Resolution
+        // re-hashes the local file, so it must compose rows identically or it matches
+        // nothing and reports an honest-looking zero. Recording every encrypt is what
+        // lets resolution distinguish "all columns, deliberately" from "no idea how this
+        // was encrypted" and ask in the second case instead of guessing.
+        await rememberPendingColumns(p.output, { columns: columns || 'all', input: p.input });
+
         // The full report is what `upload` forwards as psiEncoding: it is the only way the platform
         // can learn how many records are in an opaque bundle, and therefore the only way it can
         // quote the job or check the 1 % drop floor. Written to a file rather than returned,
         // because every verb here returns references, not contents.
         if (p.reportOutput) await writeFile(resolveInWorkdir(p.reportOutput), JSON.stringify(j, null, 2));
+
         return ok({
           outputPath: j.outputPath ?? p.output,
           slotCount: j.slotCount,
           ciphertextBytes: j.ciphertextBytes,
+          columns: columns || 'all',
           ...(j.shards !== undefined && Number(j.shards) > 1
             ? { shards: j.shards, manifestPath: j.manifestPath, records: j.records, recordsDropped: j.recordsDropped }
             : {}),
@@ -217,7 +248,7 @@ export function registerToolkitTools(server: McpServer) {
       secretKey: z.string().describe('Workdir-relative secret-share file name'),
       output: z.string().describe('Workdir-relative output partial file name'),
       contextSpec: z.string().describe('Crypto context spec'),
-      lead: z.boolean().optional().describe('True for the keysetup-lead party'),
+      lead: z.boolean().optional().describe('True when this machine is the keysetup LEAD. Read it from next_step or from /keysetup yourKeysetupRole - do NOT infer it from being the data owner. The two roles differ on a permission created in the other direction inside an existing collaboration, and the wrong flag here does not error: it produces a partial that does not match the other one and a silently wrong answer.'),
     },
     async (p) => {
       try {
@@ -455,8 +486,8 @@ export function registerToolkitTools(server: McpServer) {
       secretKey: z.string().describe('Workdir-relative secret-share file name'),
       indices: z.string().describe('Rotation slot indices (CLI-format string, e.g. comma-separated)'),
       output: z.string().describe('Workdir-relative output contribution file name'),
-      peerShare: z.string().optional().describe('Workdir-relative peer share file name'),
-      jointPk: z.string().optional().describe('Workdir-relative joint public key file name'),
+      peerShare: z.string().optional().describe("Workdir-relative peer share file name. role='main' ONLY; ignored for 'lead'."),
+      jointPk: z.string().optional().describe("Workdir-relative joint public key file name. role='main' ONLY; ignored for 'lead'."),
       contextSpec: z.string().optional().describe('Crypto context spec'),
     },
     async (p) => {
@@ -468,8 +499,13 @@ export function registerToolkitTools(server: McpServer) {
           '--indices', p.indices,
           '--output', resolveInWorkdir(p.output),
         ];
-        if (p.peerShare) args.push('--peer-share', resolveInWorkdir(p.peerShare));
-        if (p.jointPk) args.push('--joint-pk', resolveInWorkdir(p.jointPk));
+        // The lead goes FIRST and so has neither of these. The CLI rejects them outright
+        // ("--peer-share and --joint-pk must NOT be set for role=lead"), which cost a live
+        // run a failed call on 2026-09-15. Drop them rather than forwarding a hard error:
+        // the caller supplying them has simply misread whose turn it is.
+        const isLead = p.role === 'lead';
+        if (!isLead && p.peerShare) args.push('--peer-share', resolveInWorkdir(p.peerShare));
+        if (!isLead && p.jointPk) args.push('--joint-pk', resolveInWorkdir(p.jointPk));
         if (p.contextSpec) args.push('--context-spec', p.contextSpec);
         args.push('--json');
         const r = await runCli(args);
@@ -744,9 +780,43 @@ export function registerToolkitTools(server: McpServer) {
       inputName: z.string().describe("Which function input this CSV was encrypted as (e.g. 'dataset_a')"),
       contextSpec: z.string().describe('Crypto context spec'),
       output: z.string().describe('Workdir-relative file to write the matched records to'),
+      datasetId: z.string().optional().describe(
+        'The dataset id this CSV was uploaded as. Supply it when you have it: it is the surest way '
+        + 'to recover which columns were hashed at encrypt time.',
+      ),
+      columns: z.string().optional().describe(
+        "Which columns were hashed at encrypt time: 'all', or 1-based numbers like '1,3'. Only needed "
+        + 'when the encryption happened somewhere else and was not recorded here. It MUST match what '
+        + 'was used at encrypt time; a different spec matches nothing and looks exactly like no overlap.',
+      ),
     },
     async (p) => {
       try {
+        // Recover how the file was composed at encrypt time, and REFUSE rather than guess.
+        //
+        // Resolution re-hashes the local file. If it composes rows differently from the way
+        // encryption did - all columns here, column 1 there - every hash differs, nothing
+        // matches, and the user is handed an empty file that is indistinguishable from a
+        // genuine "no records in common". There is no error anywhere in that path, which is
+        // what makes the wrong default so dangerous: a silent wrong answer, not a failure.
+        //
+        // Every encrypt done through this connector is recorded, including 'all'. So a
+        // missing record means the encryption happened elsewhere, and the honest response is
+        // to ask the person who did it.
+        let columns = (p.columns ?? '').trim();
+        if (columns && columns !== 'all' && !/^\d+(,\d+)*$/.test(columns)) {
+          return fail(`columns must be 'all' or 1-based column numbers like '1,3' (got '${columns}')`);
+        }
+        if (!columns && p.datasetId) columns = (await columnsForDataset(p.datasetId)) ?? '';
+        if (!columns) columns = (await columnsForFile(p.csv)) ?? '';
+        if (!columns) {
+          return fail(
+            `no record of which columns of '${p.csv}' were hashed when it was encrypted, so re-hashing it `
+            + 'now could silently match nothing. ASK THE USER which columns were matched on when this file '
+            + "was encrypted ('all', or numbers like '1,3'), then call this again with `columns` set. If the "
+            + 'file was uploaded from this machine, passing its `datasetId` will also find the answer.',
+          );
+        }
         // The combine --out-file JSON keys the surviving slots by slot index. The
         // field name depends on the scheme: the integer path (BFV) writes
         // nonZeroValues, the real path (CKKS) writes significantValues, because
@@ -782,6 +852,9 @@ export function registerToolkitTools(server: McpServer) {
           '--function-def', resolveInWorkdir(p.functionDef),
           '--input-name', p.inputName,
           '--context-spec', p.contextSpec,
+          // 'all' is the CLI default; passing it changes nothing, but passing the subset
+          // is the whole point of having remembered it.
+          ...(columns && columns !== 'all' ? ['--columns', columns] : []),
           '--json',
         ];
         const r = await runCli(args);

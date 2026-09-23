@@ -374,6 +374,7 @@ int run_crypto_wrap_envelope(const CryptoWrapEnvelopeArgs& args) {
             fhe_toolkit::registry::PayloadRef ref;
             ref.object_key = args.object_key;
             ref.size_bytes = args.size_bytes;
+            ref.sha256_hex = args.sha256_hex;
             payload_size = args.size_bytes;
             body = fhe_toolkit::registry::make_signed_envelope_from_ref(
                 ref, fields, sk);
@@ -405,6 +406,7 @@ int run_crypto_wrap_envelope(const CryptoWrapEnvelopeArgs& args) {
         j["permissionId"]   = fields.permission_id;
         j["timestamp"]      = fields.timestamp;
         if (ref_mode) j["objectKey"] = args.object_key;
+        if (ref_mode && !args.sha256_hex.empty()) j["sha256Hex"] = args.sha256_hex;
         std::cout << j.dump(2) << "\n";
     } else {
         std::cout << "Signed envelope written (" << (ref_mode ? "payloadRef" : "payloadB64") << " mode).\n";
@@ -1789,7 +1791,13 @@ int run_crypto_encrypt(const CryptoEncryptArgs& args) {
         domain_from_def = params.value("domainSeparator", std::string{});
         sep_str     = params.value("separator", std::string{});
         skip_header = params.value("skipHeader", false);
-        cols_spec   = params.value("columns", std::string{"all"});
+        // --columns overrides the function-def here too, not just in schema mode. The column
+        // choice is a property of THIS party's file, not of the shared function: the two
+        // sides may hold the same fields in different positions, and each selects its own.
+        // The function-def default stays "all", so nothing changes unless a caller asks.
+        cols_spec   = args.columns.empty()
+            ? params.value("columns", std::string{"all"})
+            : args.columns;
     } else {
         // Mode B: explicit-flag.
         schema_name = args.schema;
@@ -3173,7 +3181,13 @@ int run_crypto_resolve_indicator(const CryptoResolveIndicatorArgs& args) {
     const json params = input_def.value("schemaParams", json::object());
     const std::string sep_str = params.value("separator", std::string{});
     const bool skip_header    = params.value("skipHeader", false);
-    const std::string cols_spec = params.value("columns", std::string{"all"});
+    // An explicit --columns wins over the function-def, because the party may have encrypted
+    // a subset. Each side chooses its own columns: the two CSVs can hold the same fields in
+    // different positions. What must agree between the sides is the ORDER of the chosen
+    // columns, since they are joined in the order given before hashing.
+    const std::string cols_spec = args.columns.empty()
+        ? params.value("columns", std::string{"all"})
+        : args.columns;
 
     const char sep_char = sep_str.empty() ? '\0' : sep_str[0];
     auto cols = parse_columns_spec(cols_spec);
@@ -3700,7 +3714,10 @@ void register_crypto(CLI::App& app,
                         "empty/omitted means hash the whole line. Mode B only.");
     encrypt->add_option("--columns", encrypt_args.columns,
                         "Columns to include in indicator-hash: 'all' or comma-separated 1-based "
-                        "indices like '1,2'. Default 'all'. Mode B only.");
+                        "indices like '1,3'. Default: whatever the function-def says ('all'). "
+                        "Overrides the function-def, so each party can pick the columns that "
+                        "suit ITS file. Pass the SAME spec to 'crypto resolve-indicator' later, "
+                        "or the rehash will match nothing.");
     encrypt->add_flag  ("--skip-header", encrypt_args.skip_header,
                         "Skip the first non-blank line of the input. Mode B only.");
     // schema 'signature-table' (exact PSI). Both parties must pass the same cells/tables/limbs and
@@ -3970,6 +3987,12 @@ void register_crypto(CLI::App& app,
                          "Requires --size-bytes; pairs with the platform's keysetup-messages/upload-url endpoint.");
     wrap_env->add_option("--size-bytes", wrap_envelope_args.size_bytes,
                          "Raw payload size in bytes (required with --object-key).");
+    wrap_env->add_option("--sha256", wrap_envelope_args.sha256_hex,
+                         "sha256 of the payload, 64 lowercase hex characters (optional, "
+                         "large-payload mode). Signed with the envelope and kept by the platform, "
+                         "so a client can later check whether the copy on its own disk is still "
+                         "the key the collaboration is computing with. Omit it and the envelope "
+                         "signs exactly as before.");
     wrap_env->add_option("--secret-key", wrap_envelope_args.secret_key_path,
                          "Ed25519 signing secret key (32-byte seed; from signing-keygen)")
             ->required();
@@ -4074,6 +4097,10 @@ void register_crypto(CLI::App& app,
                         "Which input in the function-def this CSV is for (e.g. 'dataset_a')")->required();
     resolve->add_option("--context-spec", resolve_indicator_args.context_spec,
                         "Crypto context spec (default: bfv-default-v1)");
+    resolve->add_option("--columns", resolve_indicator_args.columns,
+                        "Columns that were hashed at encrypt time: 'all' or comma-separated "
+                        "1-based indices like '1,3'. MUST match what --columns was at encrypt, "
+                        "or nothing will match. Default: whatever the function-def says.");
     resolve->add_flag  ("--json", resolve_indicator_args.emit_json, "Emit JSON output");
     resolve->callback([&resolve_indicator_args, exit_code]() {
         *exit_code = run_crypto_resolve_indicator(resolve_indicator_args);

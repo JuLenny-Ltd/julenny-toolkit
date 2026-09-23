@@ -1,0 +1,386 @@
+#!/usr/bin/env bash
+# Finalize the joint keysetup. BOTH sides run it, and both do the SAME work:
+#
+#   1. Collect whichever round-2 / sum shares the peer owes.
+#   2. Run the deterministic combines locally. Each side must produce byte-identical
+#      output to the other's run of the same combine; that is what the platform checks.
+#   3. SHA-256-hash each final joint key.
+#   4. Request one signed object storage upload URL per keyType and PUT the blob.
+#   5. Build the to-sign JSON locally, mimicking what the web UI emits.
+#   6. Sign the envelope with `julenny-toolkit crypto wrap-final-keys-envelope`.
+#   7. POST the signed envelope to /keysetup/final-keys.
+#   8. Report the resulting permission state.
+#
+# The ONLY thing the keysetup role changes is which of the two shares in each combine is
+# already on this machine and which has to be fetched from the peer, plus the message
+# type the peer's sum share arrives under. The combines themselves take the LEAD's share
+# as -a and the MAIN's as -b on both machines, because that ordering is what makes the
+# two outputs identical.
+#
+# Which half this machine runs is the KEYSETUP role, read from the platform by 00-init,
+# NOT the data role: a permission created in the other direction inside the same
+# collaboration makes the data owner the keysetup main.
+#
+# Strictly mirrors the web UI's option-B finalization flow: the toolkit binary is
+# offline (combines + signing only); platform calls happen here in bash.
+#
+# Run after 02-keysetup-2.sh has finished on BOTH machines.
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+# lib.sh resolves which side of the collaboration this machine is and loads the
+# matching side profile, so one copy of this phase serves both. The keysetup role
+# (lead/main) and the data role (owner/consumer) are independent, and a permission can
+# be created in either direction inside one collaboration.
+# shellcheck source=lib.sh
+source "$SCRIPT_DIR/lib.sh"
+load_session
+
+step "${JL_OUR_LABEL}: finalize joint keysetup (keysetup role: ${JULENNY_ROLE:-unknown})"
+
+# -------- Idempotence marker: skip if already submitted for THIS permission --------
+# 03 registers the finalKeys references against the permission's own document.
+# When a new permission is created under an existing complete joint key, the
+# crypto work in this script is already done (keys exist locally) but we still
+# need to POST the finalKeys envelope against the new permission ID. The
+# marker prevents re-submitting for the same permission.
+MARKER="$JL_WORKDIR/finalkeys_submitted_$JULENNY_PERMISSION_ID"
+if [[ -f "$MARKER" ]]; then
+    info "Final keys already submitted for permission $JULENNY_PERMISSION_ID."
+    info "(Remove $MARKER and rerun if you need to re-submit.)"
+    exit 0
+fi
+
+# If finalization is already done on the platform, this machine has nothing to
+# finalize - even if it never held the local keysetup intermediates (e.g. the
+# joint key was set up via a different tool/machine and is being reused here).
+# Detect the already-complete state and skip BEFORE requiring local files.
+#
+# The main half used to run this same check much later, just before requesting upload
+# URLs, by which point the local-file checks had already stopped the run.
+_precheck="$(curl_jl POST "/api/fhe-permissions/$JULENNY_PERMISSION_ID/keysetup/final-keys/upload-url" \
+    -H "Content-Type: application/json" \
+    --data-binary "$(jq -n '{keyType: "joint_public_key"}')" 2>/dev/null || echo '{}')"
+if [[ "$(echo "$_precheck" | jq -r '.error // ""')" == *"in state 'complete'"* ]]; then
+    info "Final keys already registered for this permission (keysetup complete). Skipping finalize."
+    touch "$MARKER"
+    exit 0
+fi
+
+# Rotation-free functions (no "sum" in requiredEvalKeys) skip the sum key entirely.
+if function_requires_sum_keys; then NEEDS_SUM="yes"; else NEEDS_SUM="no"; fi
+# Additive-only functions (federated-average) declare requiredEvalKeys: [] and have
+# no relin key at all: no rounds, no combine, nothing to upload.
+if function_requires_relin_keys; then NEEDS_RELIN="yes"; else NEEDS_RELIN="no"; fi
+
+# -------- Locate already-produced files --------
+# LEAD_* and MAIN_* name the SHARES, not the machines. Which of them is ours and which
+# is the peer's is the only thing the role decides here.
+COMBINED_R1="$JL_KEYS_DIR/combined-relin-r1.bin"
+
+if i_am_keysetup_lead; then
+    LEAD_R2="$JL_KEYS_DIR/lead-relin-r2.bin"
+    LEAD_SUM="$JL_KEYS_DIR/lead-sum-r1.bin"
+    MAIN_R2="$JL_PEER_DIR/main-relin-r2.bin"
+    MAIN_SUM="$JL_PEER_DIR/main-sum-r1.bin"
+    MY_R2="$LEAD_R2"
+    MY_SUM="$LEAD_SUM"
+    PEER_R2="$MAIN_R2"
+    PEER_SUM="$MAIN_SUM"
+    PEER_SUM_MSG="sum-round1-continue"
+    # The lead never derives the joint pk. Normally it picks it up during bundle 2; an
+    # additive-only function has no bundle 2, so it can still be owed here.
+    JOINT_PK_FROM_PEER=true
+else
+    LEAD_R2="$JL_PEER_DIR/lead-relin-r2.bin"
+    LEAD_SUM="$JL_PEER_DIR/lead-sum-r1.bin"
+    MAIN_R2="$JL_KEYS_DIR/main-relin-r2.bin"
+    MAIN_SUM="$JL_KEYS_DIR/main-sum-r1.bin"
+    MY_R2="$MAIN_R2"
+    MY_SUM="$MAIN_SUM"
+    PEER_R2="$LEAD_R2"
+    PEER_SUM="$LEAD_SUM"
+    PEER_SUM_MSG="sum-round1"
+    # The main derived the joint pk itself in bundle 1; there is nothing to fetch.
+    JOINT_PK_FROM_PEER=false
+fi
+
+# The round-2 intermediates are only needed to PRODUCE the final relin key. A new
+# permission reusing an existing joint key already has the final key on disk, and the
+# combine below is skipped, so only insist on the intermediates when there is a
+# combine still to do.
+FINAL_RELIN_PRECHECK="$JL_KEYS_DIR/final_relin_key.bin"
+[[ "$NEEDS_RELIN" != "yes" || -f "$FINAL_RELIN_PRECHECK" || -f "$MY_R2" ]] \
+    || die "Missing $MY_R2. Did 02-keysetup-2.sh run?"
+# Same reasoning as the relin intermediates: sum-round-1 is only needed to PRODUCE
+# the final sum key, so a reused joint key that already has it needs nothing.
+FINAL_SUM_PRECHECK="$JL_KEYS_DIR/final_sum_key.bin"
+[[ "$NEEDS_SUM" != "yes" || -f "$FINAL_SUM_PRECHECK" || -f "$MY_SUM" ]] \
+    || die "Missing $MY_SUM. Did 01-keysetup-1.sh run?"
+[[ "$NEEDS_RELIN" != "yes" || -f "$FINAL_RELIN_PRECHECK" || -f "$COMBINED_R1" ]] \
+    || die "Missing $COMBINED_R1. Did 02-keysetup-2.sh run?"
+
+# Joint PK can be at either of two paths depending on prior steps.
+JOINT_PK=""
+for candidate in "$JL_KEYS_DIR/joint_public_key.bin" "$JL_PEER_DIR/joint-pk.bin"; do
+    if [[ -f "$candidate" ]]; then JOINT_PK="$candidate"; break; fi
+done
+if [[ -z "$JOINT_PK" ]] && $JOINT_PK_FROM_PEER; then
+    # The main's pk-share IS the joint public key, so for the lead this fetch is the
+    # joint key itself and not a peer contribution to it.
+    info "Fetching the joint public key from ${JL_PEER_LABEL}'s pk-share..."
+    wait_for_peer_share "pk-share"
+    download_peer_share "pk-share" "$JL_PEER_DIR/joint-pk.bin"
+    [[ -f "$JL_PEER_DIR/joint-pk.bin" ]] && JOINT_PK="$JL_PEER_DIR/joint-pk.bin"
+fi
+[[ -n "$JOINT_PK" ]] || die "Cannot find the joint public key on disk."
+
+# -------- 1. Collect the peer's round-2 and sum shares --------
+# Skip the download if we already have them locally (idempotence: a reused-joint-key
+# permission will not have a fresh peer upload for THIS permission, but the bytes from
+# the original keysetup are still on disk and still correct).
+#
+# The peer's round-2 share is ONLY an input to the combine below, and that combine is
+# skipped when the final key is already on disk. Waiting for a share we will never use
+# deadlocks a reused-joint-key permission whose peer-share cache happens to be empty:
+# the peer walks straight past its own (cached) wait and never re-publishes.
+if [[ "$NEEDS_RELIN" == "yes" && ! -f "$FINAL_RELIN_PRECHECK" ]]; then
+    if [[ ! -f "$PEER_R2" ]]; then
+        info "Waiting for ${JL_PEER_LABEL}'s relin-round2 contribution..."
+        wait_for_peer_share "relin-round2"
+        download_peer_share "relin-round2" "$PEER_R2"
+    else
+        info "Reusing existing peer share: $PEER_R2"
+    fi
+fi
+if [[ "$NEEDS_SUM" == "yes" && ! -f "$FINAL_SUM_PRECHECK" ]]; then
+    if [[ ! -f "$PEER_SUM" ]]; then
+        # The main half used to download this blind, with no wait. That is fine only
+        # while the lead has certainly published first, which is not something this
+        # phase can assume.
+        info "Waiting for ${JL_PEER_LABEL}'s $PEER_SUM_MSG contribution..."
+        wait_for_peer_share "$PEER_SUM_MSG"
+        download_peer_share "$PEER_SUM_MSG" "$PEER_SUM"
+    else
+        info "Reusing existing peer share: $PEER_SUM"
+    fi
+fi
+
+# -------- 2. Run the two final combines (deterministic on both sides) --------
+# Skip if the final key already exists locally - combines are deterministic
+# so re-running just re-produces the same bytes.
+FINAL_RELIN="$JL_KEYS_DIR/final_relin_key.bin"
+FINAL_SUM="$JL_KEYS_DIR/final_sum_key.bin"
+
+if [[ "$NEEDS_RELIN" != "yes" ]]; then
+    info "Function does not require a relinearization key; no relin combine."
+elif [[ ! -f "$FINAL_RELIN" ]]; then
+    info "Combining round-2 relin shares -> final relin key..."
+    julenny-toolkit crypto relin-combine \
+        --context-spec "$JULENNY_CRYPTO_CONTEXT_SPEC" \
+        --round 2 \
+        --share-a "$LEAD_R2" \
+        --share-b "$MAIN_R2" \
+        --combined-r1 "$COMBINED_R1" \
+        --output "$FINAL_RELIN" \
+        > /dev/null
+    success "Final relin key: $FINAL_RELIN ($(stat -c%s "$FINAL_RELIN") bytes)"
+else
+    info "Reusing existing final relin key: $FINAL_RELIN"
+fi
+
+if [[ "$NEEDS_SUM" == "yes" ]]; then
+    if [[ ! -f "$FINAL_SUM" ]]; then
+        info "Combining sum-round-1 shares -> final sum key..."
+        julenny-toolkit crypto sum-combine \
+            --context-spec "$JULENNY_CRYPTO_CONTEXT_SPEC" \
+            --share-a "$LEAD_SUM" \
+            --share-b "$MAIN_SUM" \
+            --joint-pk "$JOINT_PK" \
+            --output "$FINAL_SUM" \
+            > /dev/null
+        success "Final sum key: $FINAL_SUM ($(stat -c%s "$FINAL_SUM") bytes)"
+    else
+        info "Reusing existing final sum key: $FINAL_SUM"
+    fi
+fi
+
+info "Joint public key: $JOINT_PK ($(stat -c%s "$JOINT_PK") bytes)"
+
+# -------- 3. SHA-256 hashes (cross-party byte-equality check) --------
+JOINT_PK_SHA="$(sha256sum "$JOINT_PK"     | awk '{print $1}')"
+RELIN_SHA=""
+[[ "$NEEDS_RELIN" == "yes" ]] && RELIN_SHA="$(sha256sum "$FINAL_RELIN" | awk '{print $1}')"
+SUM_SHA=""
+[[ "$NEEDS_SUM" == "yes" ]] && SUM_SHA="$(sha256sum "$FINAL_SUM" | awk '{print $1}')"
+
+info "Hashes computed."
+info "  joint_public_key: $JOINT_PK_SHA"
+[[ "$NEEDS_RELIN" == "yes" ]] && info "  joint_relin_key:  $RELIN_SHA"
+[[ "$NEEDS_SUM" == "yes" ]] && info "  eval_sum_key:     $SUM_SHA"
+
+# -------- 4. Request upload URLs, PUT each blob to object storage --------
+# Ask before uploading. These keys belong to the COLLABORATION and never change, so a
+# second permission in the same collaboration was re-sending identical bytes - about
+# 154 MB across the two parties once a 77 MB sum key is involved. Sending the digest
+# lets the platform answer "already stored" with the object it holds, and the PUT is
+# skipped. An EMPTY url in the returned "url|key" pair means exactly that.
+request_final_key_upload_url() {
+    local key_type="$1"
+    local sha="${2:-}"
+    local payload resp url key
+    payload="$(jq -n --arg t "$key_type" --arg s "$sha" '{keyType: $t} + (if $s == "" then {} else {sha256Hex: $s} end)')"
+    resp="$(curl_jl POST "/api/fhe-permissions/$JULENNY_PERMISSION_ID/keysetup/final-keys/upload-url" -H "Content-Type: application/json" --data-binary "$payload")"
+    key="$(echo "$resp" | jq -r '.objectKey // empty')"
+    if [[ "$(echo "$resp" | jq -r '.alreadyStored // false')" == "true" ]]; then
+        [[ -n "$key" ]] || die "upload-url said alreadyStored for $key_type but returned no objectKey: $resp"
+        echo "|${key}"
+        return 0
+    fi
+    url="$(echo "$resp" | jq -r '.uploadUrl // empty')"
+    [[ -n "$url" && -n "$key" ]] || die "upload-url for $key_type failed: $resp"
+    echo "${url}|${key}"
+}
+
+put_blob_to_storage() {
+    local url="$1"
+    local path="$2"
+    local code
+    code="$(curl -sS -o /dev/null -w '%{http_code}' \
+        -X PUT "$url" \
+        -H "Content-Type: application/octet-stream" \
+        --data-binary "@$path")"
+    [[ "$code" == "200" || "$code" == "204" ]] \
+        || die "object storage PUT returned HTTP $code for $path"
+}
+
+info "Requesting upload URLs (3 keyTypes)..."
+JPK_URL_AND_KEY="$(request_final_key_upload_url joint_public_key "$JOINT_PK_SHA")"
+JPK_URL="${JPK_URL_AND_KEY%|*}"
+JPK_OBJ="${JPK_URL_AND_KEY#*|}"
+
+REL_OBJ=""
+if [[ "$NEEDS_RELIN" == "yes" ]]; then
+    REL_URL_AND_KEY="$(request_final_key_upload_url joint_relin_key "$RELIN_SHA")"
+    REL_URL="${REL_URL_AND_KEY%|*}"
+    REL_OBJ="${REL_URL_AND_KEY#*|}"
+fi
+
+SUM_OBJ=""
+if [[ "$NEEDS_SUM" == "yes" ]]; then
+    SUM_URL_AND_KEY="$(request_final_key_upload_url eval_sum_key "$SUM_SHA")"
+    SUM_URL="${SUM_URL_AND_KEY%|*}"
+    SUM_OBJ="${SUM_URL_AND_KEY#*|}"
+fi
+
+info "Uploading the final keys (skipping any this collaboration already holds)..."
+if [[ -n "$JPK_URL" ]]; then
+    put_blob_to_storage "$JPK_URL" "$JOINT_PK"
+    success "  joint_public_key -> $JPK_OBJ"
+else
+    info "  joint_public_key already held by this collaboration; not uploaded again."
+fi
+if [[ "$NEEDS_RELIN" == "yes" ]]; then
+    if [[ -n "$REL_URL" ]]; then
+        put_blob_to_storage "$REL_URL" "$FINAL_RELIN"
+        success "  joint_relin_key  -> $REL_OBJ"
+    else
+        info "  joint_relin_key already held by this collaboration; not uploaded again."
+    fi
+fi
+if [[ "$NEEDS_SUM" == "yes" ]]; then
+    if [[ -n "$SUM_URL" ]]; then
+        put_blob_to_storage "$SUM_URL" "$FINAL_SUM"
+        success "  eval_sum_key     -> $SUM_OBJ"
+    else
+        info "  eval_sum_key already held by this collaboration; not uploaded again."
+    fi
+fi
+
+# -------- 5. Build to-sign JSON (mimics web UI's emitted file) --------
+TO_SIGN="$JL_ENV_DIR/final-keys-to-sign.json"
+SIGNED_OUT="$JL_ENV_DIR/final-keys-signed.json"
+TIMESTAMP="$(date -u +%Y-%m-%dT%H:%M:%S.%3NZ)"
+
+if [[ "$NEEDS_SUM" == "yes" ]]; then
+    SUM_ENTRY="$(jq -n --arg ok "$SUM_OBJ" --arg sha "$SUM_SHA" \
+        '[{keyType: "eval_sum_key", objectKey: $ok, sha256Hex: $sha}]')"
+else
+    SUM_ENTRY="[]"
+fi
+if [[ "$NEEDS_RELIN" == "yes" ]]; then
+    RELIN_ENTRY="$(jq -n --arg ok "$REL_OBJ" --arg sha "$RELIN_SHA" \
+        '[{keyType: "joint_relin_key", objectKey: $ok, sha256Hex: $sha}]')"
+else
+    RELIN_ENTRY="[]"
+fi
+jq -n \
+    --arg perm    "$JULENNY_PERMISSION_ID" \
+    --arg ts      "$TIMESTAMP" \
+    --arg jpk_ok  "$JPK_OBJ"  --arg jpk_sha "$JOINT_PK_SHA" \
+    --argjson relin_entry "$RELIN_ENTRY" \
+    --argjson sum_entry "$SUM_ENTRY" \
+    '{
+        keys: ($sum_entry + [
+            {keyType: "joint_public_key", objectKey: $jpk_ok, sha256Hex: $jpk_sha}
+        ] + $relin_entry),
+        permissionId: $perm,
+        timestamp: $ts
+    }' > "$TO_SIGN"
+success "To-sign JSON: $TO_SIGN"
+
+# -------- 6. Sign the envelope via the offline toolkit --------
+info "Signing the envelope (offline)..."
+julenny-toolkit crypto wrap-final-keys-envelope \
+    --to-sign "$TO_SIGN" \
+    --secret-key "$JULENNY_SIGNING_SECRET" \
+    --output "$SIGNED_OUT" \
+    > /dev/null
+success "Signed envelope: $SIGNED_OUT"
+
+# -------- 7. POST the signed envelope --------
+info "POSTing signed envelope to /keysetup/final-keys..."
+RESP="$(curl_jl POST "/api/fhe-permissions/$JULENNY_PERMISSION_ID/keysetup/final-keys" \
+    -H "Content-Type: application/json" \
+    --data-binary "@$SIGNED_OUT")"
+
+# -------- 8. Report --------
+# The endpoint returns the state as `grantState`; .permissionState and .state are legacy names
+# it has never used. Reading only those left STATE empty on EVERY submission, so a perfectly
+# successful finalize fell through to the unknown-state branch: it printed "Unexpected response
+# state:" with nothing after it, never wrote the completion marker, and never showed the next
+# step. Legacy names kept as fallbacks.
+STATE="$(echo "$RESP" | jq -r '.grantState // .permissionState // .state // empty')"
+MSG="$(  echo "$RESP" | jq -r '.message    // empty')"
+ERR="$(  echo "$RESP" | jq -r '.error      // empty')"
+
+echo
+case "$STATE" in
+    active|complete)
+        success "Keysetup is COMPLETE. Permission is active."
+        success "  Server: $MSG"
+        touch "$MARKER"
+        echo
+        info "Next step (on this machine):"
+        echo "  $SCRIPT_DIR/04-encrypt.sh"
+        ;;
+    awaiting-peer-submission|awaiting-finalization)
+        info "Your submission is in. Waiting for ${JL_PEER_LABEL} to run their finalize."
+        info "  Server: $MSG"
+        touch "$MARKER"
+        echo
+        info "Tell ${JL_PEER_LABEL} to run their finalize step on their own machine"
+        info "(their run.sh / run.ps1 handles it, or the equivalent MCP verbs)."
+        ;;
+    *)
+        if [[ -n "$ERR" ]]; then
+            err "Submission failed: $ERR"
+            echo "$RESP" | jq . >&2
+            exit 1
+        else
+            warn "Unexpected response state: $STATE"
+            echo "$RESP" | jq . >&2
+        fi
+        ;;
+esac

@@ -271,6 +271,12 @@ struct CryptoResolveIndicatorArgs {
     std::string function_def_path;  // function-def JSON for schema params
     std::string input_name;         // which input in the function-def is this dataset for
     std::string context_spec;          // no default; callers must pass --context-spec (or --function-def for encrypt)
+    // Column override, matching encrypt's --columns. Resolve RE-HASHES the local CSV, so it
+    // must compose each row exactly as encrypt did. Reading the spec from the function-def
+    // alone is wrong the moment a party encrypts a subset of columns: the rehash would use
+    // every column, match nothing, and report zero matches with no error at all.
+    // Empty means "use whatever the function-def says", preserving old behaviour.
+    std::string columns;
     bool emit_json = false;
 };
 
@@ -295,7 +301,7 @@ struct CryptoResolveRulesArgs {
 //
 // Changed in 0.5.5 from the original dictionary-position derivation when
 // rule-based-cross-match's encoding contract switched to fnv1a hashing (see
-// plans/dual-compatibility-indicator-encoding-mismatch.md). Pure local;
+// plans/rule-based-cross-match-indicator-encoding-mismatch.md). Pure local;
 // no network, no FHE crypto. Slot count is derived from --context-spec
 // (ckks-default-v1 -> 8192).
 struct CryptoDeriveRotationIndicesArgs {
@@ -358,6 +364,11 @@ struct CryptoWrapEnvelopeArgs {
     // place of payloadB64. --size-bytes is required; --payload is ignored.
     std::string object_key;         // GCS objectKey returned by the upload-url endpoint
     std::size_t size_bytes = 0;     // raw payload size (bytes); required in Mode B
+    // Optional sha256 of the payload, 64 lowercase hex chars. Signed with the rest of
+    // the envelope and recorded by the platform, so a client can later ask whether the
+    // key sitting on its disk is still the one the collaboration agreed on. Omitted
+    // entirely when empty, which keeps the signed bytes identical to the older shape.
+    std::string sha256_hex;
 };
 
 struct CryptoPartialDecryptArgs {

@@ -75,13 +75,25 @@ EnvelopeWithDetails make_signed_envelope_with_details(
 struct PayloadRef {
     std::string object_key;     // server-derived path, e.g. keysetup-messages/{permissionId}/{round}_{companyId}/payload.bin
     std::size_t size_bytes = 0; // raw payload size; used for server-side sanity checks
+    // OPTIONAL sha256 of the payload bytes, 64 lowercase hex characters.
+    //
+    // The platform records it and serves it back in the per-permission key manifest, so
+    // a client can tell whether the copy on its own disk is still the key everyone else
+    // is computing with. Without it a key left over from an earlier index set looks
+    // exactly like a current one, and the divergence only shows up much later, as a
+    // rotation round that never completes.
+    //
+    // Left empty it is omitted from the signed JSON entirely, so an envelope without a
+    // digest signs and verifies exactly as it did before this field existed.
+    std::string sha256_hex;
 };
 
 // Variant of make_signed_envelope for the large-payload (GCS-mediated) flow.
 //
 // The signed canonical JSON includes "payloadRef":{"objectKey":..., "sizeBytes":...}
-// in place of "payloadB64". The upload body shape mirrors the canonical
-// shape (round, messageType, payloadRef, signatureHex, timestamp).
+// in place of "payloadB64", plus "sha256Hex" when one was supplied. The upload body
+// shape mirrors the canonical shape (round, messageType, payloadRef, signatureHex,
+// timestamp).
 //
 // permissionId is NOT in the upload body; the platform
 // reconstructs them from auth + URL, just like the inline variant.

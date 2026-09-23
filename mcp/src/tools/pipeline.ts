@@ -25,7 +25,7 @@
 //     never contents.
 //   - argv arrays for all CLI calls (via runCli); never a shell string.
 //
-// Request shapes mirror examples/_core (the scripts that make these exact
+// Request shapes mirror scripts/_core (the scripts that make these exact
 // calls): main/04-encrypt.sh (data upload), lib.sh request_upload_url /
 // wrap_and_upload (keysetup messages), lead/03-finalize-keysetup.sh (final
 // keys), lib.sh releaser_flow (release: partial-decrypt + sign + multipart
@@ -42,6 +42,7 @@ import { createReadStream } from 'node:fs';
 import { JulennyApiClient } from '../api-client.js';
 import { runCli } from './lib/cli.js';
 import { resolveInWorkdir } from './lib/paths.js';
+import { promotePendingColumns } from './lib/columns.js';
 import { runRecipe, verifyFunctionDefSignature } from './lib/recipe.js';
 
 const ok = (obj: Record<string, unknown>) => ({
@@ -83,7 +84,7 @@ export function registerPipelineTools(server: McpServer, api: JulennyApiClient) 
   );
 
   // ---- encode_recipe (cleartext bundle prep for encrypted-bundle inputs) ----
-  // Mirrors examples/_core/recipe/recipe-encode.mjs: verify the def's registry
+  // Mirrors scripts/_core/recipe/recipe-encode.mjs: verify the def's registry
   // signature (fail-closed), then run the named input's encodingRecipe over a
   // cleartext JSON source into the toolkit's generic bundle-input. The agent then
   // passes that bundle-input to `encrypt`. Pure cleartext data-structuring, no keys.
@@ -150,7 +151,7 @@ export function registerPipelineTools(server: McpServer, api: JulennyApiClient) 
   // joint public key is NOT secret; this is a plain read to a workdir file.
   server.tool(
     'fetch_joint_public_key',
-    "Fetch the collaboration's joint PUBLIC key for a permission into a workdir file, so you can encrypt inputs under it without having run this keysetup yourself (reused keysetup, or the consumer side). Returns the file path; the key is public, never secret.",
+    "Fetch the collaboration's joint PUBLIC key for a permission into a workdir file, so you can encrypt inputs under it without having run this keysetup yourself (reused keysetup, or the consumer side). Returns the file path; the key is public, never secret. ONLY WORKS AFTER KEYSETUP IS COMPLETE. During keysetup the joint public key has not been published yet: it IS the CONSUMER's round-1 'pk-share', so get it with download_keysetup_message(messageType='pk-share') and pass that file wherever a jointPk is wanted. Do not call this verb mid-ceremony.",
     {
       permissionId: z.string().describe('Permission id whose joint key to fetch'),
       output: z.string().describe('Workdir-relative output file for the joint public key'),
@@ -170,8 +171,18 @@ export function registerPipelineTools(server: McpServer, api: JulennyApiClient) 
             if (perm?.jointKeyId) { jointKeyId = perm.jointKeyId as string; break; }
           }
         }
-        if (!jointKeyId) return fail(`could not resolve jointKeyId for permission ${p.permissionId} (pass jointKeyId explicitly, or keysetup may be incomplete)`);
-        const bytes = await api.getBytes(`/api/fhe-joint-keys/${jointKeyId}/public-key`);
+        if (!jointKeyId) return fail(`could not resolve jointKeyId for permission ${p.permissionId}. If keysetup is still running this is EXPECTED: the joint public key is not published until finalization. Mid-ceremony the joint public key IS the consumer's round-1 'pk-share' - call download_keysetup_message(messageType='pk-share') and use that file as jointPk. Only pass jointKeyId explicitly if keysetup really is complete and auto-resolution failed.`);
+        let bytes: Uint8Array | null = null;
+        try {
+          bytes = await api.getBytes(`/api/fhe-joint-keys/${jointKeyId}/public-key`);
+        } catch (err) {
+          // "Joint public key not yet available" is a 404 until finalization. On
+          // 2026-09-15 this verb was called 15 times in one session and failed 14 of them,
+          // each time mid-ceremony, because its name is the obvious answer to "where do I
+          // get the joint public key". Point at the real source instead of repeating 404.
+          const msg = err instanceof Error ? err.message : String(err);
+          return fail(`${msg}. If keysetup is still running this is EXPECTED: the joint public key is not published until finalization. Mid-ceremony it IS the consumer's round-1 'pk-share' - call download_keysetup_message(messageType='pk-share') and use that file as jointPk.`);
+        }
         if (!bytes || bytes.length === 0) return fail('joint public key download returned no bytes');
         const out = resolveInWorkdir(p.output);
         await writeFile(out, bytes);
@@ -224,6 +235,7 @@ export function registerPipelineTools(server: McpServer, api: JulennyApiClient) 
       description: z.string().optional().describe('Optional dataset description'),
       permissionId: z.string().optional().describe('Permission id to scope the upload to'),
       projectId: z.string().optional().describe('Project id to scope the upload to'),
+      inputName: z.string().optional().describe('The function-def input this file was encrypted for (e.g. dataset_a). Pass it whenever you know it: it tags the dataset so pickers offer it for THIS input only. A dataset with no tag is offered for EVERY input, on both sides.'),
       kind: z.string().optional().describe('Dataset kind tag (e.g. "ciphertext", "plaintext")'),
       retentionDays: z.number().int().positive().optional().describe('Retention window in days'),
       encodingReport: z.string().optional().describe("Workdir-relative file holding the encoder's JSON report (encrypt's reportOutput). Forwarded as psiEncoding."),
@@ -280,12 +292,18 @@ export function registerPipelineTools(server: McpServer, api: JulennyApiClient) 
           if (p.description) form.append('description', p.description);
           if (p.permissionId) form.append('permissionId', p.permissionId);
           if (p.projectId) form.append('projectId', p.projectId);
+          // Tags the dataset with the slot it was encrypted for. The bash and PowerShell
+          // clients both send it; the connector had no way to, so everything it uploaded
+          // arrived untagged - and an untagged dataset is deliberately offered for every
+          // input, by both dataset endpoints.
+          if (p.inputName) form.append('inputName', p.inputName);
           if (p.kind) form.append('kind', p.kind);
           if (p.retentionDays !== undefined) form.append('retentionDays', String(p.retentionDays));
           if (psiEncoding) form.append('psiEncoding', JSON.stringify(psiEncoding));
           const data = await api.postMultipart('/api/fhe-data-upload', form) as Record<string, unknown>;
           if (!data.datasetId) return fail('upload succeeded but no datasetId returned');
-          return ok({ datasetId: data.datasetId, via: 'multipart', bytes: size });
+          const columns = await promotePendingColumns(p.file, data.datasetId as string);
+          return ok({ datasetId: data.datasetId, via: 'multipart', bytes: size, ...(columns ? { columns: columns.columns } : {}) });
         }
 
         // Large dataset: signed-URL flow (upload-url -> PUT to object storage -> confirm).
@@ -307,9 +325,15 @@ export function registerPipelineTools(server: McpServer, api: JulennyApiClient) 
         };
         if (p.permissionId) confirmBody.permissionId = p.permissionId;
         if (p.projectId) confirmBody.projectId = p.projectId;
+        if (p.inputName) confirmBody.inputName = p.inputName;
         if (psiEncoding) confirmBody.psiEncoding = psiEncoding;
         const confirmResp = await api.post('/api/fhe-data-upload/confirm', confirmBody) as Record<string, unknown>;
-        return ok({ datasetId: (confirmResp.datasetId as string) || datasetId, via: 'signed-url', bytes: size });
+        const finalId = (confirmResp.datasetId as string) || datasetId;
+        // Carry the column choice made at encrypt time across to the dataset id the
+        // platform just assigned. resolve_matches looks it up by that id; without this
+        // step the choice is stranded under a ciphertext filename nobody asks about.
+        const columns = await promotePendingColumns(p.file, finalId);
+        return ok({ datasetId: finalId, via: 'signed-url', bytes: size, ...(columns ? { columns: columns.columns } : {}) });
       } catch (e) {
         return fail(e instanceof Error ? e.message : 'upload failed');
       }
@@ -337,6 +361,139 @@ export function registerPipelineTools(server: McpServer, api: JulennyApiClient) 
         return ok({ outputPath: out, bytes: bytes.length });
       } catch (e) {
         return fail(e instanceof Error ? e.message : 'download_result failed');
+      }
+    },
+  );
+
+  // ---- verify_keys (are my local public keys still the agreed ones?) ----
+  //
+  // Local key files were trusted blindly until now. A rotation key built for an index set
+  // that has since changed looks exactly like a current one on disk, and nothing compared
+  // the two, so the divergence surfaced much later as a rotation round that never
+  // completed. This verb makes that comparison.
+  //
+  // It handles ONLY public material. The FHE secret share and the signing secret are never
+  // uploaded anywhere, by design, so there is nothing to compare them against and nothing
+  // to re-fetch if they are lost.
+  server.tool(
+    'verify_keys',
+    'Check the local public key files for a permission against the platform, and re-download any that are missing or out of date. '
+    + 'Use it before a run on a collaboration that has been idle, after a function or its rule list changed, or whenever a run fails '
+    + 'for no visible reason. Compares checksums; a key that differs is stale, not corrupt, and is replaced. '
+    + 'Returns which keys were checked and what happened to each, never key bytes. '
+    + 'It cannot check your secret share or signing key: those exist only on your machine, which is the point of them.',
+    {
+      permissionId: z.string().describe('Permission id'),
+      dir: z.string().optional().describe(
+        "Workdir-relative folder holding the key files. Defaults to the collaboration's own "
+        + "'collabs/<jointKeyId>/keys' when jointKeyId is given, otherwise 'keys'.",
+      ),
+      jointKeyId: z.string().optional().describe(
+        'Joint key id, when the keys live in the per-collaboration folder the scripts use.',
+      ),
+      repair: z.boolean().optional().describe(
+        'Re-download anything missing or stale (default true). Pass false to report without touching any file.',
+      ),
+    },
+    async (p) => {
+      try {
+        // The scripts keep keys in collabs/<jointKeyId>/keys inside the same
+        // working folder. Since v0.7.5 that folder is shared, so verifying the scripts'
+        // files is just a matter of looking in the right place.
+        const dir = p.dir ?? (p.jointKeyId ? `collabs/${p.jointKeyId}/keys` : 'keys');
+        const repair = p.repair !== false;
+
+        // Local file names, as the scripts write them. Nothing derives these from the key
+        // type: 'joint_relin_key' is stored as final_relin_key.bin, and guessing would
+        // report a perfectly good key as missing and then overwrite it.
+        const FILE_FOR_KEY_TYPE: Record<string, string> = {
+          joint_public_key: 'joint_public_key.bin',
+          joint_relin_key: 'final_relin_key.bin',
+          eval_sum_key: 'final_sum_key.bin',
+          rotation: 'rotation-combined.bin',
+        };
+        const manifest = await api.get(`/api/fhe-permissions/${p.permissionId}/key-manifest`) as {
+          keysetupState?: string;
+          keys?: Record<string, { sha256Hex: string | null; sizeBytes: number | null; verified: string; downloadUrl?: string }>;
+          rotation?: { status?: string; indices?: number[] } | null;
+        };
+        const entries = Object.entries(manifest.keys ?? {});
+        if (entries.length === 0) {
+          return ok({
+            permissionId: p.permissionId,
+            keysetupState: manifest.keysetupState,
+            checked: 0,
+            summary: 'The platform holds no final keys for this permission yet, so there is nothing to check. '
+              + 'Finish keysetup first.',
+          });
+        }
+
+        const results: Array<{ key: string; status: string; note?: string }> = [];
+        for (const [keyType, entry] of entries) {
+          const fileName = `${dir}/${FILE_FOR_KEY_TYPE[keyType] ?? `${keyType}.bin`}`;
+          const localPath = resolveInWorkdir(fileName);
+          let localSha: string | undefined;
+          try {
+            localSha = await sha256OfFile(localPath);
+          } catch {
+            localSha = undefined;   // not on this machine
+          }
+
+          if (!entry.sha256Hex) {
+            // The submitting client predates the digest. Say so rather than implying a
+            // check happened: a false "verified" is worse than an honest "cannot tell".
+            results.push({
+              key: keyType,
+              status: localSha ? 'present-unverifiable' : 'missing-unverifiable',
+              note: 'The platform holds no checksum for this key, so it cannot be compared. '
+                + 'It was registered by an older toolkit.',
+            });
+            continue;
+          }
+
+          if (localSha === entry.sha256Hex) {
+            results.push({ key: keyType, status: 'ok' });
+            continue;
+          }
+
+          const wasMissing = localSha === undefined;
+          if (!repair || !entry.downloadUrl) {
+            results.push({
+              key: keyType,
+              status: wasMissing ? 'missing' : 'stale',
+              note: wasMissing
+                ? `Not found at '${fileName}'.`
+                : `The copy at '${fileName}' is not the key this collaboration agreed on.`,
+            });
+            continue;
+          }
+
+          const bytes = await api.getBytesFromUrl(entry.downloadUrl);
+          await writeFile(localPath, bytes);
+          const after = await sha256OfFile(localPath);
+          results.push({
+            key: keyType,
+            // Verify what was just written. A download that silently truncates would
+            // otherwise be recorded as a repair and leave the same broken run behind.
+            status: after === entry.sha256Hex ? (wasMissing ? 'downloaded' : 'replaced') : 'download-mismatch',
+            note: after === entry.sha256Hex
+              ? `Written to '${fileName}'.`
+              : 'The downloaded file does not match the expected checksum. Do not run with it; try again.',
+          });
+        }
+
+        const bad = results.filter(r => ['stale', 'missing', 'download-mismatch'].includes(r.status));
+        return ok({
+          permissionId: p.permissionId,
+          keysetupState: manifest.keysetupState,
+          rotationIndexCount: manifest.rotation?.indices?.length ?? null,
+          results,
+          summary: bad.length === 0
+            ? 'Every public key on this machine matches the platform.'
+            : `${bad.length} key(s) need attention. TELL THE USER which ones and what the note says.`,
+        });
+      } catch (e) {
+        return fail(e instanceof Error ? e.message : 'verify_keys failed');
       }
     },
   );
@@ -387,6 +544,19 @@ export function registerPipelineTools(server: McpServer, api: JulennyApiClient) 
   // only exists after the upload-url step (a pre-wrapped envelope can't reference it).
   const INLINE_THRESHOLD_BYTES = 15 * 1024 * 1024;
 
+  // sha256 of a file, by streaming. Key material runs to hundreds of megabytes - a
+  // rotation key of 320MB is ordinary - and there is no reason to hold one whole.
+  async function sha256OfFile(path: string): Promise<string> {
+    const { createHash } = await import('node:crypto');
+    return new Promise<string>((resolve, reject) => {
+      const h = createHash('sha256');
+      const rs = createReadStream(path);
+      rs.on('data', (c) => h.update(c));
+      rs.on('end', () => resolve(h.digest('hex')));
+      rs.on('error', reject);
+    });
+  }
+
   // One keysetup message: wrap (inline or by reference), upload if large, register.
   // Shared by publish_keysetup_message and publish_rotation_key so the two cannot drift.
   async function publishMessage(
@@ -423,7 +593,19 @@ export function registerPipelineTools(server: McpServer, api: JulennyApiClient) 
       // went out. That stall, not the network, is what ran the call past the
       // client's timeout.
       await api.putSignedUrlFromFile(uploadUrl, payloadPath);
-      const r = await runCli(['crypto', 'wrap-envelope', '--object-key', objectKey, '--size-bytes', String(size), ...common]);
+      // Sign a digest of the payload too. The platform keeps it and serves it in the key
+      // manifest, which is how a client later tells a stale local key from a current one.
+      // Done HERE rather than in each caller so every reference-mode message carries one,
+      // the combined rotation key included - that being the key most likely to go stale
+      // and the one nothing could previously detect.
+      const sha256Hex = await sha256OfFile(payloadPath);
+      const r = await runCli([
+        'crypto', 'wrap-envelope',
+        '--object-key', objectKey,
+        '--size-bytes', String(size),
+        '--sha256', sha256Hex,
+        ...common,
+      ]);
       if (!r.ok) return { ok: false, error: `wrap-envelope (reference) failed: ${r.error ?? 'unknown error'}` };
     }
     const envelope = JSON.parse(await readFile(envPath, 'utf8'));
@@ -503,7 +685,9 @@ export function registerPipelineTools(server: McpServer, api: JulennyApiClient) 
 
   // ---- publish_final_keys (auto: encrypted final key blobs) ----
   // Mirrors lead/03-finalize-keysetup.sh:
-  //   1. POST /keysetup/final-keys/upload-url  body {keyType}  -> {objectKey, uploadUrl}
+  //   1. POST /keysetup/final-keys/upload-url  body {keyType, sha256Hex}
+  //      -> {objectKey, uploadUrl}, or {objectKey, alreadyStored:true} when the
+  //      collaboration already holds that exact key and step 2 should be skipped
   //      (one per keyType: joint_public_key, joint_relin_key, eval_sum_key)
   //   2. PUT each key blob to its signed uploadUrl (no api key)
   //   3. POST /keysetup/final-keys  body = the SIGNED ENVELOPE produced by the
@@ -540,13 +724,26 @@ export function registerPipelineTools(server: McpServer, api: JulennyApiClient) 
             rs.on('end', () => resolve(h.digest('hex')));
             rs.on('error', reject);
           });
+          // Send the digest and let the platform say whether it already holds this key.
+          // These keys belong to the COLLABORATION and never change, so each new
+          // permission in one collaboration was re-sending identical bytes - the sum key
+          // alone is ~71MB. When the answer is alreadyStored there is nothing to upload
+          // and the existing object is registered instead.
           const urlResp = await api.post(
             `/api/fhe-permissions/${p.permissionId}/keysetup/final-keys/upload-url`,
-            { keyType: k.keyType },
+            { keyType: k.keyType, sha256Hex },
           ) as Record<string, unknown>;
           const uploadUrl = urlResp.uploadUrl as string | undefined;
           const objectKey = urlResp.objectKey as string | undefined;
-          if (!uploadUrl || !objectKey) {
+          const alreadyStored = urlResp.alreadyStored === true;
+          if (!objectKey) {
+            return fail(`upload-url for ${k.keyType} did not return an objectKey`);
+          }
+          if (alreadyStored) {
+            uploaded.push({ keyType: k.keyType, objectKey, sha256Hex });
+            continue;
+          }
+          if (!uploadUrl) {
             return fail(`upload-url for ${k.keyType} did not return uploadUrl + objectKey`);
           }
           await api.putSignedUrlFromFile(uploadUrl, keyPath);
@@ -616,9 +813,22 @@ export function registerPipelineTools(server: McpServer, api: JulennyApiClient) 
         // timeout every time, and the operator had to fall back to publishing the
         // rounds by hand. Publish the first outstanding round, report what is left,
         // and let the caller call again.
-        const contributed = new Set<number>(
-          Object.values((ks.contributions as Record<string, number[]>) || {}).flat(),
-        );
+        // Count only OUR OWN contributions. `contributions` is keyed by collaboration id,
+        // and rotation rounds are per-party: BOTH sides submit their own round 9. Flattening
+        // every party's rounds into one set made a round the PEER had submitted look like
+        // ours, so once the peer was fully done this verb found nothing outstanding, uploaded
+        // nothing, and returned `published: []` alongside a success - leaving rotation stuck
+        // at 'combining' forever with no error anywhere. guide.ts already scoped this
+        // correctly; this did not.
+        const perm = await api.get(`/api/fhe-permissions/${p.permissionId}`) as Record<string, unknown>;
+        // The DATA role, and correct here: participants{} is keyed that way, so this is
+        // only asking "which collaboration id is mine". It is NOT the keysetup role, and
+        // must not be reused as one - see the two-roles note at the top of guide.ts.
+        const myParty: 'owner' | 'consumer' = perm.role === 'dataOwner' ? 'owner' : 'consumer';
+        const participants = (ks.participants as Record<string, { collaborationId?: string }>) || {};
+        const myCollab = participants[myParty]?.collaborationId;
+        const allContribs = (ks.contributions as Record<string, number[]>) || {};
+        const contributed = new Set<number>((myCollab && allContribs[myCollab]) || []);
         const outstanding = steps.filter(([mt]) => !contributed.has(roundFor(mt)!));
 
         const signingPath = resolveInWorkdir(p.signingKey);
@@ -650,7 +860,13 @@ export function registerPipelineTools(server: McpServer, api: JulennyApiClient) 
             ? `Published round ${published[0]?.round}. ${remaining.length} rotation round(s) still to publish: ${remaining.map((r) => `${r.round} (${r.messageType})`).join(', ')}. Call publish_rotation_key again to send the next one. Each call uploads one ~320MB payload, which is why they are not batched.`
             : status === 'complete'
             ? 'Rotation key setup is COMPLETE. The permission can now run.'
-            : `Rotation key setup reports '${status}', not 'complete'. Do NOT trigger an execution yet: it would spend a credit and fail inside the engine. Call get_rotation_status again, and if it does not reach 'complete', report that rather than retrying.`,
+            : published.length === 0
+            // Nothing published AND nothing outstanding means THIS side has already sent all
+            // three rounds, so the gap is the peer's. Say that, rather than reporting a bare
+            // success: an empty publish list used to read as "done" and stalled a whole
+            // collaboration with no error on either side.
+            ? `Nothing left to publish from this side: all three rotation rounds have already been submitted by you. Rotation still reports '${status}', so the OTHER party has not submitted theirs. TELL THE USER to ask them to complete their rotation augmentation, naming the round. Triggering now is refused by the platform with a 409 and costs nothing, but it will not run.`
+            : `Rotation key setup reports '${status}', not 'complete'. Do not trigger an execution yet; the platform refuses it with a 409 and no credit is charged, but it will not run. Call get_rotation_status again, and if it does not reach 'complete', report that rather than retrying.`,
         });
       } catch (e) {
         return fail(e instanceof Error ? e.message : 'publish_rotation_key failed');

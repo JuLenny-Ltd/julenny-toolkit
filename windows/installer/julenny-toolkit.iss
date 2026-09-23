@@ -1,5 +1,5 @@
 ; JuLenny Toolkit - unified Windows installer (Inno Setup 6).
-; One installer, four checkbox components: UI app / CLI / MCP / example scripts.
+; One installer, four checkbox components: UI app / CLI / MCP / scripts.
 ; Per-user, no admin rights required.
 ;
 ; Build:  iscc windows\installer\julenny-toolkit.iss     (Inno Setup's compiler)
@@ -15,13 +15,13 @@
 ;   the app payload at AppSourceDir        (see the open question below)
 ;
 ; PACKAGING: option D2 (decided 2026-08-15). ONE installer carries everything -
-; app, CLI, MCP and the example scripts. There is no separate MSIX download.
+; app, CLI, MCP and the scripts. There is no separate MSIX download.
 ; JuLennyFHE.vcxproj is already configured for it (WindowsPackageType=None,
 ; WindowsAppSDKSelfContained=true), so AppSourceDir below is a real unpackaged,
 ; self-contained build: the Windows App SDK runtime ships inside it and the
 ; customer installs no prerequisites.
 
-#define AppVersion "0.7.3"
+#define AppVersion "0.7.5"
 ; Unpackaged (WindowsPackageType=None, self-contained) WinUI 3 build output (#23).
 #define AppSourceDir "..\..\windows\JuLennyFHE\x64\Release\JuLennyFHE"
 
@@ -49,24 +49,24 @@ UninstallDisplayIcon={app}\app\JuLennyFHE.exe
 LicenseFile=..\..\LICENSE
 
 [Types]
-Name: "full";   Description: "Everything (app, CLI, MCP server, and example scripts)"
+Name: "full";   Description: "Everything (app, CLI, MCP server, and scripts)"
 Name: "custom"; Description: "Choose what to install";               Flags: iscustom
 
 [Components]
 Name: "app"; Description: "JuLenny Toolkit desktop app (graphical UI)";        Types: full
 Name: "cli"; Description: "Command-line tool (julenny-toolkit)";              Types: full
 Name: "mcp"; Description: "MCP server for Claude Desktop (julenny-mcp)";  Types: full
-Name: "examples"; Description: "Example scripts (integration reference)"; Types: full
+Name: "examples"; Description: "Scripts (integration reference)"; Types: full
 
 ; Inno only overwrites files the new version ships; anything a previous version installed and
 ; this one no longer does is left behind forever. That is how 27 bash scripts from June were
-; still sitting in {app}\examples after the release that deliberately stopped shipping them to
+; still sitting in {app}\scripts after the release that deliberately stopped shipping them to
 ; Windows. Stale scripts are worse than clutter here: a customer can run one and get behaviour
 ; from a version we no longer support. Clear the read-only reference tree before copying, so
-; {app}\examples is always exactly what this build shipped. Only that folder: never {app}
+; {app}\scripts is always exactly what this build shipped. Only that folder: never {app}
 ; itself, which holds the app, the CLI, the MCP and the uninstaller.
 [InstallDelete]
-Type: filesandordirs; Name: "{app}\examples"; Components: examples
+Type: filesandordirs; Name: "{app}\scripts"; Components: examples
 
 [Files]
 ; --- Installer-only helper: modern folder picker (x86, called during the wizard).
@@ -89,15 +89,18 @@ Source: "merge-claude-config.ps1";                        DestDir: "{app}"; Comp
 ;     reverse engineer a map of the binary. Keep them in the build output for
 ;     crash analysis; just do not ship them.
 Source: "{#AppSourceDir}\*";                              DestDir: "{app}\app"; Components: app; Flags: ignoreversion recursesubdirs createallsubdirs; Excludes: "*.pdb"
-; --- Example scripts. Read-only reference copy under {app}, mirroring the .deb's
-;     /usr/share/julenny-toolkit/examples. The helper below copies the operator's
+; --- Scripts. Read-only reference copy under {app}, mirroring the .deb's
+;     /usr/share/julenny-toolkit/scripts. The helper below copies the operator's
 ;     chosen side out to a writable folder; it stays installed so they can re-run
 ;     it later to switch side or make another copy. ---
 ;     Excludes the bash half: nothing on Windows runs a .sh, and the .env side
 ;     profiles are the bash twins of sides\*.ps1. The .deb excludes the .ps1 half
 ;     of the same tree. ---
-Source: "..\..\examples\*";                               DestDir: "{app}\examples"; Components: examples; Flags: ignoreversion recursesubdirs createallsubdirs; Excludes: "*.sh,*.env"
-Source: "julenny-toolkit-examples.ps1";                   DestDir: "{app}"; Components: examples; Flags: ignoreversion
+; samples\ ships here too and the helper copies it on to the WORKING folder, not to
+; the scripts folder: the connector reads it from there, and a second copy beside the
+; scripts is what let a stale fixture be run against a fresh one.
+Source: "..\..\scripts\*";                               DestDir: "{app}\scripts"; Components: examples; Flags: ignoreversion recursesubdirs createallsubdirs; Excludes: "*.sh,*.env"
+Source: "julenny-toolkit-scripts.ps1";                   DestDir: "{app}"; Components: examples; Flags: ignoreversion
 
 [Icons]
 Name: "{autoprograms}\JuLenny Toolkit"; Filename: "{app}\app\JuLennyFHE.exe"; Components: app
@@ -115,8 +118,13 @@ Root: HKCU; Subkey: "Environment"; ValueType: expandsz; ValueName: "Path"; \
 ; Remember the working folder. Without this an upgrade silently reverted it to the default,
 ; and since the [Run] step rewrites JULENNY_WORKDIR in the Claude Desktop config, the user's
 ; existing keys and datasets became invisible to the MCP with nothing to indicate why.
+;
+; Written for EVERY component since v0.7.5, not only the MCP. This value is now the single
+; source of truth for the working folder and the scripts read it too (lib.ps1's
+; Get-JlResolvedRoot). Writing it only when the MCP was selected left a scripts-only
+; install falling back to the default folder while the user had chosen another one here.
 Root: HKCU; Subkey: "Software\JuLenny\Toolkit"; ValueType: string; ValueName: "WorkDir"; \
-  ValueData: "{code:GetWorkdir}"; Flags: uninsdeletevalue; Components: mcp
+  ValueData: "{code:GetWorkdir}"; Flags: uninsdeletevalue
 
 ; Same for the examples page. An upgrade used to reset the side back to "Data owner" and
 ; the folder back to Documents, quietly copying a different layout over an existing setup.
@@ -137,12 +145,14 @@ Filename: "powershell.exe"; \
   Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\merge-claude-config.ps1"" -ApiKey ""{code:GetApiKey}"" -McpExePath ""{app}\julenny-mcp.exe"" -Workdir ""{code:GetWorkdir}"""; \
   StatusMsg: "Configuring the JuLenny connector in Claude Desktop..."; \
   Flags: runhidden waituntilterminated; Components: mcp
-; Copy the chosen side of the examples out to the operator's folder. Same helper
-; they can re-run later to switch side; -Force because the wizard already owns
-; the destination choice, -Yes because the wizard already confirmed it.
+; Copy the scripts out to the operator's folder, and their sample data on to
+; the WORKING folder, which is why -Workdir is passed. Same helper they can re-run
+; later for a second copy; -Force because the wizard already owns the destination
+; choice, -Yes because the wizard already confirmed it. There is no -Role: the scripts
+; are one set for both sides.
 Filename: "powershell.exe"; \
-  Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\julenny-toolkit-examples.ps1"" -Role ""{code:GetExamplesRole}"" -Dest ""{code:GetExamplesDest}"" -Source ""{app}\examples"" -Force -Yes"; \
-  StatusMsg: "Copying the example scripts..."; \
+  Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\julenny-toolkit-scripts.ps1"" -Dest ""{code:GetExamplesDest}"" -Workdir ""{code:GetWorkdir}"" -Source ""{app}\scripts"" -Force -Yes"; \
+  StatusMsg: "Copying the scripts..."; \
   Flags: runhidden waituntilterminated; Components: examples; Check: ShouldCopyExamples
 
 [Code]
@@ -280,7 +290,7 @@ var
 begin
   SetLength(Buf, 1024);
   try
-    n := ShowFolderDialog('Select a folder for the example scripts', ExamplesDirPage.Values[0], Buf, 1024);
+    n := ShowFolderDialog('Select a folder for the scripts', ExamplesDirPage.Values[0], Buf, 1024);
   except
     n := -1;
   end;
@@ -307,13 +317,14 @@ begin
     'Claude Desktop''s configuration. (Only used if you install the MCP server.)');
   ApiKeyPage.Add('API key:', False);
 
-  // Folder picker with a Browse... button. Prefilled with the MCP's default so
-  // the value is always valid; the user can Browse to a different folder.
+  // Folder picker with a Browse... button. Prefilled with a valid default so the
+  // value is always usable; the user can Browse to a different folder.
   WorkdirPage := CreateInputDirPage(ApiKeyPage.ID,
     'JuLenny working folder',
-    'Where should the MCP store keys, datasets and results?',
-    'The default is filled in below. Click Browse to choose a different folder.' + #13#10 +
-    '(Only used if you install the MCP server.)',
+    'Where should JuLenny keep your keys, datasets and results?',
+    'One folder is shared by everything: the connector, the scripts and the' + #13#10 +
+    'command line. Put your own data files in it and all three can see them.' + #13#10 +
+    'The default is filled in below. Click Browse to choose a different folder.',
     False, '');
   WorkdirPage.Add('');
   // Prefer the folder chosen by a previous install; fall back to the default only on a first
@@ -323,41 +334,42 @@ begin
   if PrevWorkdir <> '' then
     WorkdirPage.Values[0] := PrevWorkdir
   else
-    WorkdirPage.Values[0] := ExpandConstant('{localappdata}\julenny-toolkit\workdir');
+    // v0.7.5: a folder the user can find, not a hidden one under AppData. The example
+    // scripts share it now, and a folder people are told to drop CSV files into has to
+    // be somewhere they can reach in Explorer.
+    // {%USERPROFILE}, the environment-variable form. Inno has no {userprofile}
+    // constant: using one compiles fine and then dies at RUNTIME with "Unknown
+    // constant", on the only path that reaches it - a machine with no previously
+    // recorded folder, which is every first install.
+    WorkdirPage.Values[0] := ExpandConstant('{%USERPROFILE}\julenny-workdir');
   // Swap the legacy folder-tree Browse for the modern IFileDialog picker.
   WorkdirPage.Buttons[0].OnClick := @BrowseClick;
 
-  // Which side of the collaboration this machine is. Determines which half of
-  // the example tree gets copied out. The last option is an explicit "not now",
-  // so the operator can still decline after seeing the page.
+  // This page used to ask which SIDE of the collaboration the machine was, and copied
+  // only that half of the example tree. The scripts are now one set for both sides -
+  // which side you are comes from the permission you pick - so there is nothing to
+  // choose here beyond whether to copy them at all.
   ExamplesRolePage := CreateInputOptionPage(WorkdirPage.ID,
-    'Example scripts',
-    'Which side of the collaboration is this machine?',
-    'The examples come in two halves. Pick yours and only that half is copied' + #13#10 +
-    'to a folder you choose. (Only used if you install the example scripts.)',
+    'Scripts',
+    'Copy the scripts to a folder you can edit?',
+    'The scripts drive a collaboration end to end and are yours to modify.' + #13#10 +
+    'Their sample data goes into the working folder you chose on the last' + #13#10 +
+    'page, which is where the Claude connector looks for it too.',
     True, False);
-  ExamplesRolePage.Add('Data owner - holds the data being queried (acme)');
-  ExamplesRolePage.Add('Data consumer - triggers the run, sees the result (beta)');
-  ExamplesRolePage.Add('Both - for single-machine testing');
-  ExamplesRolePage.Add('Don''t copy them now (you can run the helper later)');
-  // Preselect whatever they chose last time. Falls back to the first option on a first
-  // install, or if the stored value is not one we recognise.
+  ExamplesRolePage.Add('Yes - copy them to a folder I choose');
+  ExamplesRolePage.Add('Not now (you can run the helper later)');
+  // Preselect whatever they chose last time. Anything an older installer recorded
+  // names a side, and every side now means the same thing: copy them.
   if not RegQueryStringValue(HKCU, 'Software\JuLenny\Toolkit', 'ExamplesRole', PrevExamplesRole) then
     PrevExamplesRole := '';
-  if PrevExamplesRole = 'owner' then
-    ExamplesRolePage.SelectedValueIndex := 0
-  else if PrevExamplesRole = 'consumer' then
+  if PrevExamplesRole = 'none' then
     ExamplesRolePage.SelectedValueIndex := 1
-  else if PrevExamplesRole = 'both' then
-    ExamplesRolePage.SelectedValueIndex := 2
-  else if PrevExamplesRole = 'none' then
-    ExamplesRolePage.SelectedValueIndex := 3
   else
     ExamplesRolePage.SelectedValueIndex := 0;
 
   ExamplesDirPage := CreateInputDirPage(ExamplesRolePage.ID,
-    'Example scripts folder',
-    'Where should the example scripts be copied?',
+    'Scripts folder',
+    'Where should the scripts be copied?',
     'A read-only reference copy always goes into the install folder. This is the' + #13#10 +
     'editable working copy.',
     False, '');
@@ -367,19 +379,17 @@ begin
   if PrevExamplesDir <> '' then
     ExamplesDirPage.Values[0] := PrevExamplesDir
   else
-    ExamplesDirPage.Values[0] := ExpandConstant('{userdocs}\julenny-examples');
+    ExamplesDirPage.Values[0] := ExpandConstant('{userdocs}\julenny-scripts');
   ExamplesDirPage.Buttons[0].OnClick := @ExamplesBrowseClick;
 end;
 
-// Which role the operator picked, as the helper's -Role argument. Empty when
-// they chose "don't copy them now".
+// Whether the operator asked for the scripts. Recorded in the registry so an upgrade
+// preselects the same answer. The value is no longer a side: the helper has no -Role.
 function GetExamplesRole(Param: String): String;
 begin
   case ExamplesRolePage.SelectedValueIndex of
-    0: Result := 'owner';
-    1: Result := 'consumer';
-    2: Result := 'both';
-    3: Result := 'none';
+    0: Result := 'copy';
+    1: Result := 'none';
   else
     Result := '';
   end;
@@ -393,7 +403,7 @@ end;
 // Run the copy only when the component is installed AND a side was chosen.
 function ShouldCopyExamples: Boolean;
 begin
-  // 'none' is a deliberate choice ('don't copy them now'), so it must NOT trigger a copy.
+  // 'none' is a deliberate choice ('not now'), so it must NOT trigger a copy.
   Result := WizardIsComponentSelected('examples')
             and (GetExamplesRole('') <> '') and (GetExamplesRole('') <> 'none');
 end;
@@ -406,7 +416,11 @@ begin
   if (PageID = ExamplesRolePage.ID) then
     Result := not WizardIsComponentSelected('examples')
   else if (PageID = ExamplesDirPage.ID) then
-    Result := (not WizardIsComponentSelected('examples')) or (GetExamplesRole('') = '');
+    // 'none' means "not now", so do not go on to ask WHERE. This used to test only
+    // for the empty string, so declining still asked for a destination folder that
+    // was then never used.
+    Result := (not WizardIsComponentSelected('examples'))
+              or (GetExamplesRole('') = '') or (GetExamplesRole('') = 'none');
 end;
 
 function GetApiKey(Param: String): String;

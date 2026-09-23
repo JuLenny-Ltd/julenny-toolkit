@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.24)
 
 project(fhe_toolkit
-    VERSION     0.7.3
+    VERSION     0.7.5
     DESCRIPTION "JuLenny FHE Toolkit - customer-side client for the JuLenny FHE Platform"
     LANGUAGES   CXX
 )
@@ -60,7 +60,7 @@ elseif(FHE_TOOLKIT_BUNDLE_MCP)
 endif()
 
 # ----------------------------------------------------------------------------
-# Example scripts. These are the canonical reference for integrating the toolkit
+# Scripts. These are the canonical reference for integrating the toolkit
 # into a pipeline with no Claude in the loop, so the package must ship them; a
 # customer on the scripts path who has to clone them off GitHub is not an
 # install experience.
@@ -68,7 +68,7 @@ endif()
 # They go in read-only under /usr/share. dpkg has no interactive flow and cannot
 # cleanly install a SIDE subset (it records every file it installs, so a postinst
 # that deletes half of them leaves the manifest describing files that are not on
-# disk). So both sides ship, and the julenny-toolkit-examples helper asks which
+# disk). So both sides ship, and the julenny-toolkit-scripts helper asks which
 # side this machine is and copies just that side wherever the operator wants.
 # The postinst only points at the helper.
 #
@@ -79,14 +79,14 @@ endif()
 #
 # CPACK_STRIP_FILES is ON but affects binaries only; shell scripts are untouched.
 # ----------------------------------------------------------------------------
-install(DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/examples/"
-    DESTINATION share/julenny-toolkit/examples
+install(DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/scripts/"
+    DESTINATION share/julenny-toolkit/scripts
     COMPONENT runtime
     USE_SOURCE_PERMISSIONS
     PATTERN ".git" EXCLUDE
     PATTERN "*.ps1" EXCLUDE)
 
-install(PROGRAMS "${CMAKE_CURRENT_SOURCE_DIR}/linux/julenny-toolkit-examples"
+install(PROGRAMS "${CMAKE_CURRENT_SOURCE_DIR}/linux/julenny-toolkit-scripts"
     DESTINATION bin COMPONENT runtime)
 
 # BSL 1.1 section 19 requires the license to be conspicuously displayed on every copy of
@@ -135,7 +135,7 @@ set(CPACK_DEBIAN_RUNTIME_PACKAGE_PRIORITY     "optional")
 set(CPACK_DEBIAN_RUNTIME_PACKAGE_HOMEPAGE     "https://github.com/JuLenny-Ltd/julenny-toolkit")
 set(CPACK_DEBIAN_RUNTIME_PACKAGE_SHLIBDEPS    ON)
 
-# The example scripts shell out to these. SHLIBDEPS cannot discover them: they
+# The scripts shell out to these. SHLIBDEPS cannot discover them: they
 # are separate executables, not shared libraries the ELF links against.
 # sha256sum is in coreutils, which is Essential, so it is never declared.
 # node is only needed by functions declaring an encodingRecipe (currently just
@@ -144,7 +144,7 @@ set(CPACK_DEBIAN_RUNTIME_PACKAGE_SHLIBDEPS    ON)
 set(CPACK_DEBIAN_RUNTIME_PACKAGE_DEPENDS  "jq (>= 1.6), curl, xxd")
 set(CPACK_DEBIAN_RUNTIME_PACKAGE_SUGGESTS "nodejs")
 
-# postinst points the operator at julenny-toolkit-examples. STRICT_PERMISSION
+# postinst points the operator at julenny-toolkit-scripts. STRICT_PERMISSION
 # forces 0755 on the maintainer script, so a checkout that lost the exec bit
 # (Windows, or a zip round-trip) still produces an installable package.
 set(CPACK_DEBIAN_RUNTIME_PACKAGE_CONTROL_EXTRA

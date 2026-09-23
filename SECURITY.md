@@ -12,7 +12,7 @@ Please do not disclose publicly until we have had a reasonable opportunity to re
 
 ## Scope
 
-This repository is the **customer-side toolkit**: the offline cryptographic core, the CLI, the MCP server, the desktop app, and the example scripts. Issues in any of those are in scope, and we are particularly interested in:
+This repository is the **customer-side toolkit**: the offline cryptographic core, the CLI, the MCP server, the desktop app, and the scripts. Issues in any of those are in scope, and we are particularly interested in:
 
 - anything that could cause secret key material or plaintext to leave the local machine
 - anything that could cause the MCP server to return plaintext, secret bytes, or a decrypted result to a calling agent
