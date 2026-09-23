@@ -119,8 +119,13 @@ PROJECT_COUNT="$(echo "$OWNED_PROJECTS" | jq 'length')"
 echo
 if (( PROJECT_COUNT > 0 )); then
     info "Your active collaborations (newest first):"
+    # WHICH field holds the peer depends on who CREATED the collaboration, not on who is
+    # running this script: partnerCollaborationId always names the non-creator. Reading it
+    # unconditionally printed THIS account's own id as the peer on every collaboration it
+    # joined rather than created. yourRole disambiguates, the same way the permission
+    # creation path below already does.
     echo "$OWNED_PROJECTS" \
-        | jq -r --arg words "$MY_ROLE_WORDS" 'to_entries[] | "  [\(.key + 1)] \(.value.name // "(unnamed)")  |  peer: \(.value.partnerCollaborationId // .value.ownerCollaborationId // "?")  |  \(.value.permissionCount) permission(s)  |  keysetup: \(.value.keysetupState // "n/a")  |  created \(.value.createdAt // "?" | .[0:10])  |  id: \(.value.id)\(if (.value.noRoleYet and $words != "") then "  |  no " + $words + " permission yet - pick to create the first one" else "" end)"'
+        | jq -r --arg words "$MY_ROLE_WORDS" 'to_entries[] | "  [\(.key + 1)] \(.value.name // "(unnamed)")  |  peer: \(if .value.yourRole == "partner" then (.value.ownerCollaborationId // .value.partnerCollaborationId // "?") else (.value.partnerCollaborationId // .value.ownerCollaborationId // "?") end)  |  \(.value.permissionCount) permission(s)  |  keysetup: \(.value.keysetupState // "n/a")  |  created \(.value.createdAt // "?" | .[0:10])  |  id: \(.value.id)\(if (.value.noRoleYet and $words != "") then "  |  no " + $words + " permission yet - pick to create the first one" else "" end)"'
 else
     info "You are not a member of any active collaboration yet."
 fi

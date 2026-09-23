@@ -17,7 +17,17 @@ export function registerCollaborationTools(server: McpServer, api: JulennyApiCli
         // The peer is identified by collaboration id, the public handle the two sides
         // exchanged to set this up. The API does not give company names to API keys, so
         // that an agent driving these steps never learns who you are working with.
-        peerCollaborationId: p.partnerCollaborationId ?? p.ownerCollaborationId ?? null,
+        //
+        // WHICH field holds the peer depends on who created the collaboration, not on who
+        // is asking. `partnerCollaborationId` always names the company that did NOT create
+        // it, so reading it unconditionally reported YOUR OWN id as the peer on every
+        // collaboration you joined rather than created. An agent that believed it passed
+        // that id to create_permission and was told "Cannot grant permissions to your own
+        // company". `yourRole` disambiguates: 'owner' when this account created the
+        // collaboration, 'partner' otherwise.
+        peerCollaborationId: (p.yourRole === 'partner'
+          ? p.ownerCollaborationId ?? p.partnerCollaborationId
+          : p.partnerCollaborationId ?? p.ownerCollaborationId) ?? null,
         status: p.status,
         keysetupState: p.keysetupState,
         grantCount: p.grantCount,

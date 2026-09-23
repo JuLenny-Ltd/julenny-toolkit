@@ -1963,8 +1963,20 @@ function Invoke-JlInitSession {
             # API keys - that is deliberate, so that an agent driving these steps never
             # learns who you are working with. The collaboration id is the public handle
             # the two sides already exchanged to set this up.
-            $peer = $mine[$i].partnerCollaborationId
-            if (-not $peer) { $peer = $mine[$i].ownerCollaborationId }
+            #
+            # WHICH field holds it depends on who CREATED the collaboration, not on who is
+            # running this script. partnerCollaborationId always names the non-creator, so
+            # reading it unconditionally printed THIS account's own id as the peer on every
+            # collaboration it joined rather than created. Same trap, and same fix, as the
+            # permission-creation path further down.
+            $peer = $null
+            if ((Test-JlHasProperty $mine[$i] 'yourRole') -and "$($mine[$i].yourRole)" -eq 'partner') {
+                $peer = $mine[$i].ownerCollaborationId
+                if (-not $peer) { $peer = $mine[$i].partnerCollaborationId }
+            } else {
+                $peer = $mine[$i].partnerCollaborationId
+                if (-not $peer) { $peer = $mine[$i].ownerCollaborationId }
+            }
             if (-not $peer) { $peer = '?' }
             $created = "$($mine[$i].createdAt)"
             if ($created.Length -gt 10) { $created = $created.Substring(0, 10) }
