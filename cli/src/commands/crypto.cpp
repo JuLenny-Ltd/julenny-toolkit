@@ -2033,15 +2033,20 @@ int run_crypto_combine(const CryptoCombineArgs& args) {
         // returns references only (no values, not even non-zero counts), so an
         // agent never sees the decrypted answer. Viewing the file is the user's
         // local choice.
+        // The file holds what the scripts show on screen and nothing more.
+        //  - A COUNT is a sum broadcast to every slot, so every slot holds the same
+        //    value. Write {"answer": N} alone. It used to list every one of the 8192
+        //    identical slots plus five statistics: 130 KB for one number.
+        //  - An all-zero result is {"answer": 0}.
+        //  - Anything else is an ITEMIZED result: write only the positions that lit up,
+        //    under nonZeroValues, which resolve_matches and resolve_rules read. No
+        //    "answer" here: two matches valued 1 were written as "answer": 1, which
+        //    reads as a count of one.
+        const bool broadcast = uniform && non_zero == values.size();
         json result;
-        result["valueType"]    = "int";
-        result["totalSlots"]   = values.size();
-        result["nonZeroSlots"] = non_zero;
-        result["sumOfSlots"]   = total_sum;
-        result["maxSlotValue"] = max_value;
-        result["contextSpec"]  = spec->id;
-        if (uniform) result["answer"] = uniform_value;
-        {
+        if (!seeded || broadcast) {
+            result["answer"] = uniform_value;
+        } else {
             json nz = json::object();
             for (std::size_t i = 0; i < values.size(); ++i)
                 if (values[i] != 0) nz[std::to_string(i)] = values[i];
