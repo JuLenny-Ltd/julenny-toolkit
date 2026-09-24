@@ -259,7 +259,13 @@ while ($true) {
         'queued'    { Write-Host ("  state: {0} ({1}s elapsed)" -f $state, $elapsed) }
         'computing' { Write-Host ("  state: {0} ({1}s elapsed)" -f $state, $elapsed) }
         'awaiting-release' {
-            Write-JlSuccess "Computation done. Awaiting $($script:JL_PEER_LABEL)'s partial-decrypt release."
+            # Who releases follows resultVisibility, not who triggered: the party that
+            # does NOT see the result releases, and that can be this machine.
+            if (Test-JlAmViewer) {
+                Write-JlSuccess "Computation done. Awaiting $($script:JL_PEER_LABEL)'s partial-decrypt release."
+            } else {
+                Write-JlSuccess "Computation done. This machine releases it next."
+            }
             $done = $true
         }
         'released' {
@@ -288,4 +294,8 @@ while ($true) {
 }
 
 Write-Host ""
-Write-JlInfo "Next step: $($script:JL_PEER_LABEL) runs their end-of-cycle (release); then run 06-end-of-cycle.ps1 here."
+if (Test-JlAmViewer) {
+    Write-JlInfo "Next step: $($script:JL_PEER_LABEL) runs their end-of-cycle (release); then run 06-end-of-cycle.ps1 here."
+} else {
+    Write-JlInfo "Next step: run 06-end-of-cycle.ps1 here to release; $($script:JL_PEER_LABEL) then reads the result."
+}

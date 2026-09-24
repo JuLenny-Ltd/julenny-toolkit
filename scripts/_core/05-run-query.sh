@@ -218,7 +218,13 @@ while true; do
             printf "  state: %s (%ds elapsed)\n" "$state" "$elapsed"
             ;;
         awaiting-release)
-            success "Computation done. Awaiting ${JL_PEER_LABEL}'s partial-decrypt release."
+            # Who releases follows resultVisibility, not who triggered: the party that
+            # does NOT see the result releases, and that can be this machine.
+            if am_i_viewer; then
+                success "Computation done. Awaiting ${JL_PEER_LABEL}'s partial-decrypt release."
+            else
+                success "Computation done. This machine releases it next."
+            fi
             break
             ;;
         released)
@@ -249,4 +255,8 @@ while true; do
 done
 
 echo
-info "Next step: ${JL_PEER_LABEL} runs their end-of-cycle (release); then run 06-end-of-cycle here."
+if am_i_viewer; then
+    info "Next step: ${JL_PEER_LABEL} runs their end-of-cycle (release); then run 06-end-of-cycle here."
+else
+    info "Next step: run 06-end-of-cycle here to release; ${JL_PEER_LABEL} then reads the result."
+fi

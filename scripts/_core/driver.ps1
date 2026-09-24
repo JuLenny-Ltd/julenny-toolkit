@@ -673,6 +673,10 @@ if (Test-JlIsOwner) {
     Write-JlStep "$($script:JL_OUR_LABEL): end-of-cycle (resultVisibility: $($script:JULENNY_RESULT_VISIBILITY))"
     Invoke-JlPhase '06-end-of-cycle.ps1'
     Write-Host ""
-    Write-JlSuccess "All $($script:JL_OUR_LABEL) phases done. Answer is above."
+    if (Test-JlAmViewer) {
+        Write-JlSuccess "All $($script:JL_OUR_LABEL) phases done. Answer is above."
+    } else {
+        Write-JlSuccess "All $($script:JL_OUR_LABEL) phases done. Released; only $($script:JL_PEER_LABEL) can read the result."
+    }
 Invoke-JlOfferAnotherCycle
 }
