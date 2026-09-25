@@ -101,9 +101,50 @@ struct CryptoEncryptArgs {
     std::string columns = "all";       // "all" or comma-separated 1-based indices like "1,2"
     bool skip_header = false;
 
+    // schema 'signature-table' (exact PSI; design 2.2, Q2c). Both parties must encode with the
+    // same cells, tables, limbs and count groups, and with opposite roles.
+    std::string   psi_role;                 // "A" or "B"; mode A defaults to the input's position
+    unsigned      signature_bits = 128;     // the guarantee; limbs are derived from it
+    std::uint64_t cells = 0;                // 0 = let the solver choose
+    unsigned      tables = 0;               // 0 = let the solver choose
+    bool          dynamic_tables = false;   // T = this party's fullest cell (per-level tables only)
+    unsigned      limbs = 0;                // 0 = derive from signature_bits (advanced override)
+    std::uint64_t count_groups = 0;         // 0 = the solver's choice
+    std::uint64_t shards = 1;               // > 1 is step F1
+    std::uint64_t capacity = 0;             // size for this many records (0 = the ones read)
+    double        target_overflow = 1e-6;   // expected dropped records / records
+    std::string   on_overflow = "fail";     // "fail" or "drop"
+    std::string   domain_separator;         // hashed in front of every record; both parties must match
+    // Design §3.9: accuracy problems short of the 1 % drop floor are refused until acknowledged.
+    bool          accept_degraded_accuracy = false;
+
     std::string context_spec;          // optional override; if empty, read from function-def or default
     bool emit_json = false;
 };
+// Dry-run estimate for schema 'signature-table' (exact PSI; design §3.8, step D3).
+// Its only inputs are a declared record count and the parameters: no input file,
+// no key, no grant, no upload, and it writes nothing. It picks the parameters the
+// encoder would pick for the same flags, and predicts the bytes it would write.
+struct CryptoPsiEstimateArgs {
+    std::uint64_t records = 0;              // this party's records, as the encoder would read them
+    std::uint64_t peer_records = 0;         // 0 = assume the same as records (accuracy only)
+    std::string   context_spec = "bfv-exact-psi-v1";
+    unsigned      signature_bits = 128;
+    std::uint64_t cells = 0;                // 0 = solved, as in crypto encrypt
+    unsigned      tables = 0;
+    bool          dynamic_tables = false;   // quote T as the data will set it, not a fixed T
+    unsigned      peer_tables = 0;          // the other party's T when it differs (per-level only); 0 = same
+    unsigned      limbs = 0;
+    std::uint64_t count_groups = 0;
+    std::uint64_t shards = 1;               // > 1 is step F1
+    double        target_overflow = 1e-6;
+    std::string   on_overflow = "fail";     // as crypto encrypt: decides whether expected drops need acknowledging
+    bool          accept_degraded_accuracy = false;  // report the verdict as the encoder would reach it
+    std::int64_t  storage_quota_bytes = -1; // -1 = unknown; 0 = no limit, as the platform treats it
+    std::uint64_t storage_used_bytes = 0;
+    bool emit_json = false;
+};
+
 struct CryptoDecryptArgs {
     std::string input_path;       // ciphertext file (binary)
     std::string secret_key_path;  // secret key file (binary, cereal-serialized)
@@ -363,6 +404,7 @@ void register_crypto(CLI::App& app,
                      CryptoSignArgs& sign_args,
                      CryptoVerifyArgs& verify_args,
                      CryptoEncryptArgs& encrypt_args,
+                     CryptoPsiEstimateArgs& psi_estimate_args,
                      CryptoDecryptArgs& decrypt_args,
                      CryptoKeysetupContributeArgs& keysetup_contribute_args,
                      CryptoRelinContributeArgs& relin_contribute_args,

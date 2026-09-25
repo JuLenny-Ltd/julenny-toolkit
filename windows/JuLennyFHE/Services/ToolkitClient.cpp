@@ -436,6 +436,7 @@ namespace JuLennyFHE::Services
             if      (enc.context_spec_id == "bfv-default-v1")  slot_count = 16384;
             else if (enc.context_spec_id == "ckks-default-v1") slot_count = 8192;
             else if (enc.context_spec_id == "ckks-tree-v1")    slot_count = 32768;
+            else if (enc.context_spec_id == "bfv-exact-psi-v1") slot_count = 32768;
             else
             {
                 result.error = L"no slot count known for context spec '"
