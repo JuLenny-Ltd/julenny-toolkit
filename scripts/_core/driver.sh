@@ -653,6 +653,10 @@ else
     step "${JL_OUR_LABEL}: end-of-cycle (resultVisibility: $JULENNY_RESULT_VISIBILITY)"
     "$SCRIPT_DIR/06-end-of-cycle.sh"
     echo
-    success "All ${JL_OUR_LABEL} phases done. Answer is above."
+    if am_i_viewer; then
+        success "All ${JL_OUR_LABEL} phases done. Answer is above."
+    else
+        success "All ${JL_OUR_LABEL} phases done. Released; only ${JL_PEER_LABEL} can read the result."
+    fi
     offer_another_cycle
 fi
