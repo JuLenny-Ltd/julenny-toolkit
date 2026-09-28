@@ -376,13 +376,17 @@ for ((i = 0; i < MY_INPUT_COUNT; i++)); do
                 UP_URL="$(echo "$URL_RESP" | jq -r '.uploadUrl // empty')"
                 PICKED_ID="$(echo "$URL_RESP" | jq -r '.datasetId // empty')"
                 [[ -n "$UP_URL" && -n "$PICKED_ID" ]] || die "upload-url failed: $URL_RESP"
+                # The returned range is what the URL was signed over — for a single-file upload it
+                # is the headroom left in the plan, not this file's size — so it goes back verbatim.
+                UP_RANGE="$(echo "$URL_RESP" | jq -r '.contentLengthRange // empty')"
                 info "  PUT-ing payload to object storage..."
                 PUT_CODE="$(curl -sS -o /dev/null -w '%{http_code}' \
                     -X PUT "$UP_URL" \
                     -H "Content-Type: application/octet-stream" \
+                    ${UP_RANGE:+-H "x-goog-content-length-range: $UP_RANGE"} \
                     --data-binary "@$CIPHERTEXT")"
                 [[ "$PUT_CODE" == "200" || "$PUT_CODE" == "204" ]] \
-                    || die "object storage PUT returned HTTP $PUT_CODE"
+                    || die "object storage PUT returned HTTP $PUT_CODE (403 here means the upload is bigger than the ${UP_RANGE:-unbounded} bytes the URL was signed for - the plan's remaining storage)"
                 CONFIRM_RESP="$(curl_jl POST "/api/fhe-data-upload/confirm" \
                     -H "Content-Type: application/json" \
                     --data-binary "$(jq -n --arg id "$PICKED_ID" --arg n "$DATASET_NAME" \

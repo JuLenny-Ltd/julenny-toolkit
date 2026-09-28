@@ -315,7 +315,10 @@ export function registerPipelineTools(server: McpServer, api: JulennyApiClient) 
         const uploadUrl = urlResp.uploadUrl as string | undefined;
         const datasetId = urlResp.datasetId as string | undefined;
         if (!uploadUrl || !datasetId) return fail(`upload-url did not return uploadUrl/datasetId: ${JSON.stringify(urlResp)}`);
-        await api.putSignedUrlFromFile(uploadUrl, resolved);
+        await api.putSignedUrlFromFile(
+          uploadUrl, resolved, 'application/octet-stream',
+          urlResp.contentLengthRange as string | undefined,
+        );
         const confirmBody: Record<string, unknown> = {
           datasetId,
           name: p.name,
@@ -581,7 +584,8 @@ export function registerPipelineTools(server: McpServer, api: JulennyApiClient) 
       mode = 'objectStorage';
       const urlResp = await api.post(
         `/api/fhe-permissions/${permissionId}/keysetup/messages/upload-url`,
-        { round },
+        // The platform signs the link for exactly this many bytes, so it has to be told.
+        { round, declaredBytes: size },
       ) as Record<string, unknown>;
       const uploadUrl = urlResp.uploadUrl as string | undefined;
       const key = urlResp.objectKey as string | undefined;
@@ -592,7 +596,10 @@ export function registerPipelineTools(server: McpServer, api: JulennyApiClient) 
       // 320MB rotation key cost about a gigabyte of churn before the first byte
       // went out. That stall, not the network, is what ran the call past the
       // client's timeout.
-      await api.putSignedUrlFromFile(uploadUrl, payloadPath);
+      await api.putSignedUrlFromFile(
+        uploadUrl, payloadPath, 'application/octet-stream',
+        urlResp.contentLengthRange as string | undefined,
+      );
       // Sign a digest of the payload too. The platform keeps it and serves it in the key
       // manifest, which is how a client later tells a stale local key from a current one.
       // Done HERE rather than in each caller so every reference-mode message carries one,
@@ -729,9 +736,11 @@ export function registerPipelineTools(server: McpServer, api: JulennyApiClient) 
           // permission in one collaboration was re-sending identical bytes - the sum key
           // alone is ~71MB. When the answer is alreadyStored there is nothing to upload
           // and the existing object is registered instead.
+          const { size: keyBytes } = await stat(keyPath);
           const urlResp = await api.post(
             `/api/fhe-permissions/${p.permissionId}/keysetup/final-keys/upload-url`,
-            { keyType: k.keyType, sha256Hex },
+            // The platform signs the link for exactly this many bytes, so it has to be told.
+            { keyType: k.keyType, sha256Hex, declaredBytes: keyBytes },
           ) as Record<string, unknown>;
           const uploadUrl = urlResp.uploadUrl as string | undefined;
           const objectKey = urlResp.objectKey as string | undefined;
@@ -746,7 +755,10 @@ export function registerPipelineTools(server: McpServer, api: JulennyApiClient) 
           if (!uploadUrl) {
             return fail(`upload-url for ${k.keyType} did not return uploadUrl + objectKey`);
           }
-          await api.putSignedUrlFromFile(uploadUrl, keyPath);
+          await api.putSignedUrlFromFile(
+            uploadUrl, keyPath, 'application/octet-stream',
+            urlResp.contentLengthRange as string | undefined,
+          );
           uploaded.push({ keyType: k.keyType, objectKey, sha256Hex });
         }
         // Build the to-sign, sign with the toolkit (it extracts the fields and signs
@@ -1077,16 +1089,16 @@ async function uploadSharded(
             shardFrom: from,
         }) as Record<string, unknown>;
         datasetId = (resp.datasetId as string | undefined) ?? datasetId;
-        const urls = resp.shardUrls as Array<{ shard: number; uploadUrl: string }> | undefined;
+        const urls = resp.shardUrls as Array<{ shard: number; uploadUrl: string; contentLengthRange?: string }> | undefined;
         if (!datasetId || !Array.isArray(urls)) {
             return fail(`upload-url did not return a shard window: ${JSON.stringify(resp)}`);
         }
         if (typeof resp.missingShards === 'number') skipped = shards - resp.missingShards;
-        for (const { shard, uploadUrl } of urls) {
+        for (const { shard, uploadUrl, contentLengthRange } of urls) {
             const local = byShard.get(shard);
             if (!local) return fail(`the manifest has no entry for shard ${shard}`);
             try {
-                await api.putSignedUrlFromFile(uploadUrl, local.path);
+                await api.putSignedUrlFromFile(uploadUrl, local.path, 'application/octet-stream', contentLengthRange);
             } catch (e) {
                 // An agent that loses the datasetId has no way back to the gigabytes already sent,
                 // so the failure carries it rather than only saying that a PUT failed.

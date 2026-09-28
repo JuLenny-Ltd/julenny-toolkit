@@ -161,21 +161,41 @@ export class JulennyApiClient {
    * transfer here). Used for large-dataset uploads; small payloads that must be
    * signed still use putSignedUrl(buffer).
    */
+  /**
+   * PUT a file to a signed URL.
+   *
+   * `contentLengthRange` is the value the platform returned beside the URL. The URL is signed over
+   * that header, so it has to go back verbatim: GCS recomputes the signature including it, and a
+   * PUT that omits it or changes it is refused with a 403 rather than accepted unbounded. It is
+   * also the size limit itself - the platform signs each link for exactly the bytes it was told to
+   * expect, so a file that has changed on disk since the URL was minted fails here rather than
+   * landing and being paid for.
+   */
   async putSignedUrlFromFile(
     absoluteUrl: string,
     filePath: string,
     contentType = 'application/octet-stream',
+    contentLengthRange?: string,
   ): Promise<void> {
     const { size } = await stat(filePath);
     const res = await fetch(absoluteUrl, {
       method: 'PUT',
-      headers: { 'Content-Type': contentType, 'Content-Length': String(size) },
+      headers: {
+        'Content-Type': contentType,
+        'Content-Length': String(size),
+        ...(contentLengthRange ? { 'x-goog-content-length-range': contentLengthRange } : {}),
+      },
       body: createReadStream(filePath) as unknown as BodyInit,
       // Node/undici requires duplex:'half' when the body is a stream.
       duplex: 'half',
     } as RequestInit & { duplex: 'half' });
     if (!res.ok) {
-      throw new Error(`signed-URL PUT failed: HTTP ${res.status}`);
+      // 403 on a bounded link is nearly always the size, not the credentials: say so, because the
+      // status alone sends people to look at their API key.
+      const hint = res.status === 403 && contentLengthRange
+        ? ` (the link accepts ${contentLengthRange.split(',')[1]} bytes and this file is ${size})`
+        : '';
+      throw new Error(`signed-URL PUT failed: HTTP ${res.status}${hint}`);
     }
   }
 }
