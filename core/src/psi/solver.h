@@ -53,7 +53,7 @@ struct ContextCost {
     unsigned      max_limbs        = 8;      // depth 19 is the last depth at N = 32768 (A1 §6)
 
     // Serialization framing: what cereal adds around the 2 * N * towers * 8
-    // bytes of polynomial data. Defaults measured at bfv-exact-psi-v1 on
+    // bytes of polynomial data. Defaults measured at bfv-large-psi-v1 on
     // OpenFHE 1.5.0 and 1.5.1 (identical on both), from real bundles and real
     // count results (step D3). They depend on the spec, so the CLI measures
     // them for the spec it is given rather than trusting these. The fixed part

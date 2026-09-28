@@ -23,10 +23,10 @@ nlohmann::json load_seed(const std::string& name) {
 
 }  // namespace
 
-TEST_CASE("bfv-exact-psi-v1 matches the platform seed document field for field",
+TEST_CASE("bfv-large-psi-v1 matches the platform seed document field for field",
           "[crypto][context-spec]") {
-    const auto seed = load_seed("bfv-exact-psi-v1");
-    const auto spec = get_crypto_context_spec("bfv-exact-psi-v1");
+    const auto seed = load_seed("bfv-large-psi-v1");
+    const auto spec = get_crypto_context_spec("bfv-large-psi-v1");
     REQUIRE(spec.has_value());
 
     // A field the platform sets that this test does not compare is a field the

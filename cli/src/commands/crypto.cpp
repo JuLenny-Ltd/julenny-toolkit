@@ -188,13 +188,13 @@ std::string compose_record(const std::string& line,
 constexpr std::int64_t BFV_DEFAULT_V1_SLOTS  = 16384;
 constexpr std::int64_t CKKS_DEFAULT_V1_SLOTS = 8192;   // ringDim/2 for CKKS
 constexpr std::int64_t CKKS_TREE_V1_SLOTS    = 32768;  // ringDim/2 for ckks-tree-v1 (ring 65536)
-constexpr std::int64_t BFV_EXACT_PSI_V1_SLOTS = 32768; // ringDim for bfv-exact-psi-v1 (65537 = 1 mod 65536)
+constexpr std::int64_t BFV_EXACT_PSI_V1_SLOTS = 32768; // ringDim for bfv-large-psi-v1 (65537 = 1 mod 65536)
 
 std::int64_t resolve_slot_count(std::string_view context_spec_id) {
     if (context_spec_id == "bfv-default-v1")  return BFV_DEFAULT_V1_SLOTS;
     if (context_spec_id == "ckks-default-v1") return CKKS_DEFAULT_V1_SLOTS;
     if (context_spec_id == "ckks-tree-v1")    return CKKS_TREE_V1_SLOTS;
-    if (context_spec_id == "bfv-exact-psi-v1") return BFV_EXACT_PSI_V1_SLOTS;
+    if (context_spec_id == "bfv-large-psi-v1") return BFV_EXACT_PSI_V1_SLOTS;
     throw std::runtime_error("unknown context spec: " + std::string(context_spec_id));
 }
 
@@ -1384,7 +1384,7 @@ static int encrypt_signature_table(const CryptoEncryptArgs& args,
 // layout-aware model over the real context's ring and towers, with the cereal
 // framing measured for this spec by archiving two throwaway ciphertexts under a
 // throwaway key. That framing differs by spec (bfv-default-v1 frames
-// differently from bfv-exact-psi-v1), so it is measured rather than assumed.
+// differently from bfv-large-psi-v1), so it is measured rather than assumed.
 // ---------------------------------------------------------------------------
 namespace {
 
@@ -1616,8 +1616,8 @@ int run_crypto_psi_estimate(const CryptoPsiEstimateArgs& args) {
                            { "archivedCiphertextExtra", req.context.archived_ciphertext_extra },
                            { "singleCiphertextExtra", req.context.single_ciphertext_extra },
                            // Results are written by the wrapper, not here, so their framing cannot be
-                           // probed locally: this is what the wrapper wrote at bfv-exact-psi-v1.
-                           { "outputFraming", "measured from wrapper results at bfv-exact-psi-v1" } };
+                           // probed locally: this is what the wrapper wrote at bfv-large-psi-v1.
+                           { "outputFraming", "measured from wrapper results at bfv-large-psi-v1" } };
         // Named rather than omitted, so nobody reads their absence as zero.
         out["unmodelled"] = { { "timeP50Sec", "wall time needs the engine's thread budget and hardware (E4)" },
                               { "timeP90Sec", "wall time needs the engine's thread budget and hardware (E4)" },
@@ -3780,7 +3780,7 @@ void register_crypto(CLI::App& app,
     psi_estimate->add_option("--peer-records", psi_estimate_args.peer_records,
                              "The other party's records (default: the same); affects accuracy only");
     psi_estimate->add_option("--context-spec", psi_estimate_args.context_spec,
-                             "Crypto context spec (default: bfv-exact-psi-v1)");
+                             "Crypto context spec (default: bfv-large-psi-v1)");
     psi_estimate->add_option("--signature-bits", psi_estimate_args.signature_bits,
                              "As crypto encrypt (default 128)");
     psi_estimate->add_option("--cells", psi_estimate_args.cells, "As crypto encrypt (default: solved)");

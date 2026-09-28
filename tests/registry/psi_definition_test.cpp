@@ -115,7 +115,7 @@ TEST_CASE("the exact-PSI definitions say what the encoder needs them to say", "[
         CAPTURE(slug);
         const json& def = entry.at("signedFunctionDefinition");
 
-        REQUIRE(def.at("cryptoContextSpec") == "bfv-exact-psi-v1");
+        REQUIRE(def.at("cryptoContextSpec") == "bfv-large-psi-v1");
         REQUIRE(def.at("scheme") == "BFV");
         REQUIRE(def.at("variant") == "exact");
         REQUIRE(def.at("family") == "Joint Record Overlap");

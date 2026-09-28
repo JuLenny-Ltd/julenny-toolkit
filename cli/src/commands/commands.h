@@ -128,7 +128,7 @@ struct CryptoEncryptArgs {
 struct CryptoPsiEstimateArgs {
     std::uint64_t records = 0;              // this party's records, as the encoder would read them
     std::uint64_t peer_records = 0;         // 0 = assume the same as records (accuracy only)
-    std::string   context_spec = "bfv-exact-psi-v1";
+    std::string   context_spec = "bfv-large-psi-v1";
     unsigned      signature_bits = 128;
     std::uint64_t cells = 0;                // 0 = solved, as in crypto encrypt
     unsigned      tables = 0;

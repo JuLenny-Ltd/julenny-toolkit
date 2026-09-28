@@ -1,5 +1,5 @@
 {
-  "name": "bfv-exact-psi-v1",
+  "name": "bfv-large-psi-v1",
   "scheme": "BFV",
   "ringDimension": 32768,
   "securityLevel": 128,
