@@ -732,12 +732,17 @@ wait_for_peer_share() {
 
 JL_INLINE_THRESHOLD_BYTES="${JL_INLINE_THRESHOLD_BYTES:-$((15 * 1024 * 1024))}"
 
+# The signed URL is bound to a size: the platform signs it with an
+# x-goog-content-length-range of exactly declaredBytes, and the PUT has to send the same
+# header or object storage refuses it. So the size goes with the request, and the PUT
+# below derives the header from the same file rather than parsing it back out.
 request_upload_url() {
     local round="$1"
+    local declared_bytes="$2"
     local resp
     resp="$(curl_jl POST "/api/fhe-permissions/$JULENNY_PERMISSION_ID/keysetup/messages/upload-url" \
         -H "Content-Type: application/json" \
-        --data-binary "$(jq -n --argjson r "$round" '{round: $r}')")"
+        --data-binary "$(jq -n --argjson r "$round" --argjson b "$declared_bytes" '{round: $r, declaredBytes: $b}')")"
 
     local url key
     url="$(echo "$resp" | jq -r '.uploadUrl // empty')"
@@ -769,7 +774,7 @@ wrap_and_upload() {
         info "Wrapping $msg_type (round $round, object storage-mediated, ${size_bytes} bytes)"
 
         local url_and_key url object_key
-        url_and_key="$(request_upload_url "$round")"
+        url_and_key="$(request_upload_url "$round" "$size_bytes")"
         url="${url_and_key%|*}"
         object_key="${url_and_key#*|}"
 
@@ -778,9 +783,10 @@ wrap_and_upload() {
         put_code="$(curl -sS -o /dev/null -w '%{http_code}' \
             -X PUT "$url" \
             -H "Content-Type: application/octet-stream" \
+            -H "x-goog-content-length-range: 0,${size_bytes}" \
             --data-binary "@$bin_path")"
         [[ "$put_code" == "200" || "$put_code" == "204" ]] \
-            || die "object storage PUT returned HTTP $put_code"
+            || die "object storage PUT returned HTTP $put_code (403 here means the ${size_bytes}-byte size bound the URL was signed with does not match what was sent)"
         success "  Uploaded to object storage"
 
         # Sign a digest of the payload alongside the reference. The platform keeps it and
@@ -1462,13 +1468,17 @@ upload_plaintext_dataset() {
         up_url="$(echo "$url_resp" | jq -r '.uploadUrl // empty')"
         id="$(echo "$url_resp" | jq -r '.datasetId // empty')"
         [[ -n "$up_url" && -n "$id" ]] || { err "upload-url failed: $url_resp"; return 1; }
+        # The returned range is what the URL was signed over - for a single-file upload it is the
+        # headroom left in the plan, not this file's size - so it goes back verbatim.
+        local up_range; up_range="$(echo "$url_resp" | jq -r '.contentLengthRange // empty')"
         local put_code
         put_code="$(curl -sS -o /dev/null -w '%{http_code}' \
             -X PUT "$up_url" \
             -H "Content-Type: application/octet-stream" \
+            ${up_range:+-H "x-goog-content-length-range: $up_range"} \
             --data-binary "@$file_path")"
         [[ "$put_code" == "200" || "$put_code" == "204" ]] \
-            || { err "object storage PUT returned HTTP $put_code"; return 1; }
+            || { err "object storage PUT returned HTTP $put_code (403 here means the file is bigger than the ${up_range:-unbounded} bytes the URL was signed for - the plan's remaining storage)"; return 1; }
         local confirm_resp
         confirm_resp="$(curl_jl POST "/api/fhe-data-upload/confirm" \
             -H "Content-Type: application/json" \

@@ -59,6 +59,9 @@ fi
 #
 # The main half used to run this same check much later, just before requesting upload
 # URLs, by which point the local-file checks had already stopped the run.
+# No declaredBytes on purpose: this asks a question, it does not want a URL. The route checks the
+# keysetup state long before it checks the size, so the "state 'complete'" answer arrives either
+# way, and the 400 the request otherwise gets is discarded here.
 _precheck="$(curl_jl POST "/api/fhe-permissions/$JULENNY_PERMISSION_ID/keysetup/final-keys/upload-url" \
     -H "Content-Type: application/json" \
     --data-binary "$(jq -n '{keyType: "joint_public_key"}')" 2>/dev/null || echo '{}')"
@@ -226,11 +229,17 @@ info "  joint_public_key: $JOINT_PK_SHA"
 # 154 MB across the two parties once a 77 MB sum key is involved. Sending the digest
 # lets the platform answer "already stored" with the object it holds, and the PUT is
 # skipped. An EMPTY url in the returned "url|key" pair means exactly that.
+# The third argument is the file about to be sent: the platform signs the URL with an
+# x-goog-content-length-range of exactly that many bytes, and put_blob_to_storage below
+# sends the same header from the same file, so the two agree by construction.
 request_final_key_upload_url() {
     local key_type="$1"
     local sha="${2:-}"
-    local payload resp url key
-    payload="$(jq -n --arg t "$key_type" --arg s "$sha" '{keyType: $t} + (if $s == "" then {} else {sha256Hex: $s} end)')"
+    local path="$3"
+    local payload resp url key declared_bytes
+    declared_bytes="$(stat -c%s "$path")"
+    payload="$(jq -n --arg t "$key_type" --arg s "$sha" --argjson b "$declared_bytes" \
+        '{keyType: $t, declaredBytes: $b} + (if $s == "" then {} else {sha256Hex: $s} end)')"
     resp="$(curl_jl POST "/api/fhe-permissions/$JULENNY_PERMISSION_ID/keysetup/final-keys/upload-url" -H "Content-Type: application/json" --data-binary "$payload")"
     key="$(echo "$resp" | jq -r '.objectKey // empty')"
     if [[ "$(echo "$resp" | jq -r '.alreadyStored // false')" == "true" ]]; then
@@ -246,30 +255,32 @@ request_final_key_upload_url() {
 put_blob_to_storage() {
     local url="$1"
     local path="$2"
-    local code
+    local code bytes
+    bytes="$(stat -c%s "$path")"
     code="$(curl -sS -o /dev/null -w '%{http_code}' \
         -X PUT "$url" \
         -H "Content-Type: application/octet-stream" \
+        -H "x-goog-content-length-range: 0,${bytes}" \
         --data-binary "@$path")"
     [[ "$code" == "200" || "$code" == "204" ]] \
-        || die "object storage PUT returned HTTP $code for $path"
+        || die "object storage PUT returned HTTP $code for $path (403 here means the size bound the URL was signed with, 0,${bytes}, does not match what was sent)"
 }
 
 info "Requesting upload URLs (3 keyTypes)..."
-JPK_URL_AND_KEY="$(request_final_key_upload_url joint_public_key "$JOINT_PK_SHA")"
+JPK_URL_AND_KEY="$(request_final_key_upload_url joint_public_key "$JOINT_PK_SHA" "$JOINT_PK")"
 JPK_URL="${JPK_URL_AND_KEY%|*}"
 JPK_OBJ="${JPK_URL_AND_KEY#*|}"
 
 REL_OBJ=""
 if [[ "$NEEDS_RELIN" == "yes" ]]; then
-    REL_URL_AND_KEY="$(request_final_key_upload_url joint_relin_key "$RELIN_SHA")"
+    REL_URL_AND_KEY="$(request_final_key_upload_url joint_relin_key "$RELIN_SHA" "$FINAL_RELIN")"
     REL_URL="${REL_URL_AND_KEY%|*}"
     REL_OBJ="${REL_URL_AND_KEY#*|}"
 fi
 
 SUM_OBJ=""
 if [[ "$NEEDS_SUM" == "yes" ]]; then
-    SUM_URL_AND_KEY="$(request_final_key_upload_url eval_sum_key "$SUM_SHA")"
+    SUM_URL_AND_KEY="$(request_final_key_upload_url eval_sum_key "$SUM_SHA" "$FINAL_SUM")"
     SUM_URL="${SUM_URL_AND_KEY%|*}"
     SUM_OBJ="${SUM_URL_AND_KEY#*|}"
 fi

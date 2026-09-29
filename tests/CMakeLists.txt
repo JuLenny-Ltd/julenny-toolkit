@@ -5,6 +5,14 @@ set(FHE_TOOLKIT_TEST_SOURCES
     registry/canonical_json_test.cpp
     registry/envelope_test.cpp
     registry/signature_test.cpp
+    registry/psi_definition_test.cpp
+    psi/digest_test.cpp
+    psi/table_test.cpp
+    psi/reference_test.cpp
+    psi/solver_test.cpp
+    psi/bundle_test.cpp
+    psi/shard_test.cpp
+    psi/advice_test.cpp
 )
 
 if(FHE_TOOLKIT_USE_OPENFHE)
@@ -12,6 +20,7 @@ if(FHE_TOOLKIT_USE_OPENFHE)
         crypto/keys_test.cpp
         crypto/ciphertext_test.cpp
         crypto/multiparty_test.cpp
+        crypto/context_spec_test.cpp
     )
 endif()
 

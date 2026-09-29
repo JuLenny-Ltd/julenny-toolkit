@@ -159,6 +159,8 @@ public:
     Ciphertext eval_rotate(const Ciphertext& a, int32_t index) const;
 
     const CryptoContextSpec& spec() const noexcept { return spec_; }
+    // RNS towers in a fresh ciphertext's polynomials: what its size scales with.
+    std::size_t tower_count() const;
 
 private:
     friend class PublicKey;

@@ -30,6 +30,7 @@ int main(int argc, char** argv) {
     julenny_fhe::cli::CryptoSignArgs          crypto_sign_args;
     julenny_fhe::cli::CryptoVerifyArgs        crypto_verify_args;
     julenny_fhe::cli::CryptoEncryptArgs       crypto_encrypt_args;
+    julenny_fhe::cli::CryptoPsiEstimateArgs   crypto_psi_estimate_args;
     julenny_fhe::cli::CryptoDecryptArgs       crypto_decrypt_args;
     julenny_fhe::cli::CryptoKeysetupContributeArgs crypto_keysetup_contribute_args;
     julenny_fhe::cli::CryptoRelinContributeArgs crypto_relin_contribute_args;
@@ -52,7 +53,8 @@ int main(int argc, char** argv) {
                                        crypto_signing_keygen_args,
                                        crypto_sign_args,
                                        crypto_verify_args,
-                                       crypto_encrypt_args, crypto_decrypt_args,
+                                       crypto_encrypt_args, crypto_psi_estimate_args,
+                                       crypto_decrypt_args,
                                        crypto_keysetup_contribute_args,
                                        crypto_relin_contribute_args,
                                        crypto_relin_combine_args,
