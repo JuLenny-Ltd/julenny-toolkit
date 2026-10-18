@@ -1,0 +1,47 @@
+# Default: let git auto-detect binary vs text and use the checkout-platform's
+# native EOL for text. Specific overrides below force EOLs for files that
+# always run on a specific OS, so a Windows checkout still produces files
+# that work on Linux (and vice versa).
+* text=auto
+
+# Shell scripts always run on Linux; force LF regardless of checkout OS.
+*.sh    text eol=lf
+*.bash  text eol=lf
+# The scripts' side profiles (scripts/_core/sides/*.env) are sourced by bash too, and a CRLF
+# line fails there ("$'\r': command not found"). PowerShell reads LF just as well.
+*.env   text eol=lf
+
+# Shell scripts with no extension: the helper installed onto PATH, and the dpkg
+# maintainer scripts. Not covered by *.sh above, and a CRLF shebang fails hard
+# on Linux ("bad interpreter: /usr/bin/env bash^M"). The postinst matters most:
+# a broken maintainer script makes the package fail to configure.
+linux/julenny-toolkit-scripts  text eol=lf
+linux/debian/*                  text eol=lf
+
+# PowerShell, cmd, and batch scripts always run on Windows; force CRLF.
+*.ps1   text eol=crlf
+*.cmd   text eol=crlf
+*.bat   text eol=crlf
+
+# Sample input data is encrypted and then matched byte-for-byte against the
+# OTHER party's data, which may have been checked out on a different OS. A CRLF
+# checkout would append \r to every record, so a Windows-side record would never
+# match the identical Linux-side one and the result would be silently wrong
+# (e.g. an overlap count of 0 instead of 2). Force LF regardless of platform.
+scripts/samples/**     text eol=lf
+
+# Binary asset categories - never EOL-normalize.
+*.png   binary
+*.jpg   binary
+*.jpeg  binary
+*.gif   binary
+*.ico   binary
+*.pdf   binary
+*.zip   binary
+*.tar   binary
+*.gz    binary
+*.msix  binary
+*.deb   binary
+*.cer   binary
+*.pfx   binary
+*.bin   binary

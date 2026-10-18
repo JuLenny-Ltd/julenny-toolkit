@@ -1,0 +1,66 @@
+{
+  "_comment": "Signed search-text function definition fixture for cross-language Ed25519 verification testing.",
+  "_wireFormat": {
+    "signatureAlgorithm": "Ed25519 (RFC 8032)",
+    "signatureSize": "64 bytes (R || S)",
+    "keySize": "32 bytes raw",
+    "derWrapping": "Only for Node.js import — not part of the wire format. PKCS8 prefix (hex): 302e020100300506032b657004220420. SPKI prefix (hex): 302a300506032b6570032100.",
+    "signedPayload": "Canonical JSON (key-sorted, no-whitespace, UTF-8) of all fields EXCLUDING the 'registry' block."
+  },
+  "publicKeyHex": "98e21c4408f96b83c625216b9e7668f1ff2d237b4f3731a124297f47cd8b6456",
+  "privateKeyHex": "ff0496c7b756192e361b4b20b8c6d44d426d976e8c032a51ac6971283daf2688",
+  "signedFunctionDefinition": {
+    "slug": "search-text",
+    "version": "1.0.0",
+    "name": "Search text in encrypted list",
+    "description": "Counts occurrences of a single name within a list of names.",
+    "category": "search",
+    "status": "active",
+    "scheme": "BFV",
+    "cryptoContextSpec": "bfv-default-v1",
+    "engine": "openfhe-cpu",
+    "engineProfile": {
+      "expectedSlots": 8192,
+      "expectedDepth": 18,
+      "gpuRecommendedAbove": 100000
+    },
+    "inputs": [
+      {
+        "name": "haystack",
+        "role": "dataOwner",
+        "encoding": "hkdf-sha256-mod-p",
+        "layout": "packed-int-vector"
+      },
+      {
+        "name": "needle",
+        "role": "queryAnalyst",
+        "encoding": "hkdf-sha256-mod-p",
+        "layout": "packed-int-vector"
+      }
+    ],
+    "output": {
+      "name": "result",
+      "layout": "scalar-int"
+    },
+    "requiredEvalKeys": [
+      "relinearization",
+      "sum"
+    ],
+    "opsHash": "a579a89f995c45012f93c0b3566841b9341acaf815138194e94d7e34b8c211d8",
+    "registry": {
+      "publishedAt": "2026-06-22T09:35:19.930Z",
+      "publishedBy": "platform-registry-v1",
+      "signature": "pvDEmN6kCyoYBclpOdHu8nGvzcMn+Uakv717dVYTnWbMnMSJ1WrvfO+kKsELJEyVq9I37tvbqHT4IYzIb+CFBA=="
+    }
+  },
+  "verification": {
+    "canonicalBytesHex": "7b2263727970746f436f6e7465787453706563223a226266762d64656661756c742d7631222c22696e70757473223a5b7b22656e636f64696e67223a22686b64662d7368613235362d6d6f642d70222c226c61796f7574223a227061636b65642d696e742d766563746f72222c226e616d65223a22686179737461636b222c22726f6c65223a22646174614f776e6572227d2c7b22656e636f64696e67223a22686b64662d7368613235362d6d6f642d70222c226c61796f7574223a227061636b65642d696e742d766563746f72222c226e616d65223a226e6565646c65222c22726f6c65223a227175657279416e616c797374227d5d2c226f707348617368223a2261353739613839663939356334353031326639336330623335363638343162393334316163616638313531333831393465393464376533346238633231316438222c226f7574707574223a7b226c61796f7574223a227363616c61722d696e74222c226e616d65223a22726573756c74227d2c2272657175697265644576616c4b657973223a5b2272656c696e656172697a6174696f6e222c2273756d225d2c22736368656d65223a22424656222c22736c7567223a227365617263682d74657874222c2276657273696f6e223a22312e302e30227d",
+    "canonicalBytesUtf8": "{\"cryptoContextSpec\":\"bfv-default-v1\",\"inputs\":[{\"encoding\":\"hkdf-sha256-mod-p\",\"layout\":\"packed-int-vector\",\"name\":\"haystack\",\"role\":\"dataOwner\"},{\"encoding\":\"hkdf-sha256-mod-p\",\"layout\":\"packed-int-vector\",\"name\":\"needle\",\"role\":\"queryAnalyst\"}],\"opsHash\":\"a579a89f995c45012f93c0b3566841b9341acaf815138194e94d7e34b8c211d8\",\"output\":{\"layout\":\"scalar-int\",\"name\":\"result\"},\"requiredEvalKeys\":[\"relinearization\",\"sum\"],\"scheme\":\"BFV\",\"slug\":\"search-text\",\"version\":\"1.0.0\"}",
+    "signatureHex": "a6f0c498dea40b2a1805c96939d1eef271afcdc327f946a4bfbd7b7556139d66cc9cc489d56aef7cefa42ac10b244c95abd237eedbdba874f8218cc86fe08504",
+    "signatureBase64": "pvDEmN6kCyoYBclpOdHu8nGvzcMn+Uakv717dVYTnWbMnMSJ1WrvfO+kKsELJEyVq9I37tvbqHT4IYzIb+CFBA==",
+    "expectedVerifyResult": true
+  },
+  "tamperTest": {
+    "_comment": "Change any byte in canonicalBytesHex or signatureHex and verification must return false."
+  }
+}

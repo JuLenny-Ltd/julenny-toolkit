@@ -1,0 +1,86 @@
+# Your keys: where they live and how to protect them
+
+When you run a JuLenny collaboration, the toolkit creates a local working folder
+that holds your cryptographic material. Some of it is **irreplaceable**. Read
+this once before you run anything important.
+
+## Where the toolkit keeps things
+
+Everything lives in **one working folder**, shared by the scripts, the
+connector (the MCP server) and the CLI. By default that is `~/julenny-workdir`
+(`%USERPROFILE%\julenny-workdir` on Windows). If you chose a different folder
+when you installed, that choice was recorded and all three use it.
+
+Your own data files sit flat at the top. Each collaboration gets a folder of its
+own below that:
+
+```
+~/julenny-workdir/
+  customers.csv                 # your own files, at the top level
+  signing/
+    signing_secret_key.bin      # your company signing identity (per company)
+    signing_public_key.bin
+  collabs/
+    <collaboration-id>/
+      config.env                # which permission/function this folder targets
+      function-def.json         # the signed function definition (re-fetchable)
+      keys/
+        fhe_secret_key.bin      # YOUR secret share  (keysetup lead)
+        my_share_secret.bin     # YOUR secret share  (keysetup main)
+        joint_public_key.bin    # the joint public key (re-fetchable from the platform)
+        ...                     # round artifacts, partials, results (regenerable)
+```
+
+The scripts name your secret share by your role in the key setup:
+`fhe_secret_key.bin` if this machine led it, `my_share_secret.bin` if it joined.
+The MCP server keeps it under the name your agent chose, in the same
+collaboration folder. Either way it is **your half of the joint key**, and it
+never leaves your machine.
+
+## What is irreplaceable, and what is not
+
+- **Irreplaceable: your secret share** (`fhe_secret_key.bin` or
+  `my_share_secret.bin`) and your **signing secret** (`signing_secret_key.bin`).
+  These are generated locally during keysetup and are **never uploaded to the
+  platform** - by design, so the platform can never decrypt your data by itself.
+  If you lose them, there is no way to recover them: you cannot decrypt results
+  for that collaboration, and you would have to create a new collaboration and
+  run a fresh keysetup.
+- **Re-fetchable / regenerable:** the joint public key (the platform stores it),
+  the function definition, and any round artifacts, partial decryptions, or
+  downloaded results. Losing these is not a problem - the toolkit re-downloads or
+  re-derives them.
+
+## Back up the irreplaceable parts
+
+Back up the whole working folder (or at minimum the `signing/` folder and every
+`keys/` folder's secret share) somewhere safe and private:
+
+```bash
+tar czf julenny-backup-$(date +%Y%m%d).tgz -C "$HOME" julenny-workdir
+# store the .tgz on encrypted, access-controlled storage
+```
+
+Restore by extracting it back into your home directory before running the
+scripts again on a new or rebuilt machine.
+
+## "Joint key is complete but this machine is missing its share"
+
+If a run stops with a message like *"Joint key is complete on the platform, but
+this machine is missing <path>/<secret share>"*, it means keysetup for that
+collaboration was completed on a **different machine** (or a machine that was
+since wiped) and this one does not have your secret share. The share cannot be
+downloaded - it only ever existed on the machine that ran keysetup. Recover by:
+
+1. **Restore** your working folder from your backup (or copy the secret share
+   from the machine that participated in the keysetup), or
+2. **Create a new collaboration** so a fresh keysetup generates a new secret
+   share on this machine.
+
+## One tool, one machine, per party
+
+In normal use, each party drives its side from a single tool on a single machine,
+so the secret share is created there and never needs to move. Moving a secret
+share between machines is only necessary in unusual setups (for example, doing
+keysetup with one tool and later running on a different machine). When you must
+move it, copy it - never expose it - and treat it like any other secret.

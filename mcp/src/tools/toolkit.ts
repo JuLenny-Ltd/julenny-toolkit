@@ -1,0 +1,1006 @@
+// Local toolkit (crypto) MCP verbs — family 2 of the security contract.
+//
+// These wrap specific `julenny-toolkit` CLI commands so an agent can run the local
+// crypto half of the pipeline. The crypto runs on the user's machine; the agent
+// never sees keys or plaintext.
+//
+// Built to the security contract:
+//   - spawned via argv array (lib/cli.ts), pinned binary, no shell string
+//   - path params are workdir-relative names, confined (lib/paths.ts)
+//   - returns references + status only; never plaintext/keys/API key
+//   - reveal steps (decrypt_result here, release in pipeline.ts) are governed by the
+//     grant + audit log + platform enforcement, NOT a forced human prompt.
+//     The releasing/viewing agent validates the request against the grant (function, runs
+//     remaining, expiry, partner, state) before acting.
+//
+// Wired into index.ts. `inspect` relies on `crypto inspect --json` to return non-secret
+// metadata, and `decrypt_result` on `crypto combine --out-file` to write plaintext to
+// disk and stay blind. `release` (family 1 + 2 composition) is registered in
+// pipeline.ts, not here.
+
+import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import { z } from 'zod';
+import { readdirSync, statSync } from 'node:fs';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { runCli } from './lib/cli.js';
+import { resolveInWorkdir, workdir } from './lib/paths.js';
+import { rememberPendingColumns, columnsForDataset, columnsForFile } from './lib/columns.js';
+
+const ok = (obj: Record<string, unknown>) => ({
+  content: [{ type: 'text' as const, text: JSON.stringify({ ok: true, ...obj }, null, 2) }],
+});
+const fail = (error: string, extra: Record<string, unknown> = {}) => ({
+  content: [{ type: 'text' as const, text: JSON.stringify({ ok: false, error, ...extra }, null, 2) }],
+  isError: true,
+});
+
+export function registerToolkitTools(server: McpServer) {
+  // ---- selftest (auto) ----
+  server.tool(
+    'selftest',
+    'Run an OpenFHE round-trip sanity check (solo flow). Returns ok + context spec; no secrets.',
+    {
+      contextSpec: z.string().optional().describe('Crypto context spec to test'),
+      multiParty: z.boolean().optional().describe('Exercise the multi-party path'),
+    },
+    async (p) => {
+      try {
+        const args = ['crypto', 'self-test'];
+        if (p.contextSpec) args.push('--context-spec', p.contextSpec);
+        if (p.multiParty) args.push('--multi-party');
+        args.push('--json');
+        const r = await runCli(args);
+        if (!r.ok) return fail(r.error || 'self-test failed', { exitCode: r.exitCode });
+        const j = (r.json ?? {}) as Record<string, unknown>;
+        return ok({ contextSpec: j.contextSpec ?? p.contextSpec, multiParty: j.multiParty ?? p.multiParty });
+      } catch (e) {
+        return fail(e instanceof Error ? e.message : 'invalid parameters');
+      }
+    },
+  );
+
+  // ---- signing_keygen (auto) ----
+  server.tool(
+    'signing_keygen',
+    'Generate an Ed25519 identity keypair (one per company). Returns the public-key path only; the secret stays on disk and is never returned.',
+    {
+      outputSecret: z.string().describe('Workdir-relative output secret-key file name'),
+      outputPublic: z.string().describe('Workdir-relative output public-key file name'),
+    },
+    async (p) => {
+      try {
+        const args = [
+          'crypto', 'signing-keygen',
+          '--output-secret', resolveInWorkdir(p.outputSecret),
+          '--output-public', resolveInWorkdir(p.outputPublic),
+          '--json',
+        ];
+        const r = await runCli(args);
+        if (!r.ok) return fail(r.error || 'signing-keygen failed', { exitCode: r.exitCode });
+        const j = (r.json ?? {}) as Record<string, unknown>;
+        return ok({ publicKeyPath: j.publicKeyPath ?? p.outputPublic });
+      } catch (e) {
+        return fail(e instanceof Error ? e.message : 'invalid parameters');
+      }
+    },
+  );
+
+  // ---- list_workdir_files (auto: names and sizes only, never contents) ----
+  //
+  // The scripts path lists the files in the scenario's data folder and asks the
+  // operator which to use (pick_data_file in _core/lib.sh). The MCP had no
+  // equivalent, so the agent could not see what was available and had no way to
+  // offer a choice. That led it to ask the user for a path elsewhere on disk and
+  // to request filesystem access, neither of which this server can ever use.
+  //
+  // Returns metadata only. Filenames and sizes are not plaintext, so this keeps
+  // the blind-by-design contract intact.
+  server.tool(
+    'list_workdir_files',
+    'List the files in the working folder so the user can be shown what is available and asked which to use. Call this BEFORE asking the user about an input file: their data is normally already in the working folder, and this server cannot read anything outside it. Returns names, sizes and modification times only, never file contents.',
+    {
+      subdirectory: z.string().optional().describe('Optional workdir-relative subfolder to list. Omit for the working folder itself.'),
+    },
+    async ({ subdirectory }) => {
+      try {
+        const dir = subdirectory ? resolveInWorkdir(subdirectory) : workdir();
+        const entries = readdirSync(dir, { withFileTypes: true });
+        const files = entries
+          .filter((e) => e.isFile())
+          .map((e) => {
+            const st = statSync(join(dir, e.name));
+            return { name: e.name, bytes: st.size, modified: st.mtime.toISOString() };
+          });
+        const directories = entries.filter((e) => e.isDirectory()).map((e) => e.name);
+        return ok({ workdir: dir, files, directories });
+      } catch (e) {
+        return fail(e instanceof Error ? e.message : 'could not list the working folder');
+      }
+    },
+  );
+
+  // ---- encrypt (auto) ----
+  server.tool(
+    'encrypt',
+    'Encrypt a local input file under a joint public key. Returns the ciphertext path, never contents. '
+      + 'BEFORE calling this for a hash-matched input (a customer list, an id list, anything matched record '
+      + 'by record), ASK THE USER whether the whole line should be matched on or only certain columns. All '
+      + 'columns is the default and is right for a file that is nothing but the identifier; a file with '
+      + 'extra fields (a date, an amount, a note) will match nothing unless the other side happens to hold '
+      + 'byte-identical extra fields, so the choice matters. Do not read the file to decide, and do not ask '
+      + 'for its contents: ask the user which columns identify a record. '
+      + 'For a large-dataset input, pass the permission\'s confirmed dataset size as datasetSize (its '
+      + 'datasetSize.size, e.g. "1K"); next_step names it.',
+    {
+      input: z.string().describe('Workdir-relative input file name'),
+      jointPublicKey: z.string().describe('Workdir-relative joint public key file name'),
+      output: z.string().describe('Workdir-relative output ciphertext file name'),
+      functionDef: z.string().optional().describe('Workdir-relative function-def JSON name (mode A)'),
+      inputName: z.string().optional().describe('Function-def input name (mode A; required with functionDef)'),
+      schema: z.enum(['indicator-hash', 'weight-vector', 'binary-indicator', 'signature-table']).optional().describe('Encoding schema (mode B)'),
+      contextSpec: z.string().optional().describe('Crypto context spec override'),
+      columns: z.string().optional().describe(
+        "Which columns of the file identify a record: 'all' (the default), or 1-based column numbers "
+        + "like '1' or '1,3'. Each party picks its own, because the same field can sit in a different "
+        + "position in each file; what the two sides must agree on is WHICH FIELDS, and their ORDER when "
+        + 'there is more than one, since they are joined in the order given before hashing. The choice is '
+        + 'remembered and reused when the result is resolved.',
+      ),
+      role: z.enum(['A', 'B']).optional().describe("Leave this out. With functionDef and inputName the toolkit works the side out from the function definition (the data owner's input is A, the analyst's B); only a schema-mode call with no definition needs it. Never ask the user or their partner."),
+      datasetSize: z.enum(['1K', '2K', '4K', '8K', '16K', '32K', '64K']).optional().describe('Large-dataset input: the permission\'s confirmed dataset size, e.g. "1K".'),
+      domainSeparator: z.string().optional().describe('Digest domain separator (mode B; mode A takes it from the definition)'),
+      skipHeader: z.boolean().optional().describe('Treat the input CSV as having no header row'),
+      reportOutput: z.string().optional().describe("Workdir-relative file to write the encoder's full JSON report to, for `upload` to forward as psiEncoding"),
+    },
+    async (p) => {
+      try {
+        const columns = (p.columns ?? '').trim();
+        if (columns && columns !== 'all' && !/^\d+(,\d+)*$/.test(columns)) {
+          return fail(`columns must be 'all' or 1-based column numbers like '1,3' (got '${columns}')`);
+        }
+        const args = [
+          'crypto', 'encrypt',
+          '--input', resolveInWorkdir(p.input),
+          '--joint-public-key', resolveInWorkdir(p.jointPublicKey),
+          '--output', resolveInWorkdir(p.output),
+        ];
+        if (p.functionDef) {
+          if (!p.inputName) return fail('inputName is required with functionDef (mode A)');
+          args.push('--function-def', resolveInWorkdir(p.functionDef), '--input-name', p.inputName);
+        } else if (p.schema) {
+          args.push('--schema', p.schema);
+        } else {
+          return fail('provide either functionDef+inputName (mode A) or schema (mode B)');
+        }
+        // 'all' is the CLI's own default, so there is no need to pass it; recording it
+        // below is what matters.
+        if (columns && columns !== 'all') args.push('--columns', columns);
+        if (p.contextSpec) args.push('--context-spec', p.contextSpec);
+        // A large-dataset input is sized by the permission's dataset size alone: it lives on the
+        // permission, not in the signed definition, and the toolkit has its table settings built in.
+        if (p.role) args.push('--role', p.role);
+        if (p.datasetSize) args.push('--dataset-size', p.datasetSize);
+        if (p.domainSeparator) args.push('--domain-separator', p.domainSeparator);
+        if (p.skipHeader) args.push('--skip-header');
+        args.push('--json');
+        const r = await runCli(args);
+        if (!r.ok) {
+            // The toolkit's own message names how many records the file holds. That is the user's
+            // to read in the toolkit, not the agent's: the agent learns only that the file is too
+            // large for the permission's size, and what to do about it.
+            if ((r.json as { status?: string } | undefined)?.status === 'too-many-records') {
+                return fail(`This file has more records than this permission allows (up to ${p.datasetSize}). `
+                    + 'Ask your partner for a permission with a larger size.', { exitCode: r.exitCode });
+            }
+            return fail(r.error || 'encrypt failed', { exitCode: r.exitCode });
+        }
+        const j = (r.json ?? {}) as Record<string, unknown>;
+
+        // Remember how this file was composed, EVEN WHEN it was all columns. Resolution
+        // re-hashes the local file, so it must compose rows identically or it matches
+        // nothing and reports an honest-looking zero. Recording every encrypt is what
+        // lets resolution distinguish "all columns, deliberately" from "no idea how this
+        // was encrypted" and ask in the second case instead of guessing.
+        await rememberPendingColumns(p.output, { columns: columns || 'all', input: p.input });
+
+        // The full report is written to a local file, never returned: `upload` forwards only its
+        // platformReport (a yes/no and the table's shape, no counts), and the rest stays here.
+        if (p.reportOutput) await writeFile(resolveInWorkdir(p.reportOutput), JSON.stringify(j, null, 2));
+
+        // References only. No record counts, not even this party's own: the agent stays blind to
+        // anything derived from the data (the counts are in the local report, for the user).
+        return ok({
+          outputPath: j.outputPath ?? p.output,
+          slotCount: j.slotCount,
+          ciphertextBytes: j.ciphertextBytes,
+          columns: columns || 'all',
+          ...(j.shards !== undefined && Number(j.shards) > 1
+            ? { shards: j.shards, manifestPath: j.manifestPath }
+            : {}),
+          ...(p.reportOutput ? { reportPath: p.reportOutput } : {}),
+        });
+      } catch (e) {
+        return fail(e instanceof Error ? e.message : 'invalid parameters');
+      }
+    },
+  );
+
+  // ---- partial_decrypt (auto: a partial reveals nothing on its own) ----
+  server.tool(
+    'partial_decrypt',
+    "Produce this party's partial decryption of a result ciphertext. Returns the partial's path; a single partial reveals nothing.",
+    {
+      input: z.string().describe('Workdir-relative result ciphertext file name'),
+      secretKey: z.string().describe('Workdir-relative secret-share file name'),
+      output: z.string().describe('Workdir-relative output partial file name'),
+      contextSpec: z.string().describe('Crypto context spec'),
+      lead: z.boolean().optional().describe('True when this machine is the keysetup LEAD. Read it from next_step or from /keysetup yourKeysetupRole - do NOT infer it from being the data owner. The two roles differ on a permission created in the other direction inside an existing collaboration, and the wrong flag here does not error: it produces a partial that does not match the other one and a silently wrong answer.'),
+    },
+    async (p) => {
+      try {
+        const args = [
+          'crypto', 'partial-decrypt',
+          '--context-spec', p.contextSpec,
+          '--input', resolveInWorkdir(p.input),
+          '--secret-key', resolveInWorkdir(p.secretKey),
+          '--output', resolveInWorkdir(p.output),
+        ];
+        if (p.lead) args.push('--lead');
+        args.push('--json');
+        const r = await runCli(args);
+        if (!r.ok) return fail(r.error || 'partial-decrypt failed', { exitCode: r.exitCode });
+        const j = (r.json ?? {}) as Record<string, unknown>;
+        return ok({ partialPath: j.outputPath ?? p.output });
+      } catch (e) {
+        return fail(e instanceof Error ? e.message : 'invalid parameters');
+      }
+    },
+  );
+
+  // ---- keysetup_contribute (auto: publishes a public contribution; secret stays local) ----
+  server.tool(
+    'keysetup_contribute',
+    'Produce this party\'s joint-public-key contribution (lead/main). Returns the public output path; the secret share stays on disk and is never returned.',
+    {
+      role: z.enum(['lead', 'main']).describe('This party\'s keysetup role'),
+      outputSecret: z.string().describe('Workdir-relative output secret-share file name'),
+      outputPublic: z.string().describe('Workdir-relative output public-contribution file name'),
+      peerShare: z.string().optional().describe('Workdir-relative peer public-share file name (main role)'),
+      contextSpec: z.string().optional().describe('Crypto context spec'),
+    },
+    async (p) => {
+      try {
+        const args = [
+          'crypto', 'keysetup-contribute',
+          '--role', p.role,
+          '--output-secret', resolveInWorkdir(p.outputSecret),
+          '--output-public', resolveInWorkdir(p.outputPublic),
+        ];
+        if (p.peerShare) args.push('--peer-share', resolveInWorkdir(p.peerShare));
+        if (p.contextSpec) args.push('--context-spec', p.contextSpec);
+        args.push('--json');
+        const r = await runCli(args);
+        if (!r.ok) return fail(r.error || 'keysetup-contribute failed', { exitCode: r.exitCode });
+        const j = (r.json ?? {}) as Record<string, unknown>;
+        return ok({ publicOutPath: j.outputPath ?? p.outputPublic });
+      } catch (e) {
+        return fail(e instanceof Error ? e.message : 'invalid parameters');
+      }
+    },
+  );
+
+  // ---- relin round 1 combine, done inside the verbs that need it ----
+  // Round 2 of the relinearization protocol (each party's contribution, and the final combine)
+  // needs the SUM of the two round-1 messages. No verb takes that sum as a file: passing a single
+  // round-1 message in its place gives a wrong key that the platform's hash check and verify_keys
+  // cannot catch (both sides add the same two round-2 shares), and the run fails at decryption.
+  // So the verbs take the two round-1 messages and combine them here.
+  async function combineRelinRound1(
+    leadRound1: string, mainRound1: string, jointPk: string, contextSpec: string | undefined,
+  ): Promise<{ path: string; cleanup: () => Promise<void> } | { error: string }> {
+    const lead = resolveInWorkdir(leadRound1);
+    const main = resolveInWorkdir(mainRound1);
+    if (lead === main) {
+      return { error: `leadRound1 and mainRound1 are the same file (${leadRound1}). Pass the lead's relin-round1 message and the main's relin-round1-continue message.` };
+    }
+    const [a, b] = await Promise.all([readFile(lead), readFile(main)]);
+    if (a.equals(b)) {
+      return { error: `${leadRound1} and ${mainRound1} are identical. Pass the lead's relin-round1 message and the main's relin-round1-continue message.` };
+    }
+    const dir = await mkdtemp(join(tmpdir(), 'julenny-relin-'));
+    const path = join(dir, 'combined-round1.bin');
+    const args = [
+      'crypto', 'relin-combine', '--round', '1',
+      '--share-a', lead, '--share-b', main,
+      '--joint-pk', resolveInWorkdir(jointPk),
+      '--output', path,
+    ];
+    if (contextSpec) args.push('--context-spec', contextSpec);
+    args.push('--json');
+    const cleanup = () => rm(dir, { recursive: true, force: true });
+    const r = await runCli(args);
+    if (!r.ok) {
+      await cleanup();
+      return { error: r.error || 'combining the two round-1 messages failed' };
+    }
+    return { path, cleanup };
+  }
+
+  const round1Params = {
+    leadRound1: z.string().describe("Workdir-relative file: the LEAD's round-1 message (messageType relin-round1). The lead made it; the main downloads it."),
+    mainRound1: z.string().describe("Workdir-relative file: the MAIN's round-1 message (messageType relin-round1-continue). The main made it; the lead downloads it."),
+    jointPk: z.string().describe('Workdir-relative joint public key file name'),
+  };
+
+  // ---- relin_contribute (auto: contribution ciphertext, reveals nothing alone) ----
+  server.tool(
+    'relin_contribute',
+    'Produce this party\'s relinearization-key contribution. Round 1: the lead passes role lead; the main passes role main and peerShare (the lead\'s relin-round1 message). '
+      + 'Round 2 (both parties): pass leadRound1 and mainRound1 (the two round-1 messages, one made by each party) and jointPk; '
+      + 'the two are combined inside this call. Returns the output path.',
+    {
+      round: z.enum(['1', '2']).describe('Protocol round'),
+      secretKey: z.string().describe('Workdir-relative secret-share file name'),
+      output: z.string().describe('Workdir-relative output contribution file name'),
+      role: z.enum(['lead', 'main']).optional().describe('This party\'s keysetup role (round 1)'),
+      peerShare: z.string().optional().describe("Round 1, main only: the lead's relin-round1 message"),
+      leadRound1: round1Params.leadRound1.optional().describe('Round 2: ' + round1Params.leadRound1.description),
+      mainRound1: round1Params.mainRound1.optional().describe('Round 2: ' + round1Params.mainRound1.description),
+      jointPk: z.string().optional().describe('Round 2: workdir-relative joint public key file name'),
+      contextSpec: z.string().optional().describe('Crypto context spec'),
+    },
+    async (p) => {
+      let cleanup: (() => Promise<void>) | undefined;
+      try {
+        const args = [
+          'crypto', 'relin-contribute',
+          '--round', p.round,
+          '--secret-key', resolveInWorkdir(p.secretKey),
+          '--output', resolveInWorkdir(p.output),
+        ];
+        if (p.round === '1') {
+          if (p.role) args.push('--role', p.role);
+          if (p.peerShare) args.push('--peer-share', resolveInWorkdir(p.peerShare));
+        } else {
+          if (!p.leadRound1 || !p.mainRound1 || !p.jointPk) {
+            return fail('round 2 needs leadRound1, mainRound1 and jointPk');
+          }
+          const c = await combineRelinRound1(p.leadRound1, p.mainRound1, p.jointPk, p.contextSpec);
+          if ('error' in c) return fail(c.error);
+          cleanup = c.cleanup;
+          args.push('--combined-r1', c.path, '--joint-pk', resolveInWorkdir(p.jointPk));
+        }
+        if (p.contextSpec) args.push('--context-spec', p.contextSpec);
+        args.push('--json');
+        const r = await runCli(args);
+        if (!r.ok) return fail(r.error || 'relin-contribute failed', { exitCode: r.exitCode });
+        const j = (r.json ?? {}) as Record<string, unknown>;
+        return ok({ outputPath: j.outputPath ?? p.output });
+      } catch (e) {
+        return fail(e instanceof Error ? e.message : 'invalid parameters');
+      } finally {
+        await cleanup?.();
+      }
+    },
+  );
+
+  // ---- relin_combine (auto: deterministic combine into the final relin key) ----
+  server.tool(
+    'relin_combine',
+    'Combine the two round-2 relinearization contributions into the FINAL relin key (the one publish_final_keys takes). '
+      + 'Pass both round-2 messages and both round-1 messages; the round-1 pair is combined inside this call. Returns the output path.',
+    {
+      leadRound2: z.string().describe("Workdir-relative file: the LEAD's relin-round2 message"),
+      mainRound2: z.string().describe("Workdir-relative file: the MAIN's relin-round2 message"),
+      ...round1Params,
+      output: z.string().describe('Workdir-relative output file name for the final relin key'),
+      contextSpec: z.string().optional().describe('Crypto context spec'),
+    },
+    async (p) => {
+      let cleanup: (() => Promise<void>) | undefined;
+      try {
+        const leadR2 = resolveInWorkdir(p.leadRound2);
+        const mainR2 = resolveInWorkdir(p.mainRound2);
+        if (leadR2 === mainR2) return fail(`leadRound2 and mainRound2 are the same file (${p.leadRound2})`);
+        const c = await combineRelinRound1(p.leadRound1, p.mainRound1, p.jointPk, p.contextSpec);
+        if ('error' in c) return fail(c.error);
+        cleanup = c.cleanup;
+        const args = [
+          'crypto', 'relin-combine',
+          '--round', '2',
+          '--share-a', leadR2,
+          '--share-b', mainR2,
+          '--combined-r1', c.path,
+          '--output', resolveInWorkdir(p.output),
+        ];
+        if (p.contextSpec) args.push('--context-spec', p.contextSpec);
+        args.push('--json');
+        const r = await runCli(args);
+        if (!r.ok) return fail(r.error || 'relin-combine failed', { exitCode: r.exitCode });
+        const j = (r.json ?? {}) as Record<string, unknown>;
+        return ok({ outputPath: j.outputPath ?? p.output });
+      } catch (e) {
+        return fail(e instanceof Error ? e.message : 'invalid parameters');
+      } finally {
+        await cleanup?.();
+      }
+    },
+  );
+
+  // ---- sum_contribute (auto) ----
+  server.tool(
+    'sum_contribute',
+    'Produce a sum-key contribution. Returns the output path; the secret share stays local.',
+    {
+      role: z.enum(['lead', 'main']).describe('This party\'s role'),
+      secretKey: z.string().describe('Workdir-relative secret-share file name'),
+      output: z.string().describe('Workdir-relative output contribution file name'),
+      peerShare: z.string().optional().describe('Workdir-relative peer share file name'),
+      jointPk: z.string().optional().describe('Workdir-relative joint public key file name'),
+      contextSpec: z.string().optional().describe('Crypto context spec'),
+    },
+    async (p) => {
+      try {
+        const args = [
+          'crypto', 'sum-contribute',
+          '--role', p.role,
+          '--secret-key', resolveInWorkdir(p.secretKey),
+          '--output', resolveInWorkdir(p.output),
+        ];
+        if (p.peerShare) args.push('--peer-share', resolveInWorkdir(p.peerShare));
+        if (p.jointPk) args.push('--joint-pk', resolveInWorkdir(p.jointPk));
+        if (p.contextSpec) args.push('--context-spec', p.contextSpec);
+        args.push('--json');
+        const r = await runCli(args);
+        if (!r.ok) return fail(r.error || 'sum-contribute failed', { exitCode: r.exitCode });
+        const j = (r.json ?? {}) as Record<string, unknown>;
+        return ok({ outputPath: j.outputPath ?? p.output });
+      } catch (e) {
+        return fail(e instanceof Error ? e.message : 'invalid parameters');
+      }
+    },
+  );
+
+  // ---- sum_combine (auto) ----
+  server.tool(
+    'sum_combine',
+    'Deterministically combine two sum-key contributions. Returns the output path.',
+    {
+      shareA: z.string().describe('Workdir-relative contribution A file name'),
+      shareB: z.string().describe('Workdir-relative contribution B file name'),
+      jointPk: z.string().describe('Workdir-relative joint public key file name'),
+      output: z.string().describe('Workdir-relative output file name'),
+      contextSpec: z.string().optional().describe('Crypto context spec'),
+    },
+    async (p) => {
+      try {
+        const args = [
+          'crypto', 'sum-combine',
+          '--share-a', resolveInWorkdir(p.shareA),
+          '--share-b', resolveInWorkdir(p.shareB),
+          '--joint-pk', resolveInWorkdir(p.jointPk),
+          '--output', resolveInWorkdir(p.output),
+        ];
+        if (p.contextSpec) args.push('--context-spec', p.contextSpec);
+        args.push('--json');
+        const r = await runCli(args);
+        if (!r.ok) return fail(r.error || 'sum-combine failed', { exitCode: r.exitCode });
+        const j = (r.json ?? {}) as Record<string, unknown>;
+        return ok({ outputPath: j.outputPath ?? p.output });
+      } catch (e) {
+        return fail(e instanceof Error ? e.message : 'invalid parameters');
+      }
+    },
+  );
+
+  // ---- rotation_contribute (auto) ----
+  // ---- derive_rotation_indices ----
+  // rotation_contribute needs an `indices` string and nothing could produce one, so the
+  // only ways forward were to read the rule list into the model's context or to grant
+  // filesystem access - both of which defeat the blind design for a list the model never
+  // needs. The toolkit derives them locally and returns only the numbers.
+  server.tool(
+    'derive_rotation_indices',
+    'Derive the rotation slot indices from a rule-list file, for functions whose requiredEvalKeys include rotation. Reads the file locally and returns ONLY the resulting index numbers, never the rule rows. Feed the result to rotation_contribute. Do not ask the user to paste the rule list and do not request filesystem access; this verb is why neither is necessary.',
+    {
+      rulePairs: z.string().describe('Workdir-relative rule-list file (the same file declared as the plaintext rule input)'),
+      contextSpec: z.string().describe('Crypto context spec (e.g. ckks-default-v1)'),
+    },
+    async (p) => {
+      try {
+        const r = await runCli([
+          'crypto', 'derive-rotation-indices',
+          '--rule-pairs', resolveInWorkdir(p.rulePairs),
+          '--context-spec', p.contextSpec,
+          '--json',
+        ]);
+        if (!r.ok) return fail(r.error || 'derive-rotation-indices failed', { exitCode: r.exitCode });
+        const j = (r.json ?? {}) as { indices?: number[]; indexCount?: number };
+        const indices = j.indices ?? [];
+        return ok({
+          indexCount: j.indexCount ?? indices.length,
+          indices: indices.join(','),
+          note: 'Pass the indices string straight to rotation_contribute. The platform derives the same set independently once the rule input is declared, so the two can be cross-checked with get_rotation_status.',
+        });
+      } catch (e) {
+        return fail(e instanceof Error ? e.message : 'derive_rotation_indices failed');
+      }
+    },
+  );
+
+  server.tool(
+    'rotation_contribute',
+    'Produce a rotation-key contribution for the given slot indices. Returns the output path; the secret share stays local.',
+    {
+      role: z.enum(['lead', 'main']).describe('This party\'s role'),
+      secretKey: z.string().describe('Workdir-relative secret-share file name'),
+      indices: z.string().describe('Rotation slot indices (CLI-format string, e.g. comma-separated)'),
+      output: z.string().describe('Workdir-relative output contribution file name'),
+      peerShare: z.string().optional().describe("Workdir-relative peer share file name. role='main' ONLY; ignored for 'lead'."),
+      jointPk: z.string().optional().describe("Workdir-relative joint public key file name. role='main' ONLY; ignored for 'lead'."),
+      contextSpec: z.string().optional().describe('Crypto context spec'),
+    },
+    async (p) => {
+      try {
+        const args = [
+          'crypto', 'rotation-contribute',
+          '--role', p.role,
+          '--secret-key', resolveInWorkdir(p.secretKey),
+          '--indices', p.indices,
+          '--output', resolveInWorkdir(p.output),
+        ];
+        // The lead goes FIRST and so has neither of these. The CLI rejects them outright
+        // ("--peer-share and --joint-pk must NOT be set for role=lead"), which would cost
+        // the caller a failed call. Drop them rather than forwarding a hard error:
+        // the caller supplying them has simply misread whose turn it is.
+        const isLead = p.role === 'lead';
+        if (!isLead && p.peerShare) args.push('--peer-share', resolveInWorkdir(p.peerShare));
+        if (!isLead && p.jointPk) args.push('--joint-pk', resolveInWorkdir(p.jointPk));
+        if (p.contextSpec) args.push('--context-spec', p.contextSpec);
+        args.push('--json');
+        const r = await runCli(args);
+        if (!r.ok) return fail(r.error || 'rotation-contribute failed', { exitCode: r.exitCode });
+        const j = (r.json ?? {}) as Record<string, unknown>;
+        return ok({ outputPath: j.outputPath ?? p.output });
+      } catch (e) {
+        return fail(e instanceof Error ? e.message : 'invalid parameters');
+      }
+    },
+  );
+
+  // ---- rotation_combine (auto) ----
+  server.tool(
+    'rotation_combine',
+    'Deterministically combine two rotation-key contributions. Returns the output path.',
+    {
+      shareA: z.string().describe('Workdir-relative contribution A file name'),
+      shareB: z.string().describe('Workdir-relative contribution B file name'),
+      jointPk: z.string().describe('Workdir-relative joint public key file name'),
+      output: z.string().describe('Workdir-relative output file name'),
+      contextSpec: z.string().optional().describe('Crypto context spec'),
+    },
+    async (p) => {
+      try {
+        const args = [
+          'crypto', 'rotation-combine',
+          '--share-a', resolveInWorkdir(p.shareA),
+          '--share-b', resolveInWorkdir(p.shareB),
+          '--joint-pk', resolveInWorkdir(p.jointPk),
+          '--output', resolveInWorkdir(p.output),
+        ];
+        if (p.contextSpec) args.push('--context-spec', p.contextSpec);
+        args.push('--json');
+        const r = await runCli(args);
+        if (!r.ok) return fail(r.error || 'rotation-combine failed', { exitCode: r.exitCode });
+        const j = (r.json ?? {}) as Record<string, unknown>;
+        return ok({ outputPath: j.outputPath ?? p.output });
+      } catch (e) {
+        return fail(e instanceof Error ? e.message : 'invalid parameters');
+      }
+    },
+  );
+
+  // ---- wrap_envelope (auto: signs a keysetup-message upload body) ----
+  server.tool(
+    'wrap_envelope',
+    'Sign a keysetup-message upload body (a key-exchange contribution). Two modes: INLINE embeds a small payload file in the envelope; REFERENCE signs an already-uploaded large payload by objectKey + sizeBytes, so the registered envelope stays tiny instead of carrying a copy of the bytes. Provide EITHER payload OR objectKey+sizeBytes. Returns the signed envelope path.',
+    {
+      secretKey: z.string().describe('Workdir-relative Ed25519 signing-secret file name'),
+      output: z.string().describe('Workdir-relative output envelope file name'),
+      permissionId: z.string().describe('Permission id this message belongs to'),
+      round: z.string().describe('Keysetup round identifier'),
+      messageType: z.string().describe('Keysetup message type'),
+      payload: z.string().optional().describe('INLINE mode: workdir-relative payload file to embed and sign. For small payloads. Mutually exclusive with objectKey.'),
+      objectKey: z.string().optional().describe('REFERENCE mode: object-storage key of an already-uploaded payload to sign BY REFERENCE (keeps the envelope small for large payloads). Requires sizeBytes.'),
+      sizeBytes: z.number().int().positive().optional().describe('REFERENCE mode: byte size of the referenced payload. Required with objectKey.'),
+    },
+    async (p) => {
+      try {
+        const usingRef = p.objectKey !== undefined;
+        if (usingRef === (p.payload !== undefined)) {
+          return fail('provide EITHER payload (inline) OR objectKey+sizeBytes (reference), not both or neither');
+        }
+        if (usingRef && p.sizeBytes === undefined) {
+          return fail('reference mode (objectKey) requires sizeBytes');
+        }
+        const modeArgs = usingRef
+          ? ['--object-key', p.objectKey as string, '--size-bytes', String(p.sizeBytes)]
+          : ['--payload', resolveInWorkdir(p.payload as string)];
+        const args = [
+          'crypto', 'wrap-envelope',
+          ...modeArgs,
+          '--secret-key', resolveInWorkdir(p.secretKey),
+          '--output', resolveInWorkdir(p.output),
+          '--permission-id', p.permissionId,
+          '--round', p.round,
+          '--message-type', p.messageType,
+          '--json',
+        ];
+        const r = await runCli(args);
+        if (!r.ok) return fail(r.error || 'wrap-envelope failed', { exitCode: r.exitCode });
+        const j = (r.json ?? {}) as Record<string, unknown>;
+        return ok({ envelopePath: j.outputPath ?? p.output, mode: usingRef ? 'reference' : 'inline' });
+      } catch (e) {
+        return fail(e instanceof Error ? e.message : 'invalid parameters');
+      }
+    },
+  );
+
+  // ---- wrap_final_keys_envelope (auto: signs the final-keys finalization body) ----
+  server.tool(
+    'wrap_final_keys_envelope',
+    'Sign the final-keys finalization body. Returns the signed envelope path.',
+    {
+      toSign: z.string().describe('Workdir-relative file name to sign'),
+      secretKey: z.string().describe('Workdir-relative Ed25519 signing-secret file name'),
+      output: z.string().describe('Workdir-relative output envelope file name'),
+    },
+    async (p) => {
+      try {
+        const args = [
+          'crypto', 'wrap-final-keys-envelope',
+          '--to-sign', resolveInWorkdir(p.toSign),
+          '--secret-key', resolveInWorkdir(p.secretKey),
+          '--output', resolveInWorkdir(p.output),
+          '--json',
+        ];
+        const r = await runCli(args);
+        if (!r.ok) return fail(r.error || 'wrap-final-keys-envelope failed', { exitCode: r.exitCode });
+        const j = (r.json ?? {}) as Record<string, unknown>;
+        return ok({ envelopePath: j.outputPath ?? p.output });
+      } catch (e) {
+        return fail(e instanceof Error ? e.message : 'invalid parameters');
+      }
+    },
+  );
+
+  // ---- decrypt_result (no forced gate; grant-governed) ----
+  // The viewer is the party the grant authorizes to see the result. Uses the CLI's
+  // --out-file so the plaintext goes to disk and stdout stays blind; the MCP never
+  // returns the contents. No human prompt: the grant + the audit log govern this.
+  server.tool(
+    'decrypt_result',
+    'Combine partial decryptions and write the plaintext result to a local file (only the result viewer the grant authorizes). Returns the file path, NEVER the contents.',
+    {
+      partials: z.array(z.string()).min(2).describe('Workdir-relative partial-decryption file names'),
+      output: z.string().describe('Workdir-relative output plaintext file name'),
+      contextSpec: z.string().describe('Crypto context spec'),
+      real: z.boolean().optional().describe('CKKS: emit raw real values (no integer rounding)'),
+      datasetSize: z.enum(['1K', '2K', '4K', '8K', '16K', '32K', '64K']).optional().describe(
+        'Large-dataset count (joint-record-overlap-large-count): the permission\'s dataset size, e.g. "1K". '
+        + 'The file gets the total count. Required for that function; omit otherwise.'),
+    },
+    async (p) => {
+      try {
+        const args = ['crypto', 'combine', '--context-spec', p.contextSpec];
+        for (const name of p.partials) args.push('--partials', resolveInWorkdir(name));
+        if (p.real) args.push('--real');
+        if (p.datasetSize) args.push('--dataset-size', p.datasetSize);
+        // --out-file writes the plaintext result to disk; the CLI then prints
+        // only references on stdout (no values), so this verb stays blind.
+        args.push('--out-file', resolveInWorkdir(p.output));
+        args.push('--json');
+        const r = await runCli(args);
+        if (!r.ok) return fail(r.error || 'combine failed', { exitCode: r.exitCode });
+        const j = (r.json ?? {}) as Record<string, unknown>;
+        return ok({ outputPath: j.outputPath ?? p.output });
+      } catch (e) {
+        return fail(e instanceof Error ? e.message : 'invalid parameters');
+      }
+    },
+  );
+
+  // ---- release - not registered here ----
+  // release = partial-decrypt + sign + POST /executions/{id}/partial-decrypt
+  // (multipart file=partial bytes, header x-jl-signature=hex Ed25519 over the raw
+  // bytes). This needs API-client composition (it spans family 1 + family 2), so
+  // it lives in pipeline.ts.
+
+  // ---- inspect (auto: non-secret ciphertext/context metadata) ----
+  server.tool(
+    'inspect',
+    'Inspect a ciphertext file and return its non-secret metadata (ring/context parameters). No keys, no plaintext.',
+    {
+      input: z.string().describe('Workdir-relative ciphertext file name'),
+      contextSpec: z.string().optional().describe('Context spec for the deserialization shim'),
+    },
+    async (p) => {
+      try {
+        const args = ['crypto', 'inspect', '--input', resolveInWorkdir(p.input)];
+        if (p.contextSpec) args.push('--context-spec', p.contextSpec);
+        args.push('--json');
+        const r = await runCli(args);
+        if (!r.ok) return fail(r.error || 'inspect failed', { exitCode: r.exitCode });
+        const j = (r.json ?? {}) as Record<string, unknown>;
+        return ok({ fileBytes: j.fileBytes, contextSpec: j.contextSpec, metadata: j.describe });
+      } catch (e) {
+        return fail(e instanceof Error ? e.message : 'invalid parameters');
+      }
+    },
+  );
+
+  // ---- resolve_matches (the last mile of an itemized run) ----
+  //
+  // An itemized result is a sparse vector over the context's slots. A non-zero slot
+  // is a HASH BUCKET, not a row number - there is no arithmetic from slot to line -
+  // so the only way to name the matching records is to re-hash the local CSV with
+  // the same schema and see which records land in those buckets.
+  //
+  // Deliberately ONE verb rather than "read the slots, then resolve them": the slot
+  // list IS the answer in encoded form, so handing it back to the model would leak
+  // the result. This reads the combine output itself, derives the slots, runs the
+  // resolution, writes the matched records to a workdir file, and returns ONLY a path.
+  // The model never sees a record, a slot index, or a count.
+  // ---- resolve_rules ----
+  // The cross-match twin of resolve_matches, and NOT interchangeable with it.
+  //
+  // For an overlap result a slot is a hash of a record, so resolving means
+  // re-hashing your own rows to see which ones landed in a lit slot. For an
+  // itemized cross-match the circuit places rule row i in slot i, so resolving is
+  // a positional lookup into the rule list. Pointing resolve_matches at a
+  // cross-match result fails outright ("only supports indicator-hash schema"),
+  // which is the good outcome: the alternative is a confident wrong answer.
+  //
+  // Returns the output path and nothing else. Not the rules, not the slots, and
+  // not a count: for a cross-match the count IS the answer.
+  server.tool(
+    'resolve_rules',
+    "Turn an itemized rule-based-cross-match result into the list of rule rows that fired, writing them to a workdir file. Takes the plaintext file produced by decrypt_result plus the same rule list that was declared as the plaintext input. Use this for cross-match; use resolve_matches for overlap-style results where a slot is a hashed record. Returns a file path only - never the rules, the slot positions, or how many there were. TELL THE USER the path so they can read it; do not attempt to read it yourself.",
+    {
+      plaintext: z.string().describe('Workdir-relative plaintext file from decrypt_result (the combine --out-file JSON)'),
+      rulePairs: z.string().describe('Workdir-relative rule list, the same file declared as the plaintext rule input'),
+      output: z.string().describe('Workdir-relative file to write the matched rules to'),
+    },
+    async (p) => {
+      try {
+        // Read the slots here rather than taking them as a parameter, so they never
+        // travel through the model. They are the answer in encoded form.
+        let slots: string[];
+        try {
+          const parsed = JSON.parse(await readFile(resolveInWorkdir(p.plaintext), 'utf8')) as {
+            nonZeroValues?: Record<string, number>;
+            significantValues?: Record<string, number>;
+          };
+          slots = Object.keys(parsed.significantValues ?? parsed.nonZeroValues ?? {});
+        } catch (e) {
+          return fail(`could not read the plaintext file '${p.plaintext}': ${(e as Error).message}. It must be the file decrypt_result wrote.`);
+        }
+        // No early return for the empty case. Branching on it announces that the answer
+        // was zero, which is as much a disclosure as returning a count: an empty result
+        // IS the result. Write the empty file and report the path, so every run looks
+        // identical from here.
+        if (slots.length === 0) {
+          await writeFile(resolveInWorkdir(p.output), '', 'utf8');
+          return ok({
+            outputPath: p.output,
+            summary: `Wrote the matched rules to '${p.output}'. TELL THE USER to open that file; its contents are not returned here by design.`,
+          });
+        }
+
+        const r = await runCli([
+          'crypto', 'resolve-rules',
+          '--slots', slots.join(','),
+          '--rule-pairs', resolveInWorkdir(p.rulePairs),
+          '--output', resolveInWorkdir(p.output),
+          '--json',
+        ]);
+        if (!r.ok) return fail(r.error || 'resolve-rules failed', { exitCode: r.exitCode });
+
+        const j = (r.json ?? {}) as { outOfRange?: boolean };
+        return ok({
+          outputPath: p.output,
+          summary: `Wrote the matched rules to '${p.output}'. TELL THE USER to open that file; its contents are not returned here by design.`,
+          // Not a count, and not which slots: only that the two sides disagree about
+          // the rule file, which invalidates the whole answer.
+          note: j.outOfRange
+            ? 'WARNING: at least one slot falls past the end of this rule list, so the two sides are not using the same rule file. The result cannot be trusted. Compare the file both parties declared before reading the output.'
+            : undefined,
+        });
+      } catch (e) {
+        return fail(e instanceof Error ? e.message : 'invalid parameters');
+      }
+    },
+  );
+
+  server.tool(
+    'resolve_matches',
+    "Turn an itemized result into the list of YOUR records that matched, writing them to a workdir file. Takes the plaintext file produced by decrypt_result plus the local CSV you encrypted for that input. Returns a file path only - never the records themselves, never the slot positions (those are the answer in encoded form), and never how many there were. TELL THE USER the path so they can read it; do not attempt to read it yourself.",
+    {
+      plaintext: z.string().describe("Workdir-relative plaintext file from decrypt_result (the combine --out-file JSON)"),
+      csv: z.string().describe('Workdir-relative local CSV that was encrypted for this input; its records are re-hashed to find the matches'),
+      functionDef: z.string().describe('Workdir-relative signed function-definition file (supplies the schema and schemaParams, so resolution hashes exactly as encryption did)'),
+      inputName: z.string().describe("Which function input this CSV was encrypted as (e.g. 'dataset_a')"),
+      contextSpec: z.string().describe('Crypto context spec'),
+      output: z.string().describe('Workdir-relative file to write the matched records to'),
+      datasetId: z.string().optional().describe(
+        'The dataset id this CSV was uploaded as. Supply it when you have it: it is the surest way '
+        + 'to recover which columns were hashed at encrypt time.',
+      ),
+      columns: z.string().optional().describe(
+        "Which columns were hashed at encrypt time: 'all', or 1-based numbers like '1,3'. Only needed "
+        + 'when the encryption happened somewhere else and was not recorded here. It MUST match what '
+        + 'was used at encrypt time; a different spec matches nothing and looks exactly like no overlap.',
+      ),
+      datasetSize: z.enum(['1K', '2K', '4K', '8K', '16K', '32K', '64K']).optional().describe(
+        'Large-dataset itemized only: the permission\'s dataset size (e.g. "1K"), the one the CSV was '
+        + 'encrypted with.',
+      ),
+    },
+    async (p) => {
+      try {
+        // Recover how the file was composed at encrypt time, and REFUSE rather than guess.
+        //
+        // Resolution re-hashes the local file. If it composes rows differently from the way
+        // encryption did - all columns here, column 1 there - every hash differs, nothing
+        // matches, and the user is handed an empty file that is indistinguishable from a
+        // genuine "no records in common". There is no error anywhere in that path, which is
+        // what makes the wrong default so dangerous: a silent wrong answer, not a failure.
+        //
+        // Every encrypt done through this connector is recorded, including 'all'. So a
+        // missing record means the encryption happened elsewhere, and the honest response is
+        // to ask the person who did it.
+        let columns = (p.columns ?? '').trim();
+        if (columns && columns !== 'all' && !/^\d+(,\d+)*$/.test(columns)) {
+          return fail(`columns must be 'all' or 1-based column numbers like '1,3' (got '${columns}')`);
+        }
+        if (!columns && p.datasetId) columns = (await columnsForDataset(p.datasetId)) ?? '';
+        if (!columns) columns = (await columnsForFile(p.csv)) ?? '';
+        if (!columns) {
+          return fail(
+            `no record of which columns of '${p.csv}' were hashed when it was encrypted, so re-hashing it `
+            + 'now could silently match nothing. ASK THE USER which columns were matched on when this file '
+            + "was encrypted ('all', or numbers like '1,3'), then call this again with `columns` set. If the "
+            + 'file was uploaded from this machine, passing its `datasetId` will also find the answer.',
+          );
+        }
+        // A large-dataset itemized result decrypts to masks (psi-itemized-masks v1), not slots: the
+        // toolkit rebuilds this party's table from its CSV and writes the matching rows. Same rules
+        // as below: a file path back, never the rows and never how many.
+        let plaintextText = '';
+        try {
+          plaintextText = await readFile(resolveInWorkdir(p.plaintext), 'utf8');
+        } catch (e) {
+          return fail(`could not read the plaintext file '${p.plaintext}': ${(e as Error).message}. It must be the file decrypt_result wrote.`);
+        }
+        let schema = '';
+        try { schema = (JSON.parse(plaintextText) as { schema?: string }).schema ?? ''; } catch { /* handled below */ }
+        if (schema === 'psi-itemized-masks v1') {
+          if (!p.datasetSize) {
+            return fail('This is a large-dataset result: pass the permission\'s dataset size as datasetSize.');
+          }
+          const args = [
+            'crypto', 'resolve-rows',
+            '--masks', resolveInWorkdir(p.plaintext),
+            '--input', resolveInWorkdir(p.csv),
+            '--function-def', resolveInWorkdir(p.functionDef),
+            '--input-name', p.inputName,
+            '--out-file', resolveInWorkdir(p.output),
+            ...(columns && columns !== 'all' ? ['--columns', columns] : []),
+            '--dataset-size', p.datasetSize,
+            '--json',
+          ];
+          const r = await runCli(args);
+          if (!r.ok) return fail(r.error || 'resolve-rows failed', { exitCode: r.exitCode });
+          return ok({
+            outputPath: p.output,
+            summary: `Wrote the matched records to '${p.output}'. TELL THE USER to open that file; its contents are not returned here by design.`,
+          });
+        }
+
+        // The combine --out-file JSON keys the surviving slots by slot index. The
+        // field name depends on the scheme: the integer path (BFV) writes
+        // nonZeroValues, the real path (CKKS) writes significantValues, because
+        // CKKS leaves every empty slot at ~1e-14 and "non-zero" would mean all
+        // 8192 of them. Read BOTH. Reading only nonZeroValues made every CKKS
+        // function report "no matches" no matter what it computed: a real
+        // two-party cross-match returning 3 was reported to the user as 0.
+        // Read here so the slots never travel through the model.
+        let slots: string[];
+        try {
+          const parsed = JSON.parse(plaintextText) as {
+            nonZeroValues?: Record<string, number>;
+            significantValues?: Record<string, number>;
+          };
+          slots = Object.keys(parsed.significantValues ?? parsed.nonZeroValues ?? {});
+        } catch (e) {
+          return fail(`could not read the plaintext file '${p.plaintext}': ${(e as Error).message}. It must be the file decrypt_result wrote.`);
+        }
+        // No early return for the empty case, for the same reason as resolve_rules:
+        // announcing "nothing to resolve" announces the answer.
+        if (slots.length === 0) {
+          await writeFile(resolveInWorkdir(p.output), '', 'utf8');
+          return ok({
+            outputPath: p.output,
+            summary: `Wrote the matched records to '${p.output}'. TELL THE USER to open that file; its contents are not returned here by design.`,
+          });
+        }
+
+        const args = [
+          'crypto', 'resolve-indicator',
+          '--slots', slots.join(','),
+          '--input', resolveInWorkdir(p.csv),
+          '--function-def', resolveInWorkdir(p.functionDef),
+          '--input-name', p.inputName,
+          '--context-spec', p.contextSpec,
+          // 'all' is the CLI default; passing it changes nothing, but passing the subset
+          // is the whole point of having remembered it.
+          ...(columns && columns !== 'all' ? ['--columns', columns] : []),
+          '--json',
+        ];
+        const r = await runCli(args);
+        if (!r.ok) return fail(r.error || 'resolve-indicator failed', { exitCode: r.exitCode });
+
+        const j = (r.json ?? {}) as { matches?: string[]; matchCount?: number; distinctMatchCount?: number; duplicateRowCount?: number; collidingSlotCount?: number; linesRead?: number; linesSkipped?: number; nonZeroSlotCount?: number };
+        const matches = j.matches ?? [];
+        const outPath = resolveInWorkdir(p.output);
+
+        const matchCount = j.matchCount ?? matches.length;
+        const duplicateRows = j.duplicateRowCount ?? 0;
+        const collidingSlots = j.collidingSlotCount ?? 0;
+        const distinctMatches = j.distinctMatchCount ?? matchCount;
+
+        // Explain a count difference EXACTLY, or say nothing. The CLI has already
+        // classified it by comparing the composed values that were actually hashed,
+        // so there is no need to speculate - and speculating here is harmful: an
+        // earlier version offered "two of your records share a slot" as a guess,
+        // and an assistant relayed it to the user as a false-positive warning with
+        // advice to widen the slot count, when the real cause was simply the same
+        // person listed twice. Never hand the model an ambiguity it will resolve
+        // by picking the scarier branch.
+        //
+        // These notes quote counts, so they go in the OUTPUT FILE, not the tool result.
+        // They are written for the person reading their matches, and that is where they
+        // are read. Returning them here would hand the model the count by the back door.
+        const notes: string[] = [];
+        if (duplicateRows > 0) {
+          notes.push(
+            `Your CSV lists ${duplicateRows} matched record(s) more than once (rows that are identical once surrounding spaces are trimmed, which is how they were encrypted). That is why this side shows ${matchCount} matched rows but only ${distinctMatches} distinct records. All of them are genuine matches - none is a false positive, and nothing about the setup needs changing. If the other side reports ${distinctMatches}, the two agree.`,
+          );
+        }
+        if (collidingSlots > 0) {
+          notes.push(
+            `${collidingSlots} slot(s) hold genuinely different records of yours - a real hash collision, so one record per affected slot is a false positive. This is inherent to indicator-hash encoding at roughly (yourRecords x theirRecords / slots). Re-running will not change it.`,
+          );
+        }
+        if (duplicateRows === 0 && collidingSlots === 0 && (j.nonZeroSlotCount ?? slots.length) !== matchCount) {
+          notes.push(
+            'Some non-zero slots correspond to records only the other party holds, so their count can exceed yours. Expected, and not an error.',
+          );
+        }
+
+        const body = matches.join('\n') + (matches.length ? '\n' : '');
+        const footer = notes.length ? '\n' + notes.map(n => `# ${n}`).join('\n') + '\n' : '';
+        await writeFile(outPath, body + footer, 'utf8');
+
+        return ok({
+          outputPath: p.output,
+          summary: `Wrote the matched records to '${p.output}'. TELL THE USER to open that file; its contents are not returned here by design.`,
+        });
+      } catch (e) {
+        return fail(e instanceof Error ? e.message : 'invalid parameters');
+      }
+    },
+  );
+}

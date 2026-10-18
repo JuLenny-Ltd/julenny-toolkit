@@ -1,0 +1,4219 @@
+#include "commands.h"
+
+#include <algorithm>
+#include <chrono>
+#include <cmath>
+#include <cstdint>
+#include <cstdio>
+#include <filesystem>
+#include <fstream>
+#include <iomanip>
+#include <iostream>
+#include <map>
+#include <memory>
+#include <optional>
+#include <set>
+#include <span>
+#include <sstream>
+#include <stdexcept>
+#include <string>
+#include <string_view>
+#include <unordered_map>
+#include <unordered_set>
+#include <vector>
+
+#include <nlohmann/json.hpp>
+
+#include "crypto/context.h"
+#include "crypto/keys.h"
+#include "crypto/ciphertext.h"
+#include "crypto/eval_keys.h"
+#include "crypto/signing.h"
+#include "psi/advice.h"
+#include "psi/bundle.h"
+#include "psi/count.h"
+#include "psi/digest.h"
+#include "psi/encoder.h"
+#include "psi/itemized_result.h"
+#include "psi/size_class.h"
+#include "psi/solver.h"
+#include "psi/table.h"
+#include "registry/envelope.h"
+#include "registry/signature.h"
+#include "registry/trust_root.h"
+#include "fhe_toolkit/fhe_toolkit.h"
+
+namespace julenny_fhe::cli {
+
+using nlohmann::json;
+using fhe_toolkit::crypto::Context;
+using fhe_toolkit::crypto::get_crypto_context_spec;
+
+namespace {
+
+// Read decoded plaintext slots as int64 regardless of scheme. For CKKS, the
+// underlying double values are rounded to the nearest integer. Adequate for
+// indicator-style schemas (values are 0.0 or 1.0) and count-aggregation
+// outputs (the only shapes the customer-overlap-family functions produce
+// today). General CKKS workloads with arbitrary real-valued outputs will
+// want a dedicated real-valued display path; not implemented yet.
+std::vector<std::int64_t>
+values_as_int64(const fhe_toolkit::crypto::PlaintextPacked& pt,
+                const fhe_toolkit::crypto::CryptoContextSpec& spec) {
+    if (spec.scheme == "CKKS") {
+        auto reals = pt.real_values();
+        std::vector<std::int64_t> out;
+        out.reserve(reals.size());
+        for (auto v : reals) {
+            out.push_back(static_cast<std::int64_t>(std::llround(v)));
+        }
+        return out;
+    }
+    return pt.values();
+}
+
+void write_bytes(const std::filesystem::path& path,
+                 std::span<const std::byte> bytes) {
+    std::ofstream out(path, std::ios::binary | std::ios::trunc);
+    if (!out) throw std::runtime_error("cannot open for writing: " + path.string());
+    out.write(reinterpret_cast<const char*>(bytes.data()),
+              static_cast<std::streamsize>(bytes.size()));
+    if (!out) throw std::runtime_error("write failed: " + path.string());
+}
+
+void write_text(const std::filesystem::path& path, const std::string& s) {
+    std::ofstream out(path, std::ios::trunc);
+    if (!out) throw std::runtime_error("cannot open for writing: " + path.string());
+    out << s;
+    if (!out) throw std::runtime_error("write failed: " + path.string());
+}
+
+std::vector<std::byte> read_bytes(const std::filesystem::path& path) {
+    std::ifstream in(path, std::ios::binary | std::ios::ate);
+    if (!in) throw std::runtime_error("cannot open for reading: " + path.string());
+    auto size = static_cast<std::size_t>(in.tellg());
+    in.seekg(0, std::ios::beg);
+    std::vector<std::byte> bytes(size);
+    if (size > 0) {
+        in.read(reinterpret_cast<char*>(bytes.data()), static_cast<std::streamsize>(size));
+        if (!in) throw std::runtime_error("read failed: " + path.string());
+    }
+    return bytes;
+}
+
+// FNV-1a 64-bit hash. Deterministic, fast, no external deps. Not
+// cryptographic; for v0 hash-based name matching only. Replace with
+// SHA-256 later when we add OpenSSL to the CLI's direct link inputs.
+std::uint64_t fnv1a_64(std::string_view s) noexcept {
+    constexpr std::uint64_t offset = 14695981039346656037ULL;
+    constexpr std::uint64_t prime  = 1099511628211ULL;
+    std::uint64_t h = offset;
+    for (unsigned char c : s) {
+        h ^= c;
+        h *= prime;
+    }
+    return h;
+}
+
+std::string trim_inplace(std::string s) {
+    auto not_space = [](unsigned char c) { return !std::isspace(c); };
+    s.erase(s.begin(), std::find_if(s.begin(), s.end(), not_space));
+    s.erase(std::find_if(s.rbegin(), s.rend(), not_space).base(), s.end());
+    return s;
+}
+
+// Split a string by a single-character delimiter. Whitespace is not trimmed
+// from fields; the caller does that if needed. Empty trailing field (line
+// ending with the delim) is preserved.
+std::vector<std::string> split_string(const std::string& s, char delim) {
+    std::vector<std::string> out;
+    std::string field;
+    std::stringstream ss(s);
+    while (std::getline(ss, field, delim)) out.push_back(field);
+    return out;
+}
+
+// Parse a column-spec string from a function-def's schemaParams. "all" or
+// empty means use every column. Otherwise it's a comma-separated list of
+// 1-based column indices like "1,3,5". Returns the parsed indices in
+// 1-based form, or an empty vector for "all".
+std::vector<int> parse_columns_spec(const std::string& spec) {
+    std::vector<int> out;
+    if (spec.empty() || spec == "all") return out;
+    for (auto& part : split_string(spec, ',')) {
+        auto t = trim_inplace(part);
+        if (!t.empty()) {
+            try { out.push_back(std::stoi(t)); }
+            catch (...) { /* skip non-numeric */ }
+        }
+    }
+    return out;
+}
+
+// Compose a string suitable for hashing from one input line, given the
+// schema's separator and column-selection rules. Uses ASCII Unit Separator
+// (\x1F) to join selected columns so the joined string is unambiguous and
+// matches the Windows app's encoding for cross-platform reproducibility.
+std::string compose_record(const std::string& line,
+                            char sep_char,
+                            const std::vector<int>& cols) {
+    if (sep_char == '\0') {
+        // No separator declared: hash the whole trimmed line.
+        return trim_inplace(line);
+    }
+    auto fields = split_string(line, sep_char);
+    std::string composed;
+    if (cols.empty()) {
+        // "all" columns.
+        for (std::size_t i = 0; i < fields.size(); ++i) {
+            if (i > 0) composed.push_back('\x1F');
+            composed.append(trim_inplace(fields[i]));
+        }
+    } else {
+        // Selected 1-based column indices.
+        for (std::size_t i = 0; i < cols.size(); ++i) {
+            int col = cols[i] - 1;
+            if (col >= 0 && col < static_cast<int>(fields.size())) {
+                if (i > 0) composed.push_back('\x1F');
+                composed.append(trim_inplace(fields[col]));
+            }
+        }
+    }
+    return composed;
+}
+
+// Slot count for our default BFV context (ringDimension = 16384 per the
+// platform's bfv-default-v1 context spec). Since p=65537
+// is prime and 65537 = 1 mod 2*ringDimension, the cyclotomic polynomial
+// splits completely and batchSize = ringDimension.
+//
+// TODO: replace with Context::slot_count() once the core wrapper exposes
+// it (OpenFHE reports it via cc->GetEncodingParams()->GetBatchSize()).
+constexpr std::int64_t BFV_DEFAULT_V1_SLOTS  = 16384;
+constexpr std::int64_t CKKS_DEFAULT_V1_SLOTS = 8192;   // ringDim/2 for CKKS
+constexpr std::int64_t CKKS_TREE_V1_SLOTS    = 32768;  // ringDim/2 for ckks-tree-v1 (ring 65536)
+constexpr std::int64_t BFV_EXACT_PSI_V1_SLOTS = 32768; // ringDim for bfv-large-psi-v1 (65537 = 1 mod 65536)
+
+std::int64_t resolve_slot_count(std::string_view context_spec_id) {
+    if (context_spec_id == "bfv-default-v1")  return BFV_DEFAULT_V1_SLOTS;
+    if (context_spec_id == "ckks-default-v1") return CKKS_DEFAULT_V1_SLOTS;
+    if (context_spec_id == "ckks-tree-v1")    return CKKS_TREE_V1_SLOTS;
+    if (context_spec_id == "bfv-large-psi-v1") return BFV_EXACT_PSI_V1_SLOTS;
+    throw std::runtime_error("unknown context spec: " + std::string(context_spec_id));
+}
+
+// Generate an Ed25519 signing keypair. Standard 32-byte seed (secret) +
+// 32-byte public key. The secret stays on this machine; the public key is
+// registered with the platform via POST /api/companies/{id}/signing-public-key.
+int run_crypto_signing_keygen(const CryptoSigningKeygenArgs& args) {
+    namespace fs = std::filesystem;
+
+    if (args.output_secret_path.empty() || args.output_public_path.empty()) {
+        std::cerr << "error: --output-secret and --output-public are required\n";
+        return 2;
+    }
+
+    auto kp = fhe_toolkit::signing::generate_keypair();
+
+    const fs::path sk_path(args.output_secret_path);
+    const fs::path pk_path(args.output_public_path);
+    if (sk_path.has_parent_path()) fs::create_directories(sk_path.parent_path());
+    if (pk_path.has_parent_path()) fs::create_directories(pk_path.parent_path());
+
+    write_bytes(sk_path, std::span<const std::byte>(kp.secret_key.bytes.data(), kp.secret_key.bytes.size()));
+    write_bytes(pk_path, std::span<const std::byte>(kp.public_key.bytes.data(), kp.public_key.bytes.size()));
+
+    // Owner-only on the secret file.
+    try {
+        fs::permissions(sk_path,
+                        fs::perms::owner_read | fs::perms::owner_write,
+                        fs::perm_options::replace);
+    } catch (...) { /* best-effort */ }
+
+    if (args.emit_json) {
+        json j;
+        j["status"]            = "ok";
+        j["algorithm"]         = "Ed25519";
+        j["outputSecretPath"]  = sk_path.string();
+        j["outputPublicPath"]  = pk_path.string();
+        j["outputSecretBytes"] = fhe_toolkit::signing::secret_key_bytes;
+        j["outputPublicBytes"] = fhe_toolkit::signing::public_key_bytes;
+        std::cout << j.dump(2) << "\n";
+    } else {
+        std::cout << "Ed25519 signing keypair generated.\n";
+        std::cout << "  Secret key:  " << sk_path.string()
+                  << " (" << fhe_toolkit::signing::secret_key_bytes << " bytes, owner-only)\n";
+        std::cout << "  Public key:  " << pk_path.string()
+                  << " (" << fhe_toolkit::signing::public_key_bytes << " bytes)\n\n";
+        std::cout << "Register the public key with the platform via the web UI\n";
+        std::cout << "(company settings > signing key) or POST /api/companies/{id}/signing-public-key.\n";
+        std::cout << "The secret key stays on this machine. It must NEVER be uploaded.\n";
+    }
+    return 0;
+}
+
+// Sign a file's bytes with an Ed25519 secret key. Output is the raw 64-byte
+// detached signature.
+int run_crypto_sign(const CryptoSignArgs& args) {
+    namespace fs = std::filesystem;
+
+    if (args.input_path.empty() || args.secret_key_path.empty() || args.output_path.empty()) {
+        std::cerr << "error: --input, --secret-key, and --output are required\n";
+        return 2;
+    }
+
+    auto sk_bytes = read_bytes(args.secret_key_path);
+    auto sk = fhe_toolkit::signing::load_secret_key(sk_bytes);
+    auto message = read_bytes(args.input_path);
+    auto sig = fhe_toolkit::signing::sign(sk, message);
+
+    const fs::path out_path(args.output_path);
+    if (out_path.has_parent_path()) fs::create_directories(out_path.parent_path());
+    write_bytes(out_path, std::span<const std::byte>(sig.bytes.data(), sig.bytes.size()));
+
+    if (args.emit_json) {
+        json j;
+        j["status"]          = "ok";
+        j["algorithm"]       = "Ed25519";
+        j["inputPath"]       = args.input_path;
+        j["inputBytes"]      = message.size();
+        j["outputPath"]      = out_path.string();
+        j["outputBytes"]     = fhe_toolkit::signing::signature_bytes;
+        std::cout << j.dump(2) << "\n";
+    } else {
+        std::cout << "Signed " << message.size() << " bytes of " << args.input_path << ".\n";
+        std::cout << "  Signature: " << out_path.string()
+                  << " (" << fhe_toolkit::signing::signature_bytes << " bytes)\n";
+    }
+    return 0;
+}
+
+// Verify a detached signature against an Ed25519 public key. Exit code:
+// 0 = signature valid, 1 = signature invalid, 2 = argument or file error.
+int run_crypto_verify(const CryptoVerifyArgs& args) {
+    if (args.input_path.empty() || args.public_key_path.empty() ||
+        args.signature_path.empty()) {
+        std::cerr << "error: --input, --public-key, and --signature are required\n";
+        return 2;
+    }
+
+    auto pk_bytes  = read_bytes(args.public_key_path);
+    auto sig_bytes = read_bytes(args.signature_path);
+    auto message   = read_bytes(args.input_path);
+
+    auto pk  = fhe_toolkit::signing::load_public_key(pk_bytes);
+    auto sig = fhe_toolkit::signing::load_signature(sig_bytes);
+    bool ok  = fhe_toolkit::signing::verify(pk, message, sig);
+
+    if (args.emit_json) {
+        json j;
+        j["status"]     = ok ? "valid" : "invalid";
+        j["algorithm"]  = "Ed25519";
+        j["inputPath"]  = args.input_path;
+        j["inputBytes"] = message.size();
+        std::cout << j.dump(2) << "\n";
+    } else {
+        std::cout << (ok ? "VALID" : "INVALID")
+                  << ": Ed25519 signature on " << args.input_path << "\n";
+    }
+    return ok ? 0 : 1;
+}
+
+// Wrap a binary share (the .bin produced by a contribution command) into
+// the signed JSON envelope the platform expects at POST keysetup/messages.
+// All metadata fields are required: the toolkit cannot infer round number
+// or messageType because those depend on the project's manifest, which
+// lives platform-side. The Windows / web UI passes them through.
+int run_crypto_wrap_envelope(const CryptoWrapEnvelopeArgs& args) {
+    namespace fs = std::filesystem;
+
+    if (args.secret_key_path.empty() || args.output_path.empty()) {
+        std::cerr << "error: --secret-key and --output are required\n";
+        return 2;
+    }
+    if (args.permission_id.empty()) {
+        std::cerr << "error: --permission-id is required\n";
+        return 2;
+    }
+    if (args.round < 1) {
+        std::cerr << "error: --round must be >= 1 (manifest round number)\n";
+        return 2;
+    }
+    if (args.message_type.empty()) {
+        std::cerr << "error: --message-type is required "
+                     "(e.g. pk-share, relin-round1, sum-round1-continue)\n";
+        return 2;
+    }
+
+    // Mode selection: --object-key triggers payloadRef mode; otherwise we
+    // need --payload for inline base64 mode.
+    const bool ref_mode = !args.object_key.empty();
+    if (ref_mode) {
+        if (args.size_bytes == 0) {
+            std::cerr << "error: --size-bytes is required when --object-key is set\n";
+            return 2;
+        }
+    } else {
+        if (args.payload_path.empty()) {
+            std::cerr << "error: --payload is required (or use --object-key + --size-bytes for the GCS-mediated path)\n";
+            return 2;
+        }
+    }
+
+    const auto sk_bytes = read_bytes(args.secret_key_path);
+    auto sk = fhe_toolkit::signing::load_secret_key(sk_bytes);
+
+    fhe_toolkit::registry::EnvelopeFields fields;
+    fields.permission_id   = args.permission_id;
+    fields.round           = args.round;
+    fields.message_type    = args.message_type;
+    fields.timestamp       = args.timestamp.empty()
+                                ? fhe_toolkit::registry::iso8601_now_utc()
+                                : args.timestamp;
+
+    std::string body;
+    std::size_t payload_size = 0;
+    try {
+        if (ref_mode) {
+            fhe_toolkit::registry::PayloadRef ref;
+            ref.object_key = args.object_key;
+            ref.size_bytes = args.size_bytes;
+            ref.sha256_hex = args.sha256_hex;
+            payload_size = args.size_bytes;
+            body = fhe_toolkit::registry::make_signed_envelope_from_ref(
+                ref, fields, sk);
+        } else {
+            const auto payload = read_bytes(args.payload_path);
+            payload_size = payload.size();
+            body = fhe_toolkit::registry::make_signed_envelope(
+                std::span<const std::byte>(payload.data(), payload.size()),
+                fields, sk);
+        }
+    } catch (const std::exception& e) {
+        std::cerr << "error: failed to build envelope: " << e.what() << "\n";
+        return 1;
+    }
+
+    const fs::path out_path(args.output_path);
+    if (out_path.has_parent_path()) fs::create_directories(out_path.parent_path());
+    write_text(out_path, body);
+
+    if (args.emit_json) {
+        json j;
+        j["status"]         = "ok";
+        j["mode"]           = ref_mode ? "payloadRef" : "payloadB64";
+        j["outputPath"]     = out_path.string();
+        j["outputBytes"]    = body.size();
+        j["payloadBytes"]   = payload_size;
+        j["round"]          = fields.round;
+        j["messageType"]    = fields.message_type;
+        j["permissionId"]   = fields.permission_id;
+        j["timestamp"]      = fields.timestamp;
+        if (ref_mode) j["objectKey"] = args.object_key;
+        if (ref_mode && !args.sha256_hex.empty()) j["sha256Hex"] = args.sha256_hex;
+        std::cout << j.dump(2) << "\n";
+    } else {
+        std::cout << "Signed envelope written (" << (ref_mode ? "payloadRef" : "payloadB64") << " mode).\n";
+        std::cout << "  Output:        " << out_path.string()
+                  << " (" << body.size() << " bytes)\n";
+        std::cout << "  Round:         " << fields.round << "\n";
+        std::cout << "  Message type:  " << fields.message_type << "\n";
+        std::cout << "  Payload bytes: " << payload_size << "\n";
+        if (ref_mode) std::cout << "  Object key:    " << args.object_key << "\n";
+        std::cout << "  Timestamp:     " << fields.timestamp << "\n";
+    }
+    return 0;
+}
+
+// Sign the final-keys submission envelope. Reads the to-sign file emitted
+// by the platform's web UI (or assembled by a customer script) and writes
+// the signed JSON upload body. Strictly offline: no network calls, no GCS
+// access, no platform interaction. The caller is responsible for having
+// already uploaded the three blob files to GCS and assembled the to-sign
+// file with the resulting objectKeys + sha256 hashes.
+int run_crypto_wrap_final_keys_envelope(const CryptoWrapFinalKeysEnvelopeArgs& args) {
+    namespace fs = std::filesystem;
+
+    if (args.to_sign_path.empty() || args.secret_key_path.empty() || args.output_path.empty()) {
+        std::cerr << "error: --to-sign, --secret-key, and --output are required\n";
+        return 2;
+    }
+
+    // Read the to-sign file.
+    json to_sign;
+    try {
+        std::ifstream in(args.to_sign_path);
+        if (!in) {
+            std::cerr << "error: cannot open --to-sign file: " << args.to_sign_path << "\n";
+            return 1;
+        }
+        in >> to_sign;
+    } catch (const std::exception& e) {
+        std::cerr << "error: --to-sign file is not valid JSON: " << e.what() << "\n";
+        return 1;
+    }
+
+    if (!to_sign.is_object()) {
+        std::cerr << "error: --to-sign file must be a JSON object\n";
+        return 1;
+    }
+
+    // Required top-level fields.
+    auto require_str = [&](const char* name) -> std::string {
+        if (!to_sign.contains(name) || !to_sign.at(name).is_string()) {
+            throw std::runtime_error(std::string("--to-sign file missing required string field: ") + name);
+        }
+        return to_sign.at(name).get<std::string>();
+    };
+
+    fhe_toolkit::registry::FinalKeysEnvelopeFields fields;
+    std::vector<fhe_toolkit::registry::FinalKeyRef> refs;
+    try {
+        fields.permission_id   = require_str("permissionId");
+        fields.timestamp       = require_str("timestamp");
+
+        if (!to_sign.contains("keys") || !to_sign.at("keys").is_array()) {
+            throw std::runtime_error("--to-sign file missing required array field: keys");
+        }
+        for (const auto& k : to_sign.at("keys")) {
+            if (!k.is_object()) throw std::runtime_error("keys[] entry is not an object");
+            fhe_toolkit::registry::FinalKeyRef r;
+            r.key_type   = k.at("keyType").get<std::string>();
+            r.object_key = k.at("objectKey").get<std::string>();
+            r.sha256_hex = k.at("sha256Hex").get<std::string>();
+            refs.push_back(std::move(r));
+        }
+    } catch (const std::exception& e) {
+        std::cerr << "error: " << e.what() << "\n";
+        return 1;
+    }
+
+    // Load the signing key.
+    std::vector<std::byte> sk_bytes;
+    fhe_toolkit::signing::SigningSecretKey sk;
+    try {
+        sk_bytes = read_bytes(args.secret_key_path);
+        sk = fhe_toolkit::signing::load_secret_key(sk_bytes);
+    } catch (const std::exception& e) {
+        std::cerr << "error: cannot load signing secret key: " << e.what() << "\n";
+        return 1;
+    }
+
+    // Build the signed envelope.
+    std::string body;
+    try {
+        body = fhe_toolkit::registry::make_signed_final_keys_envelope(refs, fields, sk);
+    } catch (const std::exception& e) {
+        std::cerr << "error: failed to build envelope: " << e.what() << "\n";
+        return 1;
+    }
+
+    const fs::path out_path(args.output_path);
+    if (out_path.has_parent_path()) fs::create_directories(out_path.parent_path());
+    write_text(out_path, body);
+
+    if (args.emit_json) {
+        json j;
+        j["status"]         = "ok";
+        j["outputPath"]     = out_path.string();
+        j["outputBytes"]    = body.size();
+        j["permissionId"]   = fields.permission_id;
+        j["timestamp"]      = fields.timestamp;
+        j["keyCount"]       = refs.size();
+        std::cout << j.dump(2) << "\n";
+    } else {
+        std::cout << "Signed final-keys envelope written.\n";
+        std::cout << "  Output:           " << out_path.string()
+                  << " (" << body.size() << " bytes)\n";
+        std::cout << "  Permission ID:    " << fields.permission_id << "\n";
+        std::cout << "  Timestamp:        " << fields.timestamp << "\n";
+        std::cout << "  Key count:        " << refs.size() << "\n";
+        std::cout << "\nUpload this file to POST /api/fhe-permissions/"
+                  << fields.permission_id << "/keysetup/final-keys\n";
+    }
+    return 0;
+}
+
+// 2-party in-process self-test: simulates a full collaboration without
+// touching the platform. Exercises joint keysetup (relin + rotation),
+// EvalMult + EvalAtIndex, and threshold decryption. The protocol calls go
+// through the same Context::*_round1_initial/_continue/_combine methods
+// that the demo scripts drive, so a pass here means the multi-party crypto
+// code is consistent with itself.
+int run_crypto_selftest_multiparty(const CryptoSelftestArgs& args) {
+    auto spec = get_crypto_context_spec(args.context_spec);
+    if (!spec) {
+        std::cerr << "error: unknown context spec: " << args.context_spec << "\n";
+        return 2;
+    }
+
+    using clock = std::chrono::steady_clock;
+    auto ms = [](clock::time_point a, clock::time_point b) {
+        return std::chrono::duration_cast<std::chrono::milliseconds>(b - a).count();
+    };
+
+    const auto t0 = clock::now();
+    Context ctx(*spec);
+    const auto t1 = clock::now();
+
+    // -------- 2-party keygen --------
+    auto kpA = ctx.multiparty_keygen();                       // Party A (data owner / lead)
+    auto kpB = ctx.multiparty_keygen(kpA.public_key);         // Party B (data consumer / main)
+    // kpB.public_key is the JOINT public key.
+    const auto t2 = clock::now();
+
+    // -------- Multi-party relin keysetup (4-step) --------
+    {
+        auto relinA1   = ctx.relin_round1_initial(kpA.secret_key);
+        auto relinB1   = ctx.relin_round1_continue(kpB.secret_key, relinA1);
+        auto combinedR1 = ctx.relin_combine_round1(relinA1, relinB1, kpB.public_key);
+        auto relinA2   = ctx.relin_round2(kpA.secret_key, combinedR1, kpB.public_key);
+        auto relinB2   = ctx.relin_round2(kpB.secret_key, combinedR1, kpB.public_key);
+        auto finalRelin = ctx.relin_combine_round2(relinA2, relinB2, combinedR1);
+        ctx.install_relin_key(finalRelin);
+    }
+    const auto t3 = clock::now();
+
+    // -------- Multi-party rotation keysetup --------
+    const std::vector<int32_t> indices = {1};   // single-slot right rotation
+    {
+        auto rotA = ctx.rotation_round1_initial(kpA.secret_key, indices);
+        auto rotB = ctx.rotation_round1_continue(kpB.secret_key, rotA, indices, kpB.public_key);
+        auto finalRot = ctx.rotation_combine(rotA, rotB, kpB.public_key);
+        ctx.install_rotation_keys(finalRot);
+    }
+    const auto t4 = clock::now();
+
+    // -------- Encrypt two known vectors with the joint PK --------
+    // For BFV: integers. For CKKS: doubles (cast from same values).
+    const std::vector<int64_t> input_a_i = {1, 2, 3, 4, 5, 6, 7, 8};
+    const std::vector<int64_t> input_b_i = {2, 2, 2, 2, 2, 2, 2, 2};
+    fhe_toolkit::crypto::PlaintextPacked ptA, ptB;
+    if (spec->scheme == "CKKS") {
+        std::vector<double> a_d(input_a_i.begin(), input_a_i.end());
+        std::vector<double> b_d(input_b_i.begin(), input_b_i.end());
+        ptA = ctx.encode_ckks_packed(a_d);
+        ptB = ctx.encode_ckks_packed(b_d);
+    } else {
+        ptA = ctx.encode_packed(input_a_i);
+        ptB = ctx.encode_packed(input_b_i);
+    }
+    auto ctA = ctx.encrypt(kpB.public_key, ptA);   // encrypt with joint PK
+    auto ctB = ctx.encrypt(kpB.public_key, ptB);
+    const auto t5 = clock::now();
+
+    // -------- EvalMult + EvalAtIndex (rotation by 1) --------
+    // EvalMult: expected slot-wise product = {2, 4, 6, 8, 10, 12, 14, 16}.
+    // Then rotate left by 1: expected = {4, 6, 8, 10, 12, 14, 16, 2}.
+    // (We don't directly call EvalAtIndex through Context yet - the rotation
+    // keys are installed in the underlying CC, and EvalMult is exposed via
+    // Context::eval_mult. For now, the rotation key install IS the test;
+    // a full rotate-and-verify happens once we expose EvalAtIndex on Context.)
+    auto ctMul = ctx.eval_mult(ctA, ctB);
+    const auto t6 = clock::now();
+
+    // -------- Threshold decrypt (lead + main + combine) --------
+    auto partialA = ctx.partial_decrypt_lead(kpA.secret_key, ctMul);
+    auto partialB = ctx.partial_decrypt_main(kpB.secret_key, ctMul);
+    std::vector<const fhe_toolkit::crypto::Ciphertext*> ptrs = {&partialA, &partialB};
+    auto decoded = ctx.combine_partials(ptrs);
+    const auto t7 = clock::now();
+
+    // -------- Verify --------
+    // Expected: {2, 4, 6, 8, 10, 12, 14, 16}.
+    const std::vector<int64_t> expected = {2, 4, 6, 8, 10, 12, 14, 16};
+    bool ok;
+    if (spec->scheme == "CKKS") {
+        constexpr double TOL = 1.0;  // looser tolerance after one mul + threshold
+        auto values = decoded.real_values();
+        ok = values.size() >= expected.size();
+        for (size_t i = 0; ok && i < expected.size(); ++i) {
+            if (std::abs(values[i] - static_cast<double>(expected[i])) > TOL) ok = false;
+        }
+    } else {
+        auto values = decoded.values();
+        ok = values.size() >= expected.size();
+        for (size_t i = 0; ok && i < expected.size(); ++i) {
+            if (values[i] != expected[i]) ok = false;
+        }
+    }
+
+    if (args.emit_json) {
+        json out;
+        out["status"]                  = ok ? "ok" : "fail";
+        out["contextSpec"]             = args.context_spec;
+        out["mode"]                    = "multi-party-2";
+        out["timings"]["contextMs"]    = ms(t0, t1);
+        out["timings"]["mpKeyGenMs"]   = ms(t1, t2);
+        out["timings"]["relinSetupMs"] = ms(t2, t3);
+        out["timings"]["rotSetupMs"]   = ms(t3, t4);
+        out["timings"]["encryptMs"]    = ms(t4, t5);
+        out["timings"]["evalMultMs"]   = ms(t5, t6);
+        out["timings"]["thresholdDecryptMs"] = ms(t6, t7);
+        out["timings"]["totalMs"]      = ms(t0, t7);
+        std::cout << out.dump(2) << "\n";
+    } else {
+        std::cout << (ok ? "OK" : "FAIL") << ": multi-party crypto self-test on context "
+                  << args.context_spec << "\n";
+        std::cout << "  Expected slots:   " << expected.size() << " ({2,4,6,...,16})\n";
+        std::cout << "  Timings:\n";
+        std::cout << "    Build context:        " << ms(t0, t1) << " ms\n";
+        std::cout << "    2-party joint KeyGen: " << ms(t1, t2) << " ms\n";
+        std::cout << "    Relin keysetup (mp):  " << ms(t2, t3) << " ms\n";
+        std::cout << "    Rotation keysetup:    " << ms(t3, t4) << " ms\n";
+        std::cout << "    Encrypt (2 vectors):  " << ms(t4, t5) << " ms\n";
+        std::cout << "    EvalMult:             " << ms(t5, t6) << " ms\n";
+        std::cout << "    Threshold decrypt:    " << ms(t6, t7) << " ms\n";
+        std::cout << "    Total:                " << ms(t0, t7) << " ms\n";
+    }
+    return ok ? 0 : 1;
+}
+
+int run_crypto_selftest(const CryptoSelftestArgs& args) {
+    if (args.multi_party) {
+        return run_crypto_selftest_multiparty(args);
+    }
+
+    auto spec = get_crypto_context_spec(args.context_spec);
+    if (!spec) {
+        std::cerr << "error: unknown context spec: " << args.context_spec << "\n";
+        return 2;
+    }
+
+    using clock = std::chrono::steady_clock;
+    auto ms = [](clock::time_point a, clock::time_point b) {
+        return std::chrono::duration_cast<std::chrono::milliseconds>(b - a).count();
+    };
+
+    const auto t0 = clock::now();
+    Context ctx(*spec);
+    const auto t1 = clock::now();
+    auto kp = ctx.generate_keypair();
+    const auto t2 = clock::now();
+
+    // BFV: exact integers. CKKS: approximate doubles; check within tolerance.
+    const std::vector<int64_t> input_i = {1, 2, 3, 42, -7, 100, 1000, -1000};
+    fhe_toolkit::crypto::PlaintextPacked pt;
+    if (spec->scheme == "CKKS") {
+        std::vector<double> input_d(input_i.begin(), input_i.end());
+        pt = ctx.encode_ckks_packed(input_d);
+    } else {
+        pt = ctx.encode_packed(input_i);
+    }
+    const auto t3 = clock::now();
+    auto ct = ctx.encrypt(kp.public_key, pt);
+    const auto t4 = clock::now();
+    auto decoded = ctx.decrypt(kp.secret_key, ct);
+    const auto t5 = clock::now();
+
+    bool ok;
+    if (spec->scheme == "CKKS") {
+        constexpr double TOL = 1e-3;  // post-encode/decrypt CKKS tolerance
+        auto values = decoded.real_values();
+        ok = values.size() >= input_i.size();
+        if (ok) {
+            for (size_t i = 0; i < input_i.size(); ++i) {
+                if (std::abs(values[i] - static_cast<double>(input_i[i])) > TOL) {
+                    ok = false;
+                    break;
+                }
+            }
+        }
+    } else {
+        auto values = decoded.values();
+        ok = values.size() >= input_i.size();
+        if (ok) {
+            for (size_t i = 0; i < input_i.size(); ++i) {
+                if (values[i] != input_i[i]) { ok = false; break; }
+            }
+        }
+    }
+    auto ct_bytes = ct.serialize();
+
+    if (args.emit_json) {
+        json out;
+        out["status"]              = ok ? "ok" : "fail";
+        out["contextSpec"]         = args.context_spec;
+        out["inputValues"]         = input_i.size();
+        out["ciphertextBytes"]     = ct_bytes.size();
+        out["timings"]["contextMs"]  = ms(t0, t1);
+        out["timings"]["keygenMs"]   = ms(t1, t2);
+        out["timings"]["encodeMs"]   = ms(t2, t3);
+        out["timings"]["encryptMs"]  = ms(t3, t4);
+        out["timings"]["decryptMs"]  = ms(t4, t5);
+        out["timings"]["totalMs"]    = ms(t0, t5);
+        std::cout << out.dump(2) << "\n";
+    } else {
+        std::cout << (ok ? "OK" : "FAIL") << ": crypto self-test on context "
+                  << args.context_spec << "\n";
+        std::cout << "  Input slots tested: " << input_i.size() << "\n";
+        std::cout << "  Ciphertext size:    " << ct_bytes.size() << " bytes\n";
+        std::cout << "  Timings:\n";
+        std::cout << "    Build context:    " << ms(t0, t1) << " ms\n";
+        std::cout << "    Generate keypair: " << ms(t1, t2) << " ms\n";
+        std::cout << "    Encode plaintext: " << ms(t2, t3) << " ms\n";
+        std::cout << "    Encrypt:          " << ms(t3, t4) << " ms\n";
+        std::cout << "    Decrypt:          " << ms(t4, t5) << " ms\n";
+        std::cout << "    Total:            " << ms(t0, t5) << " ms\n";
+    }
+    return ok ? 0 : 1;
+}
+
+// Encrypt a plaintext input file under a joint public key. Two modes:
+//
+//   Mode A: --function-def <path> + --input-name <name>
+//     Read schema + schemaParams from the signed function-definition file.
+//     Trust + audit + consistency story; recommended for production.
+//
+//   Mode B: --schema <name> + per-schema flags
+//     Specify encoding directly via CLI flags. Useful for scripting and
+//     ad-hoc work. Both parties in a multi-party flow MUST agree on
+//     identical flags for the math to work.
+//
+// Mode A verifies the function-def's pinned registry signature before use
+// (see the fail-closed check in run_crypto_encrypt). Unsigned/altered defs are
+// refused; the registry public key is pinned in registry/trust_root.cpp.
+// Generic bundle encoder (defined below, near the old tree path). Encrypts a
+// structured list of real vectors described by an upstream cleartext prep step
+// into one archive. crypto encrypt dispatches here on layout=="encrypted-bundle"
+// so the toolkit stays function-agnostic (no per-function verbs).
+int encrypt_bundle(const std::string& input_path,
+                   const std::string& joint_public_key_path,
+                   const std::string& output_path,
+                   const std::string& context_spec_id,
+                   bool emit_json);
+
+// ---------------------------------------------------------------------------
+// signature-table sizing lives in core (psi/encoder), shared by the encoder and
+// its dry run, so the estimate describes the bundle the encoder will
+// actually write rather than one it could have written.
+// ---------------------------------------------------------------------------
+using fhe_toolkit::psi::plan_signature_table;
+using fhe_toolkit::psi::shard_granularity_note;
+
+// ---------------------------------------------------------------------------
+// signature-table accuracy advice, rendered the same way
+// by the encoder and its dry run: every problem in numbers, each fix as flags
+// with what it costs, and one complete command that clears them all. The rules
+// and the verification of every fix live in psi/advice.
+// ---------------------------------------------------------------------------
+static std::string shell_quote(const std::string& s) {
+    static constexpr std::string_view safe =
+        "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_./=:,+@%";
+    if (!s.empty() && s.find_first_not_of(safe) == std::string::npos) return s;
+    std::string out = "'";
+    for (const char c : s) out += c == '\'' ? std::string("'\\''") : std::string(1, c);
+    return out + "'";
+}
+
+static std::string format_double(double v) {
+    std::ostringstream out;
+    out << v;
+    return out.str();
+}
+
+static json recommendation_json(const fhe_toolkit::psi::Recommendation& rec, const std::string& command) {
+    json out;
+    out["flags"]         = rec.flags();
+    out["command"]       = command + " " + rec.flags();
+    out["cells"]         = rec.plan.cells_total;
+    if (rec.dynamic_tables) out["dynamicTables"] = true;
+    else out["tables"]   = rec.plan.levels;
+    out["limbs"]         = rec.plan.limbs;
+    out["countGroups"]   = rec.plan.count_groups;
+    out["signatureBits"] = rec.signature_bits;
+    out["ciphertextsSelf"]      = rec.estimate.ciphertexts_self;
+    out["inputBytesSelf"]       = rec.estimate.input_bytes_self;
+    out["computeChunks"]        = rec.estimate.chunks;
+    out["coreSeconds"]          = rec.estimate.core_seconds;
+    out["expectedDropRate"]     = rec.dynamic_tables ? 0.0 : rec.estimate.expected_drop_rate;
+    out["expectedFalseMatches"] = rec.estimate.expected_false_matches;
+    out["cost"]                 = rec.cost();
+    return out;
+}
+
+static json finding_json(const fhe_toolkit::psi::Finding& f, const std::string& command) {
+    json out;
+    out["code"]     = fhe_toolkit::psi::issue_code(f.issue);
+    out["severity"] = fhe_toolkit::psi::severity_name(f.severity);
+    out["message"]  = f.message;
+    json recs = json::array();
+    for (const auto& rec : f.recommendations) recs.push_back(recommendation_json(rec, command));
+    out["recommendations"] = recs;
+    return out;
+}
+
+static json advice_json(const fhe_toolkit::psi::Advice& advice, const std::string& command) {
+    json out;
+    out["verdict"] = fhe_toolkit::psi::verdict_name(advice.verdict(false));
+    json findings = json::array();
+    for (const auto& f : advice.findings) findings.push_back(finding_json(f, command));
+    out["findings"] = findings;
+    out["fix"] = advice.fix.empty() ? json(nullptr) : recommendation_json(advice.fix.front(), command);
+    return out;
+}
+
+static void print_advice(const fhe_toolkit::psi::Advice& advice, const std::string& command,
+                         std::ostream& os) {
+    namespace psi = fhe_toolkit::psi;
+    for (const auto& f : advice.findings) {
+        const char* label = f.severity == psi::Severity::refuse      ? "REFUSED"
+                          : f.severity == psi::Severity::acknowledge ? "WARNING"
+                                                                      : "note";
+        os << "  " << label << " [" << psi::issue_code(f.issue) << "]: " << f.message << "\n";
+        for (const auto& rec : f.recommendations) {
+            os << "    fix: " << rec.flags() << "\n"
+               << "         " << rec.cost() << "\n";
+        }
+    }
+    if (advice.verdict(false) == psi::Verdict::ok) return;
+    if (!advice.fix.empty()) {
+        os << "  Recommended (clears everything above; both parties must use the same sizing flags):\n"
+           << "    " << command << " " << advice.fix.front().flags() << "\n"
+           << "    costs " << advice.fix.front().cost() << "\n";
+    } else {
+        os << "  No parameter set within this context clears it; fewer records per job, or splitting the dataset into parts, would.\n";
+    }
+}
+
+// The encoder's own command line, minus its sizing flags, for recommendations to extend.
+static std::string encrypt_command_prefix(const CryptoEncryptArgs& args, const std::string& spec_id,
+                                          const std::string& role, const std::string& domain) {
+    std::ostringstream out;
+    out << "julenny-toolkit crypto encrypt";
+    if (!args.function_def_path.empty()) {
+        out << " --function-def " << shell_quote(args.function_def_path)
+            << " --input-name " << shell_quote(args.input_name);
+    } else {
+        out << " --schema signature-table";
+        if (!args.separator.empty()) out << " --separator " << shell_quote(args.separator);
+        if (args.columns != "all") out << " --columns " << shell_quote(args.columns);
+        if (args.skip_header) out << " --skip-header";
+    }
+    out << " --input " << shell_quote(args.input_path)
+        << " --joint-public-key " << shell_quote(args.joint_public_key_path)
+        << " --output " << shell_quote(args.output_path)
+        << " --role " << role << " --context-spec " << spec_id
+        << " --domain-separator " << shell_quote(domain);
+    if (args.capacity > 0) out << " --capacity " << args.capacity;
+    if (args.target_overflow != 1e-6) out << " --target-overflow " << format_double(args.target_overflow);
+    if (args.emit_json) out << " --json";
+    return out.str();
+}
+
+// ---------------------------------------------------------------------------
+// signature-table: the large-dataset PSI encoder.
+//
+// The work is psi/encoder in core, shared with the desktop app, which is
+// installed without this CLI: both must write the same files and tell the
+// platform the same thing. This renders the result, as JSON or text, and maps
+// it to the exit code (1 refused, 2 bad arguments, 3 needs acknowledging).
+// ---------------------------------------------------------------------------
+static int encrypt_signature_table(const CryptoEncryptArgs& args,
+                                   const fhe_toolkit::crypto::CryptoContextSpec& spec,
+                                   std::int64_t slot_count, const std::string& sep_str,
+                                   const std::string& cols_spec, bool skip_header,
+                                   const std::string& role_str, const std::string& domain,
+                                   const std::string& fn_slug, const std::string& fn_version) {
+    namespace psi = fhe_toolkit::psi;
+
+    psi::EncodeRequest req;
+    req.input            = args.input_path;
+    req.joint_public_key = args.joint_public_key_path;
+    req.output           = args.output_path;
+    req.spec             = spec;
+    req.slot_count       = static_cast<std::uint64_t>(slot_count);
+    req.separator        = sep_str.empty() ? '\0' : sep_str[0];
+    req.columns          = psi::parse_columns(cols_spec);
+    req.skip_header      = skip_header;
+    req.role             = role_str;
+    req.domain           = domain;
+    req.signature_bits   = args.signature_bits;
+    req.cells            = args.cells;
+    req.tables           = args.tables;
+    req.dynamic_tables   = args.dynamic_tables;
+    req.limbs            = args.limbs;
+    req.count_groups     = args.count_groups;
+    req.shards           = args.shards;
+    req.capacity         = args.capacity;
+    req.target_overflow  = args.target_overflow;
+    req.size_class       = args.size_class;
+    req.function_slug    = fn_slug;
+    req.function_version = fn_version;
+    req.input_name       = args.input_name;
+
+    psi::EncodeResult r;
+    try {
+        r = psi::encode_signature_table(req);
+    } catch (const psi::EncodeError& e) {
+        std::cerr << "error: " << e.what() << "\n";
+        return e.usage() ? 2 : 1;
+    }
+    if (!r.shard_note.empty() && !args.emit_json) std::cerr << r.shard_note << "\n";
+
+    const std::string command = encrypt_command_prefix(args, spec.id, role_str, domain);
+    // Encrypting for a permission's dataset size is the customer path, so its refusals are plain
+    // words with no table settings or flags. Without a size this is the expert path,
+    // which keeps the full accuracy advice.
+    const bool for_size = !args.size_class.empty();
+    const std::string plain_refusal = "This file could not be encrypted for this dataset size. Ask your partner "
+                                      "for a permission with a larger size.";
+    switch (r.status) {
+    case psi::EncodeStatus::refused_before_encoding:
+    case psi::EncodeStatus::table_overflow:
+        std::cerr << "error: " << (for_size ? plain_refusal : r.reason) << "\n";
+        if (!for_size) print_advice(r.advice, command, std::cerr);
+        return 1;
+    case psi::EncodeStatus::refused:
+        // Nothing encrypted or written: the table is cheap, the encryption is not.
+        if (args.emit_json) {
+            json out;
+            out["status"]  = fhe_toolkit::psi::verdict_name(r.verdict);
+            out["schema"]  = "signature-table";
+            out["message"] = for_size ? plain_refusal : r.reason;
+            if (!for_size) out["accuracy"] = advice_json(r.advice, command);
+            std::cout << out.dump(2) << "\n";
+        }
+        std::cerr << "error: " << (for_size ? plain_refusal : r.reason) << "\n";
+        if (!for_size) print_advice(r.advice, command, std::cerr);
+        return 1;
+    case psi::EncodeStatus::too_many_records:
+        if (args.emit_json) {
+            json out;
+            out["status"]  = "too-many-records";
+            out["schema"]  = "signature-table";
+            out["datasetSize"] = args.size_class;
+            out["message"] = r.reason;
+            std::cout << out.dump(2) << "\n";
+        }
+        std::cerr << "error: " << r.reason << "\n";
+        return 1;
+    case psi::EncodeStatus::encoded:
+        break;
+    }
+
+    const psi::PlacementReport& report = r.totals;
+    const psi::BundleLayout& layout = r.layout;
+    const psi::Plan& plan = r.plan;
+    const std::uint64_t shard_count = r.shard_count;
+
+    if (args.emit_json) {
+        json out;
+        out["status"]        = "ok";
+        out["schema"]        = "signature-table";
+        out["role"]          = role_str;
+        out["mode"]          = fn_slug.empty() ? "explicit-flag" : "function-def";
+        if (!fn_slug.empty()) {
+            out["functionSlug"]    = fn_slug;
+            out["functionVersion"] = fn_version;
+            out["inputName"]       = args.input_name;
+        }
+        out["contextSpec"]     = spec.id;
+        out["slotCount"]       = slot_count;
+        out["domainSeparator"] = domain;
+        out["recordsRead"]     = r.records_read;
+        out["duplicateRows"]   = report.duplicates;
+        out["linesSkipped"]    = r.lines_skipped;
+        out["records"]         = report.records;
+        out["cells"]           = layout.cells;
+        out["tables"]          = layout.tables;
+        out["dynamicTables"]   = args.dynamic_tables;
+        if (args.dynamic_tables) out["tablesSolved"] = r.solved_tables;
+        out["limbs"]           = layout.limbs;
+        out["signatureBits"]          = args.signature_bits;
+        out["signatureBitsDelivered"] = r.estimate.signature_bits_delivered;
+        out["countGroups"]     = layout.groups;
+        out["layout"]          = layout.layout_name();
+        out["cellMaxLoad"]     = report.cell_max_load;
+        out["overflows"]       = report.overflowed_cells;
+        out["recordsDropped"]  = report.dropped;
+        out["impliedDropRate"] = report.drop_rate();
+        out["remappedSignatures"]   = report.remapped;
+        out["expectedDropRate"]     = r.estimate.expected_drop_rate;
+        out["expectedFalseMatches"] = r.estimate.expected_false_matches;
+        out["chunks"]          = layout.chunks * shard_count;
+        out["ciphertexts"]     = layout.ciphertexts * shard_count;
+        out["bytes"]           = r.bytes;
+        out["shards"]          = shard_count;
+        out["cellsTotal"]      = plan.cells_total;
+        if (!args.size_class.empty()) out["datasetSize"] = args.size_class;
+        if (!r.shard_note.empty()) out["shardGranularityNote"] = r.shard_note;
+        if (shard_count > 1) {
+            out["outputPath"]        = r.files.front().string();
+            out["manifestPath"]      = r.manifest_path.string();
+            out["localManifestPath"] = r.local_manifest_path.string();
+            out["shardFiles"]        = r.shard_files_local;
+        } else {
+            out["outputPath"]  = r.files.front().string();
+        }
+        out["mostRecordsPerCountGroup"] = r.most_records_per_group;
+        // The only part of this report that may leave the machine (psi/encoder).
+        out["platformReport"] = r.platform_report;
+        out["platformReportPath"] = r.platform_report_path.string();
+        out["accuracy"] = advice_json(r.advice, command);
+        json warnings = json::array();
+        for (const auto& f : r.advice.findings) warnings.push_back(f.message);
+        out["warnings"] = warnings;
+        std::cout << out.dump(2) << "\n";
+    } else if (for_size) {
+        // The customer path: what was encrypted and what to upload, in plain words.
+        std::cout << "Encrypted " << report.records << " records for a dataset size of up to "
+                  << args.size_class << " records";
+        if (report.duplicates > 0) std::cout << " (" << report.duplicates << " repeated rows counted once)";
+        std::cout << ".\n";
+        std::cout << "  Encrypted file:        " << r.files.front().string() << "\n";
+        std::cout << "  Upload it together with: " << r.platform_report_path.string() << "\n";
+    } else {
+        std::cout << "Encoded " << report.records << " distinct records into a signature table.\n";
+        std::cout << "  Role:            " << role_str << " (empty cells hold this role's sentinel)\n";
+        std::cout << "  Records read:    " << r.records_read << " (" << report.duplicates
+                  << " repeated, counted once; " << r.lines_skipped << " lines skipped)\n";
+        std::cout << "  Table:           " << plan.cells_total << " cells x " << layout.tables
+                  << " tables, " << layout.limbs << " limbs of 16 bits"
+                  << (args.dynamic_tables ? " (tables set by the data; the model expected "
+                                                + std::to_string(r.solved_tables) + ")" : "")
+                  << "\n";
+        std::cout << "  Signature:       " << args.signature_bits << " bits asked, "
+                  << r.estimate.signature_bits_delivered << " delivered (cell address included)\n";
+        std::cout << "  Fullest cell:    " << report.cell_max_load << " records (every record placed)\n";
+        std::cout << "  Bundle:          " << layout.ciphertexts * shard_count << " ciphertexts, "
+                  << layout.chunks * shard_count << " comparisons, " << layout.layout_name()
+                  << " layout, " << r.bytes << " bytes\n";
+        if (shard_count > 1) {
+            std::cout << "  Shards:          " << shard_count << " x " << plan.cells_per_shard()
+                      << " cells, " << layout.ciphertexts << " ciphertexts each\n";
+            std::cout << "  Output:          " << r.files.front().string() << " .. "
+                      << r.files.back().filename().string() << "\n";
+            std::cout << "  Manifest:        " << r.manifest_path.string() << "\n";
+        } else {
+            std::cout << "  Output:          " << r.files.front().string() << "\n";
+        }
+        std::cout << "  Context:         " << spec.id << " (BFV, slots=" << slot_count
+                  << ", t=" << spec.plaintext_modulus << ")\n";
+        std::cout << "  Platform is told: records fit each count group: "
+                  << (r.count_fits_groups ? "yes" : "no") << ", and the table's shape (never a record count)\n";
+        std::cout << "  Platform report: " << r.platform_report_path.string()
+                  << " (upload it with the ciphertext)\n";
+        std::cout << (args.dynamic_tables
+                          ? "  The other party MUST encode with the same cells, limbs, groups and shards (its tables may differ),\n"
+                          : "  The other party MUST encode with the same cells, tables, limbs, groups and shards,\n");
+        std::cout << "  the opposite role, and the same domain separator '" << domain << "'.\n";
+        print_advice(r.advice, command, std::cout);
+    }
+    return 0;
+}
+
+// ---------------------------------------------------------------------------
+// crypto psi-estimate: the signature-table dry run.
+//
+// Everything is predicted from a declared record count and the parameters. It
+// needs no input file, key, grant or upload, and writes nothing - it must run
+// before a grant exists, because the variant is pinned at grant creation.
+//
+// Plan: plan_signature_table, the encoder's own sizing. Bytes: psi/solver's
+// layout-aware model over the real context's ring and towers, with the cereal
+// framing measured for this spec by archiving two throwaway ciphertexts under a
+// throwaway key. That framing differs by spec (bfv-default-v1 frames
+// differently from bfv-large-psi-v1), so it is measured rather than assumed.
+// ---------------------------------------------------------------------------
+namespace {
+
+// Serialization framing of `ctx`, measured: one archive of one ciphertext and one
+// of two, under a throwaway key. Nothing here is written anywhere. (A key that has
+// been through a file frames a few hundred bytes larger per bundle; negligible.)
+fhe_toolkit::psi::ContextCost measure_context_cost(const fhe_toolkit::crypto::Context& ctx,
+                                                   std::uint64_t slots) {
+    namespace crypto = fhe_toolkit::crypto;
+    fhe_toolkit::psi::ContextCost cost;
+    cost.slots = slots;
+    cost.towers = static_cast<unsigned>(ctx.tower_count());
+    const auto probe = ctx.generate_keypair();
+
+    const std::vector<std::int64_t> zeros(static_cast<std::size_t>(slots), 0);
+    std::vector<crypto::Ciphertext> cts;
+    cts.push_back(ctx.encrypt(probe.public_key, ctx.encode_packed(zeros)));
+    const std::uint64_t one = ctx.serialize_ciphertext_vector(cts).size();
+    cts.push_back(ctx.encrypt(probe.public_key, ctx.encode_packed(zeros)));
+    const std::uint64_t two = ctx.serialize_ciphertext_vector(cts).size();
+    const std::uint64_t per = two - one;
+    if (per < cost.ciphertext_bytes() || one < per) {
+        throw std::runtime_error("the serialized ciphertext (" + std::to_string(per) + " bytes) is smaller "
+                                 "than its polynomials (" + std::to_string(cost.ciphertext_bytes())
+                                 + " bytes) - the size model does not fit this context");
+    }
+    cost.archived_ciphertext_extra = per - cost.ciphertext_bytes();
+    cost.archive_fixed_bytes = one - per;
+    return cost;
+}
+
+json estimate_row_json(const fhe_toolkit::psi::Estimate& e) {
+    json row;
+    row["limbs"]                  = e.plan.limbs;
+    row["signatureBitsDelivered"] = e.signature_bits_delivered;
+    row["ciphertextsSelf"]        = e.ciphertexts_self;
+    row["inputBytesSelf"]         = e.input_bytes_self;
+    row["inputBytesTotal"]        = e.input_bytes_total;
+    row["multiplications"]        = e.multiplications;
+    row["coreSeconds"]            = e.core_seconds;
+    row["expectedFalseMatches"]   = e.expected_false_matches;
+    return row;
+}
+
+std::string human_bytes(std::uint64_t bytes) {
+    const char* units[] = { "B", "KB", "MB", "GB", "TB" };
+    double v = static_cast<double>(bytes);
+    int u = 0;
+    while (v >= 1000.0 && u < 4) { v /= 1000.0; ++u; }
+    std::ostringstream out;
+    out.setf(std::ios::fixed);
+    out.precision(u == 0 ? 0 : 1);
+    out << v << " " << units[u];
+    return out.str();
+}
+
+}  // namespace
+
+int run_crypto_psi_estimate(const CryptoPsiEstimateArgs& args) {
+    namespace psi = fhe_toolkit::psi;
+
+    const auto spec = fhe_toolkit::crypto::get_crypto_context_spec(args.context_spec);
+    if (!spec) {
+        std::cerr << "error: unknown context spec: " << args.context_spec << "\n";
+        return 2;
+    }
+    // The same refusals as the encoder, so a plan this quotes is one it can encode.
+    if (spec->scheme != "BFV" || spec->plaintext_modulus <= 65536) {
+        std::cerr << "error: schema 'signature-table' requires a BFV context spec with t > 65536; got '"
+                  << spec->id << "' (" << spec->scheme << ", t = " << spec->plaintext_modulus << ")\n";
+        return 2;
+    }
+    if (args.records == 0) {
+        std::cerr << "error: --records must be at least 1 (the encoder refuses an empty input)\n";
+        return 2;
+    }
+    const std::int64_t slot_count = resolve_slot_count(spec->id);
+    psi::Request req;
+    req.records          = args.records;
+    req.signature_bits   = args.signature_bits;
+    req.target_drop_rate = args.target_overflow;
+    req.context.slots    = static_cast<std::uint64_t>(slot_count);
+
+    psi::Plan plan;
+    psi::Estimate e;
+    std::vector<psi::Estimate> sensitivity;
+    psi::Advice advice;
+    psi::Finding approximate;
+    unsigned likely_p50 = 0, likely_p99 = 0;
+    std::uint64_t bytes_at_p99 = 0;
+    try {
+        if (args.dynamic_tables) {
+            if (args.tables > 0) throw std::invalid_argument("--dynamic-tables and --tables are exclusive");
+            req.per_level_only = true;
+        }
+        // Sized exactly as the encoder sizes: from this party's count alone.
+        plan = plan_signature_table(req, args.cells, args.tables, args.limbs, args.count_groups, args.shards);
+        if (args.dynamic_tables && plan.cells_total < static_cast<std::uint64_t>(slot_count)) {
+            throw std::invalid_argument("--dynamic-tables needs at least " + std::to_string(slot_count)
+                                        + " cells (per-level tables), not " + std::to_string(plan.cells_total));
+        }
+        if (args.peer_tables > 0) plan.peer_levels = args.peer_tables;
+        // Checked the way the encoder checks it, before the table is built.
+        const auto layout = psi::bundle_layout(plan.table_params(), plan.count_groups,
+                                               static_cast<std::uint64_t>(slot_count));
+        (void)layout;
+
+        const fhe_toolkit::crypto::Context ctx(*spec);
+        req.context = measure_context_cost(ctx, static_cast<std::uint64_t>(slot_count));
+        req.peer_records = args.peer_records;  // accuracy only: it never moves the plan
+        e = psi::estimate(req, plan);
+        if (args.dynamic_tables) {
+            // The data sets T. Quote the model's T (above) and how large the fullest cell is likely to be.
+            likely_p50 = psi::likely_fullest_cell(args.records, plan.cells_total, 0.5);
+            likely_p99 = psi::likely_fullest_cell(args.records, plan.cells_total, 0.99);
+            psi::Plan at_p99 = plan;
+            at_p99.levels = std::max(1u, likely_p99);
+            bytes_at_p99 = psi::estimate(req, at_p99).input_bytes_self;
+        }
+
+        std::vector<unsigned> ks;
+        for (unsigned k : { 4u, 6u, 8u, plan.limbs }) {
+            if (k <= req.context.max_limbs && std::find(ks.begin(), ks.end(), k) == ks.end()) ks.push_back(k);
+        }
+        std::sort(ks.begin(), ks.end());
+        sensitivity = psi::limb_sensitivity(req, plan, ks);
+
+        // What the encoder would say about these parameters, from the model.
+        psi::AdviceOptions advice_options;
+        advice_options.policy = psi::OverflowPolicy::fail;  // no record is ever left out
+        advice_options.dynamic_tables = args.dynamic_tables;
+        advice = psi::advise(req, e, advice_options);
+        approximate = psi::advise_approximate(req, e);
+    } catch (const std::exception& ex) {
+        std::cerr << "error: cannot estimate the signature tables: " << ex.what() << "\n";
+        return 1;
+    }
+
+    // A dry run's own command line, minus its sizing flags, for recommendations to extend.
+    std::string command = "julenny-toolkit crypto psi-estimate --records " + std::to_string(args.records);
+    if (args.peer_records > 0) command += " --peer-records " + std::to_string(args.peer_records);
+    command += " --context-spec " + spec->id;
+    if (args.target_overflow != 1e-6) command += " --target-overflow " + format_double(args.target_overflow);
+    if (args.peer_tables > 0) command += " --peer-tables " + std::to_string(args.peer_tables);
+    if (args.emit_json) command += " --json";
+
+    // The approximate variant: FNV-1a-64 mod 16384, one indicator per record.
+    const double approx_false_matches = static_cast<double>(e.records) * static_cast<double>(e.peer_records) / 16384.0;
+    const bool quota_known = args.storage_quota_bytes >= 0;
+    const bool quota_unlimited = args.storage_quota_bytes == 0;
+    const std::int64_t headroom = quota_known && !quota_unlimited
+        ? args.storage_quota_bytes - static_cast<std::int64_t>(args.storage_used_bytes)
+              - static_cast<std::int64_t>(e.input_bytes_self)
+        : 0;
+
+    if (args.emit_json) {
+        json out;
+        out["status"]         = "ok";
+        out["schema"]         = "signature-table";
+        out["contextSpec"]    = spec->id;
+        out["slotCount"]      = slot_count;
+        out["towers"]         = req.context.towers;
+        out["records"]        = e.records;
+        out["peerRecords"]    = e.peer_records;
+        out["cells"]          = plan.cells_total;
+        out["tables"]         = plan.levels;
+        if (args.peer_tables > 0) out["peerTables"] = args.peer_tables;
+        if (args.dynamic_tables) {
+            out["dynamicTables"] = { { "tablesModel", plan.levels },
+                                     { "fullestCellP50", likely_p50 },
+                                     { "fullestCellP99", likely_p99 },
+                                     { "inputBytesSelfAtP99", bytes_at_p99 },
+                                     { "note", "the encoder uses this data's fullest cell as T; bytes and chunks above "
+                                               "are at the model's T" } };
+        }
+        out["limbs"]          = plan.limbs;
+        out["shards"]         = plan.shards;
+        {
+            const auto note = shard_granularity_note(plan, static_cast<std::uint64_t>(slot_count));
+            if (!note.empty()) out["shardGranularityNote"] = note;
+        }
+        out["countGroups"]    = plan.count_groups;
+        out["layout"]         = e.prealigned ? "prealigned" : "per-level";
+        out["signatureBits"]          = args.signature_bits;
+        out["signatureBitsDelivered"] = e.signature_bits_delivered;
+
+        out["ciphertextsSelf"]     = e.ciphertexts_self;
+        out["inputBytesSelf"]      = e.input_bytes_self;
+        out["inputBytesPeer"]      = e.input_bytes_peer;
+        out["inputBytesTotal"]     = e.input_bytes_total;
+        out["shardManifestCount"]  = e.input_objects;
+        out["outputBytes"]         = { { "count", e.count_output_bytes }, { "itemized", e.itemized_output_bytes } };
+        out["itemizedOutputCiphertexts"] = e.itemized_output_ciphertexts;
+        out["peerDecryptBytes"]    = { { "count", e.count_output_bytes }, { "itemized", e.peer_decrypt_bytes } };
+
+        out["computeChunks"]   = e.chunks;
+        out["multiplications"] = e.multiplications;
+        out["coreSeconds"]     = e.core_seconds;
+        out["secondsPerMultiplication"] = req.context.seconds_per_mult;
+
+        if (!quota_known) {
+            out["storageQuotaHeadroom"] = nullptr;
+        } else if (quota_unlimited) {
+            out["storageQuotaHeadroom"] = "unlimited";
+        } else {
+            out["storageQuotaHeadroom"] = headroom;
+            out["fitsStorageQuota"] = headroom >= 0;
+        }
+
+        out["expectedDropRate"]        = e.expected_drop_rate;
+        out["expectedOverflowedCells"] = e.expected_overflowed_cells;
+        out["expectedFalseMatches"]    = e.expected_false_matches;
+        json rows = json::array();
+        for (const auto& row : sensitivity) rows.push_back(estimate_row_json(row));
+        out["limbSensitivity"] = rows;
+        out["approximateVariant"] = { { "contextSpec", "bfv-default-v1" },
+                                      { "expectedFalseMatches", approx_false_matches },
+                                      { "accuracy", finding_json(approximate, command) } };
+        out["accuracy"] = advice_json(advice, command);
+
+        out["framing"] = { { "ciphertextBytes", req.context.ciphertext_bytes() },
+                           { "archiveFixedBytes", req.context.archive_fixed_bytes },
+                           { "archivedCiphertextExtra", req.context.archived_ciphertext_extra },
+                           { "singleCiphertextExtra", req.context.single_ciphertext_extra },
+                           // Results are written by the wrapper, not here, so their framing cannot be
+                           // probed locally: this is what the wrapper wrote at bfv-large-psi-v1.
+                           { "outputFraming", "measured from wrapper results at bfv-large-psi-v1" } };
+        // Named rather than omitted, so nobody reads their absence as zero.
+        out["unmodelled"] = { { "timeP50Sec", "wall time needs the engine's thread budget and hardware" },
+                              { "timeP90Sec", "wall time needs the engine's thread budget and hardware" },
+                              { "credits", "pricing lives on the platform" } };
+        json warnings = json::array();
+        for (const auto& f : advice.findings) warnings.push_back(f.message);
+        out["warnings"] = warnings;
+        std::cout << out.dump(2) << "\n";
+        return 0;
+    }
+
+    std::cout << "Dry run: signature-table for " << e.records << " records (peer " << e.peer_records
+              << "), nothing encrypted or written.\n";
+    if (const auto note = shard_granularity_note(plan, static_cast<std::uint64_t>(slot_count)); !note.empty())
+        std::cout << "  " << note << "\n";
+    std::cout << "  Table:        " << plan.cells_total << " cells x " << plan.levels << " tables, "
+              << plan.limbs << " limbs, " << plan.count_groups << " count groups, "
+              << (e.prealigned ? "prealigned" : "per-level") << " layout"
+              << (plan.shards > 1 ? " (" + std::to_string(plan.shards) + " shards of "
+                                        + std::to_string(plan.cells_per_shard()) + " cells)" : "")
+              << "\n";
+    if (args.dynamic_tables) {
+        std::cout << "  Tables:       set by the data (--dynamic-tables): the fullest cell is likely " << likely_p50
+                  << ", at most " << likely_p99 << " in 99 % of datasets (" << human_bytes(bytes_at_p99)
+                  << " upload at " << likely_p99 << "); figures below are at the model's " << plan.levels << "\n";
+    }
+    std::cout << "  Signature:    " << args.signature_bits << " bits asked, " << e.signature_bits_delivered
+              << " delivered\n";
+    std::cout << "  Upload:       " << human_bytes(e.input_bytes_self) << " (" << e.input_bytes_self
+              << " bytes, " << e.ciphertexts_self << " ciphertexts) each; " << human_bytes(e.input_bytes_total)
+              << " both parties\n";
+    std::cout << "  Result:       count " << human_bytes(e.count_output_bytes) << "; itemized "
+              << human_bytes(e.itemized_output_bytes) << " (" << e.itemized_output_ciphertexts
+              << " ciphertexts), which the other party must also partially decrypt\n";
+    std::cout << "  Compute:      " << e.chunks << " chunks, " << e.multiplications << " multiplications, ~"
+              << std::llround(e.core_seconds) << " core-seconds at " << req.context.seconds_per_mult
+              << " s per multiplication\n";
+    std::cout << "  Accuracy:     expected drop rate " << e.expected_drop_rate << ", expected false matches "
+              << e.expected_false_matches << "\n";
+    for (const auto& row : sensitivity) {
+        std::cout << "    at " << row.plan.limbs << " limbs: " << human_bytes(row.input_bytes_self)
+                  << " each, " << row.multiplications << " multiplications, "
+                  << row.signature_bits_delivered << " bits, expected false matches "
+                  << row.expected_false_matches << "\n";
+    }
+    std::cout << "  Approximate:  the bfv-default-v1 variant expects ~" << approx_false_matches
+              << " false matches at these sizes\n";
+    if (quota_known && !quota_unlimited) {
+        std::cout << "  Storage:      " << (headroom >= 0 ? "fits" : "DOES NOT FIT") << " the quota ("
+                  << headroom << " bytes of headroom after this upload)\n";
+    }
+    if (approximate.severity == psi::Severity::acknowledge) {
+        std::cout << "  WARNING [" << psi::issue_code(approximate.issue) << "]: " << approximate.message << "\n";
+    }
+    std::cout << "  Verdict:      " << psi::verdict_name(advice.verdict(false))
+              << " (as crypto encrypt would judge these parameters, from the model)\n";
+    print_advice(advice, command, std::cout);
+    return 0;
+}
+
+int run_crypto_encrypt(const CryptoEncryptArgs& args) {
+    namespace fs = std::filesystem;
+
+    if (args.input_path.empty() || args.joint_public_key_path.empty() ||
+        args.output_path.empty()) {
+        std::cerr << "error: --input, --joint-public-key, and --output are required\n";
+        return 2;
+    }
+
+    const bool has_fn_def = !args.function_def_path.empty();
+    const bool has_schema = !args.schema.empty();
+    if (has_fn_def == has_schema) {
+        std::cerr << "error: exactly one of --function-def or --schema must be set\n";
+        std::cerr << "       --function-def reads encoding rules from a signed JSON file (mode A)\n";
+        std::cerr << "       --schema specifies the encoding directly via CLI flags (mode B)\n";
+        return 2;
+    }
+
+    // Resolved per-input encoding parameters.
+    std::string context_spec_id;
+    std::string schema_name;
+    std::string layout;  // mode A 'layout'; "encrypted-bundle" -> generic bundle encoder
+    std::string sep_str;
+    bool skip_header = false;
+    std::string cols_spec = "all";
+    // Provenance fields, populated only in mode A for the result summary.
+    std::string fn_slug, fn_version, fn_role;
+    // signature-table: which sentinel this party fills with, and the digest's domain separator.
+    // Mode A takes the role from the input's position in the signed definition, so the two parties
+    // cannot both encode as A without disagreeing about the definition itself.
+    std::string psi_role_from_def, domain_from_def;
+
+    if (has_fn_def) {
+        // Mode A: function-def-driven.
+        if (args.input_name.empty()) {
+            std::cerr << "error: --input-name is required when --function-def is set\n";
+            return 2;
+        }
+
+        json fn_def;
+        try {
+            std::ifstream fn_in(args.function_def_path);
+            if (!fn_in) {
+                std::cerr << "error: cannot open function-def file: "
+                          << args.function_def_path << "\n";
+                return 1;
+            }
+            fn_in >> fn_def;
+        } catch (const std::exception& e) {
+            std::cerr << "error: failed to parse function-def JSON: " << e.what() << "\n";
+            return 1;
+        }
+
+        // Fail-closed signature verification (the function id is a security
+        // property: both parties must compute the SAME signed definition).
+        // Refuse to encrypt against any def that is unsigned or altered. The
+        // registry public key is pinned in the binary (registry_public_key()),
+        // never fetched from the server we are verifying. Platform AND custom
+        // functions are signed by the registry at registration, so a missing or
+        // bad signature here means tampering or a non-registry def -> we stop.
+        if (!fhe_toolkit::registry::verify_function_definition_signature(
+                fn_def, fhe_toolkit::registry::registry_public_key())) {
+            std::cerr << "error: function-definition signature verification FAILED\n"
+                      << "       file: " << args.function_def_path << "\n"
+                      << "       refusing to encrypt: the definition is unsigned or has "
+                         "been altered.\n"
+                      << "       the function id must carry a valid JuLenny registry "
+                         "signature.\n";
+            return 1;
+        }
+
+        json input_def;
+        std::size_t input_index = 0;
+        if (fn_def.contains("inputs") && fn_def["inputs"].is_array()) {
+            std::size_t idx = 0;
+            for (const auto& in : fn_def["inputs"]) {
+                if (in.value("name", "") == args.input_name) {
+                    input_def = in;
+                    input_index = idx;
+                    break;
+                }
+                ++idx;
+            }
+        }
+        if (input_def.is_null()) {
+            std::cerr << "error: function-def has no input named '"
+                      << args.input_name << "'\n       available inputs: ";
+            if (fn_def.contains("inputs") && fn_def["inputs"].is_array()) {
+                bool first = true;
+                for (const auto& in : fn_def["inputs"]) {
+                    if (!first) std::cerr << ", ";
+                    std::cerr << in.value("name", "?");
+                    first = false;
+                }
+            }
+            std::cerr << "\n";
+            return 1;
+        }
+
+        fn_slug    = fn_def.value("slug", std::string{});
+        fn_version = fn_def.value("version", std::string{});
+        fn_role    = input_def.value("role", std::string{});
+        context_spec_id = args.context_spec.empty()
+            ? fn_def.value("cryptoContextSpec", std::string{"bfv-default-v1"})
+            : args.context_spec;
+        schema_name = input_def.value("schema", std::string{});
+        layout      = input_def.value("layout", std::string{});
+
+        json params = input_def.value("schemaParams", json::object());
+        if (input_index < 2) psi_role_from_def = input_index == 0 ? "A" : "B";
+        domain_from_def = params.value("domainSeparator", std::string{});
+        sep_str     = params.value("separator", std::string{});
+        skip_header = params.value("skipHeader", false);
+        // --columns overrides the function-def here too, not just in schema mode. The column
+        // choice is a property of THIS party's file, not of the shared function: the two
+        // sides may hold the same fields in different positions, and each selects its own.
+        // The function-def default stays "all", so nothing changes unless a caller asks.
+        cols_spec   = args.columns.empty()
+            ? params.value("columns", std::string{"all"})
+            : args.columns;
+    } else {
+        // Mode B: explicit-flag.
+        schema_name = args.schema;
+        sep_str     = args.separator;
+        skip_header = args.skip_header;
+        cols_spec   = args.columns;
+        context_spec_id = args.context_spec.empty()
+            ? std::string{"bfv-default-v1"}
+            : args.context_spec;
+    }
+
+    // Bundle-layout inputs (e.g. an encrypted-model bundle) are not flat
+    // value-per-line data. Their structuring happens upstream (cleartext prep
+    // driven by the function-def's encodingRecipe); the file we receive here is
+    // already a generic header + real-vector-list description. Dispatch to the
+    // generic bundle encoder so crypto encrypt stays function-agnostic.
+    if (layout == "encrypted-bundle") {
+        return encrypt_bundle(args.input_path, args.joint_public_key_path,
+                              args.output_path, context_spec_id, args.emit_json);
+    }
+
+    auto spec = get_crypto_context_spec(context_spec_id);
+    if (!spec) {
+        std::cerr << "error: unknown context spec: " << context_spec_id << "\n";
+        return 2;
+    }
+    const std::int64_t slot_count = resolve_slot_count(spec->id);
+
+    // The signature-table encoder emits a bundle of many ciphertexts rather than one vector, so it is
+    // dispatched before the flat schemas and returns on its own.
+    if (schema_name == "signature-table") {
+        const std::string role_str = args.psi_role.empty() ? psi_role_from_def : args.psi_role;
+        std::string domain = args.domain_separator;
+        if (domain.empty()) domain = domain_from_def;
+        if (domain.empty()) domain = "julenny-psi-v1";
+        return encrypt_signature_table(args, *spec, slot_count, sep_str, cols_spec, skip_header,
+                                       role_str, domain, fn_slug, fn_version);
+    }
+
+    // Dispatch on schema.
+    // 'packed-real' is the function-def schema name for plain real-vector
+    // inputs (e.g. decision-tree 'features': feature j in slot j). It encodes
+    // identically to 'weight-vector' (one real per line -> CKKS slots in file
+    // order), so it folds into the same path.
+    const bool is_weight_vector    = (schema_name == "weight-vector" || schema_name == "packed-real");
+    const bool is_binary_indicator = (schema_name == "binary-indicator");
+    if (schema_name != "indicator-hash" && !is_weight_vector && !is_binary_indicator) {
+        std::cerr << "error: unsupported schema '" << schema_name
+                  << "' (this version supports 'indicator-hash', 'weight-vector',"
+                  << " 'packed-real', 'binary-indicator', and 'signature-table')\n";
+        return 2;
+    }
+    if (is_weight_vector && spec->scheme != "CKKS") {
+        std::cerr << "error: schema '" << schema_name << "' requires a CKKS context spec; got '"
+                  << spec->id << "' (" << spec->scheme << ")\n";
+        return 2;
+    }
+
+    // Read the input file and apply the schema's encoding.
+    std::ifstream in_file(args.input_path);
+    if (!in_file) {
+        std::cerr << "error: cannot open input file: " << args.input_path << "\n";
+        return 1;
+    }
+
+    std::vector<std::int64_t> indicator;  // indicator-hash
+    std::vector<double> weights;          // weight-vector
+    std::size_t records_read = 0;
+    std::size_t lines_seen = 0;
+    std::size_t lines_skipped = 0;
+    std::size_t collisions = 0;
+    std::size_t duplicate_rows = 0;      // same record listed more than once
+    std::size_t colliding_records = 0;   // genuinely different records sharing a slot
+    std::unordered_map<std::size_t, std::set<std::uint64_t>> slot_full_hashes;
+    std::string line;
+
+    if (is_weight_vector) {
+        // weight-vector: one finite real value per line, encoded into CKKS
+        // slots in file order. Blank lines and '#' comments are skipped.
+        while (std::getline(in_file, line)) {
+            ++lines_seen;
+            auto trimmed = trim_inplace(line);
+            if (trimmed.empty() || trimmed[0] == '#') { ++lines_skipped; continue; }
+            double v = 0.0;
+            std::size_t pos = 0;
+            try {
+                v = std::stod(trimmed, &pos);
+            } catch (const std::exception&) {
+                pos = std::string::npos;
+            }
+            if (pos != trimmed.size() || !std::isfinite(v)) {
+                std::cerr << "error: line " << lines_seen << " is not a number: '"
+                          << trimmed << "'\n"
+                          << "       weight-vector inputs are one real value per line\n";
+                return 1;
+            }
+            weights.push_back(v);
+            ++records_read;
+        }
+        if (static_cast<std::int64_t>(weights.size()) > slot_count) {
+            std::cerr << "error: input has " << weights.size()
+                      << " weights but the context has only " << slot_count
+                      << " slots\n";
+            return 1;
+        }
+    } else if (is_binary_indicator) {
+        // binary-indicator: one 0/1 per line; the slot index is the line's
+        // POSITION in the agreed grid enumeration (no hashing). Blank lines
+        // and '#' comments are skipped and do not advance the position, so
+        // the grid file can be annotated.
+        indicator.assign(static_cast<std::size_t>(slot_count), 0);
+        std::size_t grid_pos = 0;
+        while (std::getline(in_file, line)) {
+            ++lines_seen;
+            auto trimmed = trim_inplace(line);
+            if (trimmed.empty() || trimmed[0] == '#') { ++lines_skipped; continue; }
+            if (trimmed != "0" && trimmed != "1") {
+                std::cerr << "error: line " << lines_seen << " must be 0 or 1, got '"
+                          << trimmed << "'\n"
+                          << "       binary-indicator inputs are one 0/1 per grid position\n";
+                return 1;
+            }
+            if (static_cast<std::int64_t>(grid_pos) >= slot_count) {
+                std::cerr << "error: input has more than " << slot_count
+                          << " grid positions (context slot limit)\n";
+                return 1;
+            }
+            if (trimmed == "1") indicator[grid_pos] = 1;
+            ++grid_pos;
+            ++records_read;
+        }
+    } else {
+
+    const char sep_char = sep_str.empty() ? '\0' : sep_str[0];
+    auto cols = parse_columns_spec(cols_spec);
+    indicator.assign(static_cast<std::size_t>(slot_count), 0);
+    bool header_consumed = false;
+    while (std::getline(in_file, line)) {
+        ++lines_seen;
+        auto trimmed = trim_inplace(line);
+        if (trimmed.empty() || trimmed[0] == '#') { ++lines_skipped; continue; }
+        if (skip_header && !header_consumed) {
+            header_consumed = true;
+            ++lines_skipped;
+            continue;
+        }
+        auto composed = compose_record(trimmed, sep_char, cols);
+        if (composed.empty()) { ++lines_skipped; continue; }
+        const auto full_hash = fnv1a_64(composed);
+        auto slot = static_cast<std::size_t>(
+            full_hash % static_cast<std::uint64_t>(slot_count));
+        if (indicator[slot] != 0) ++collisions;
+        // Separate the two reasons a slot fills twice. Storing the FULL 64-bit hash
+        // (not the slot) identifies the record: same hash = same composed record, so
+        // a repeat is a duplicate ROW in the input, while a different hash in the same
+        // slot is a genuine collision. Eight bytes per distinct record keeps this cheap
+        // on large inputs. Reporting a single blended "collisions" number, as this used
+        // to, leaves the user unable to tell a harmless duplicate from a false positive.
+        auto& seen_here = slot_full_hashes[slot];
+        if (!seen_here.insert(full_hash).second) {
+            ++duplicate_rows;
+        } else if (seen_here.size() > 1) {
+            ++colliding_records;
+        }
+        // SET semantics, deliberately not += 1. Record overlap asks "is this record
+        // present", not "how many rows mention it", so a slot is a membership flag.
+        // Accumulating instead made a person listed twice count twice, which inflated
+        // the overlap total (5 shared people reported as 6) - a wrong answer, not just
+        // a cosmetic one, and duplicates are routine in real customer lists.
+        indicator[slot] = 1;
+        ++records_read;
+    }
+
+    }  // end indicator-hash branch
+
+    if (records_read == 0) {
+        std::cerr << "error: no records found in input (read " << lines_seen
+                  << " lines, " << lines_skipped << " skipped as blank/comment/header)\n";
+        return 1;
+    }
+
+    std::size_t unique_slots = 0;
+    for (auto v : indicator) if (v != 0) ++unique_slots;
+
+    // Load the joint public key and encrypt the indicator vector. CKKS
+    // encoding takes doubles, BFV takes int64; otherwise the path is the same.
+    auto pk_bytes = read_bytes(args.joint_public_key_path);
+
+    Context ctx(*spec);
+    auto pk = fhe_toolkit::crypto::PublicKey::deserialize(ctx, pk_bytes);
+    // Encode + encrypt under the freshly built context (from the spec), NOT the
+    // pk's deserialized keygen context. With MATHBACKEND=4 + noiseEstimate aligned
+    // across toolkit and wrapper, this context matches the wrapper's byte for byte,
+    // and because it has never been (de)serialized in this process OpenFHE embeds
+    // the FULL context into the ciphertext. Adopting the pk's context instead made
+    // OpenFHE emit a process-global back-reference (to the context id from the pk
+    // deserialize) that the wrapper cannot resolve from a standalone ciphertext
+    // file ("Could not find id ..."). The joint pk is still passed to encrypt(),
+    // so the ciphertext stays bound to the joint secret shares.
+    fhe_toolkit::crypto::PlaintextPacked pt;
+    if (is_weight_vector) {
+        pt = ctx.encode_ckks_packed(weights);
+    } else if (spec->scheme == "CKKS") {
+        std::vector<double> real_vals(indicator.begin(), indicator.end());
+        pt = ctx.encode_ckks_packed(real_vals);
+    } else {
+        pt = ctx.encode_packed(indicator);
+    }
+    auto ct = ctx.encrypt(pk, pt);
+    auto ct_bytes = ct.serialize();
+
+    const fs::path out_path(args.output_path);
+    if (out_path.has_parent_path()) fs::create_directories(out_path.parent_path());
+    write_bytes(out_path, ct_bytes);
+
+    if (args.emit_json) {
+        json out;
+        out["status"]            = "ok";
+        out["mode"]              = has_fn_def ? "function-def" : "explicit-flag";
+        if (has_fn_def) {
+            out["functionSlug"]    = fn_slug;
+            out["functionVersion"] = fn_version;
+            out["inputName"]       = args.input_name;
+            out["role"]            = fn_role;
+        }
+        out["schema"]            = schema_name;
+        out["recordsRead"]       = records_read;
+        if (!is_weight_vector) {
+            out["uniqueSlotsSet"] = unique_slots;
+            out["hashCollisions"]   = collisions;
+            out["duplicateRows"]    = duplicate_rows;
+            out["collidingRecords"] = colliding_records;
+        }
+        out["linesSkipped"]      = lines_skipped;
+        out["slotCount"]         = slot_count;
+        out["outputPath"]        = out_path.string();
+        out["ciphertextBytes"]   = ct_bytes.size();
+        out["contextSpec"]       = spec->id;
+        std::cout << out.dump(2) << "\n";
+    } else {
+        std::cout << "Encrypted " << records_read << " records.\n";
+        if (has_fn_def) {
+            std::cout << "  Function:        " << (fn_slug.empty() ? "?" : fn_slug)
+                      << " v" << (fn_version.empty() ? "?" : fn_version) << "\n";
+            std::cout << "  Input role:      " << args.input_name
+                      << " (" << (fn_role.empty() ? "?" : fn_role) << ")\n";
+        } else {
+            std::cout << "  Mode:            explicit-flag (no function-def)\n";
+        }
+        std::cout << "  Schema:          " << schema_name << "\n";
+        std::cout << "  Input file:      " << args.input_path << "\n";
+        std::cout << "  Joint pub key:   " << args.joint_public_key_path << "\n";
+        std::cout << "  Output:          " << out_path.string()
+                  << " (" << ct_bytes.size() << " bytes)\n";
+        std::cout << "  Context:         " << spec->id
+                  << " (" << spec->scheme << ", slots=" << slot_count;
+        if (spec->scheme == "BFV") std::cout << ", p=" << spec->plaintext_modulus;
+        std::cout << ")\n";
+        if (!is_weight_vector) {
+            std::cout << "  Unique slots:    " << unique_slots << "\n";
+            std::cout << "  Duplicate rows:  " << duplicate_rows
+                      << " (the same record listed more than once)\n";
+            std::cout << "  Collisions:      " << colliding_records
+                      << " (genuinely different records sharing a slot)\n";
+            if (duplicate_rows > 0) {
+                std::cout << "    (duplicates are encoded once, so they do not inflate the\n";
+                std::cout << "     result; no need to de-duplicate the file.)\n";
+            }
+        }
+        std::cout << "  Skipped lines:   " << lines_skipped
+                  << " (blank, comment, or header)\n";
+    }
+    return 0;
+}
+
+int run_crypto_decrypt(const CryptoDecryptArgs& args) {
+    if (args.input_path.empty() || args.secret_key_path.empty()) {
+        std::cerr << "error: --input and --secret-key are required\n";
+        return 2;
+    }
+
+    auto spec = get_crypto_context_spec(args.context_spec);
+    if (!spec) {
+        std::cerr << "error: unknown context spec: " << args.context_spec << "\n";
+        return 2;
+    }
+
+    auto ct_bytes = read_bytes(args.input_path);
+    auto sk_bytes = read_bytes(args.secret_key_path);
+
+    Context ctx(*spec);
+    auto sk = fhe_toolkit::crypto::SecretKey::deserialize(ctx, sk_bytes);
+    auto ct = fhe_toolkit::crypto::Ciphertext::deserialize(ctx, ct_bytes);
+    auto pt = ctx.decrypt(sk, ct);
+    auto values = values_as_int64(pt, *spec);
+
+    // Aggregates for the display.
+    std::size_t non_zero = 0;
+    std::int64_t total_sum = 0;
+    std::int64_t max_value = 0;
+    for (auto v : values) {
+        if (v != 0) ++non_zero;
+        total_sum += v;
+        if (v > max_value) max_value = v;
+    }
+
+    if (args.emit_json) {
+        json out;
+        out["status"]        = "ok";
+        out["totalSlots"]    = values.size();
+        out["nonZeroSlots"]  = non_zero;
+        out["sumOfSlots"]    = total_sum;
+        out["maxSlotValue"]  = max_value;
+        out["contextSpec"]   = spec->id;
+        if (args.non_zero_only) {
+            json sample = json::object();
+            for (std::size_t i = 0; i < values.size(); ++i) {
+                if (values[i] != 0) sample[std::to_string(i)] = values[i];
+            }
+            out["nonZeroValues"] = sample;
+        } else {
+            const auto n = std::min<std::size_t>(values.size(),
+                                                  static_cast<std::size_t>(args.show_slots));
+            out["firstSlots"] = std::vector<std::int64_t>(values.begin(), values.begin() + n);
+        }
+        std::cout << out.dump(2) << "\n";
+    } else {
+        std::cout << "Decrypted ciphertext.\n";
+        std::cout << "  Context:        " << spec->id << "\n";
+        std::cout << "  Total slots:    " << values.size() << "\n";
+        std::cout << "  Non-zero slots: " << non_zero << "\n";
+        std::cout << "  Sum of slots:   " << total_sum << "\n";
+        std::cout << "  Max slot value: " << max_value << "\n";
+        if (args.non_zero_only) {
+            std::cout << "  Non-zero slot positions and values:\n";
+            for (std::size_t i = 0; i < values.size(); ++i) {
+                if (values[i] != 0) {
+                    std::cout << "    [" << i << "] = " << values[i] << "\n";
+                }
+            }
+        } else {
+            const auto n = std::min<std::size_t>(values.size(),
+                                                  static_cast<std::size_t>(args.show_slots));
+            std::cout << "  First " << n << " slots:\n    [";
+            for (std::size_t i = 0; i < n; ++i) {
+                if (i > 0) std::cout << ", ";
+                std::cout << values[i];
+            }
+            std::cout << "]\n";
+        }
+    }
+    return 0;
+}
+
+// Per-party keysetup contribution. Each party runs this on their own machine, with
+// only the previous party's public-key contribution (if any) as input. The
+// secret share never leaves this machine; the public output is uploaded to
+// the platform for the next party (or, for role=main, becomes the joint pk).
+int run_crypto_keysetup_contribute(const CryptoKeysetupContributeArgs& args) {
+    namespace fs = std::filesystem;
+
+    if (args.role != "lead" && args.role != "main") {
+        std::cerr << "error: --role must be 'lead' (party 1) or 'main' (party 2+)\n";
+        return 2;
+    }
+    if (args.output_secret_path.empty() || args.output_public_path.empty()) {
+        std::cerr << "error: --output-secret and --output-public are required\n";
+        return 2;
+    }
+    if (args.role == "main" && args.peer_share_path.empty()) {
+        std::cerr << "error: --peer-share is required when --role main "
+                     "(the previous party's public-key contribution)\n";
+        return 2;
+    }
+    if (args.role == "lead" && !args.peer_share_path.empty()) {
+        std::cerr << "error: --peer-share must NOT be set when --role lead "
+                     "(lead has no peer input; it starts the chain)\n";
+        return 2;
+    }
+
+    auto spec = get_crypto_context_spec(args.context_spec);
+    if (!spec) {
+        std::cerr << "error: unknown context spec: " << args.context_spec << "\n";
+        return 2;
+    }
+
+    Context ctx(*spec);
+
+    fhe_toolkit::crypto::KeyPair kp;
+    if (args.role == "lead") {
+        // Party 1: standalone keygen. The output public key IS this party's
+        // contribution to the chain. OpenFHE's MultipartyKeyGen() with no
+        // prev_pk is equivalent to KeyGen().
+        kp = ctx.multiparty_keygen();
+    } else {
+        // Party 2+: chain on the previous party's public key. The output
+        // public key IS the joint public key (it transitively incorporates
+        // every prior party's contribution).
+        auto peer_bytes = read_bytes(args.peer_share_path);
+        auto peer_pk = fhe_toolkit::crypto::PublicKey::deserialize(ctx, peer_bytes);
+        kp = ctx.multiparty_keygen(peer_pk);
+    }
+
+    auto sk_bytes = kp.secret_key.serialize();
+    auto pk_bytes = kp.public_key.serialize();
+
+    const fs::path sk_path(args.output_secret_path);
+    const fs::path pk_path(args.output_public_path);
+    if (sk_path.has_parent_path()) fs::create_directories(sk_path.parent_path());
+    if (pk_path.has_parent_path()) fs::create_directories(pk_path.parent_path());
+
+    write_bytes(sk_path, sk_bytes);
+    write_bytes(pk_path, pk_bytes);
+
+    // Tighten permissions on the secret file (owner-only). No-op on most
+    // Windows configurations; sets explicit 0600 on POSIX.
+    try {
+        fs::permissions(sk_path,
+                        fs::perms::owner_read | fs::perms::owner_write,
+                        fs::perm_options::replace);
+    } catch (...) { /* best-effort */ }
+
+    if (args.emit_json) {
+        json out;
+        out["status"]                = "ok";
+        out["role"]                  = args.role;
+        out["contextSpec"]           = args.context_spec;
+        out["outputSecretPath"]      = sk_path.string();
+        out["outputPublicPath"]      = pk_path.string();
+        out["outputSecretBytes"]     = sk_bytes.size();
+        out["outputPublicBytes"]     = pk_bytes.size();
+        out["outputPublicIsJointPk"] = (args.role == "main");
+        std::cout << out.dump(2) << "\n";
+    } else {
+        std::cout << "Keysetup contribution generated (role: " << args.role << ").\n";
+        std::cout << "  Secret share: " << sk_path.string()
+                  << " (" << sk_bytes.size() << " bytes, owner-only)\n";
+        std::cout << "  Public " << (args.role == "main" ? "joint key" : "contribution")
+                  << ": " << pk_path.string()
+                  << " (" << pk_bytes.size() << " bytes)\n";
+        if (args.role == "lead") {
+            std::cout << "\nUpload the public contribution to the platform. The peer\n";
+            std::cout << "party will download it and produce the joint public key.\n";
+        } else {
+            std::cout << "\nUpload the joint public key to the platform. Both parties\n";
+            std::cout << "will use it to encrypt data for this project.\n";
+        }
+        std::cout << "The secret share stays on this machine. It must NEVER be uploaded.\n";
+    }
+
+    return 0;
+}
+
+// Per-party joint relinearization key contribution. Customer runs this on
+// their own machine; secret never leaves. Round 1 has two roles (lead has
+// no peer input; main chains on lead's contribution). Round 2 is symmetric:
+// both parties run the same operation with their own secret and the round-1
+// combined output as inputs.
+int run_crypto_relin_contribute(const CryptoRelinContributeArgs& args) {
+    namespace fs = std::filesystem;
+
+    if (args.round != 1 && args.round != 2) {
+        std::cerr << "error: --round must be 1 or 2\n";
+        return 2;
+    }
+    if (args.secret_key_path.empty() || args.output_path.empty()) {
+        std::cerr << "error: --secret-key and --output are required\n";
+        return 2;
+    }
+    if (args.round == 1) {
+        if (args.role != "lead" && args.role != "main") {
+            std::cerr << "error: --role must be 'lead' or 'main' for round 1\n";
+            return 2;
+        }
+        if (args.role == "main" && args.peer_share_path.empty()) {
+            std::cerr << "error: --peer-share is required for round 1 role=main "
+                         "(lead's round-1 contribution)\n";
+            return 2;
+        }
+        if (args.role == "lead" && !args.peer_share_path.empty()) {
+            std::cerr << "error: --peer-share must NOT be set for round 1 role=lead\n";
+            return 2;
+        }
+    } else {  // round 2
+        if (args.combined_r1_path.empty() || args.joint_pk_path.empty()) {
+            std::cerr << "error: --combined-r1 and --joint-pk are required for round 2\n";
+            return 2;
+        }
+    }
+
+    auto spec = get_crypto_context_spec(args.context_spec);
+    if (!spec) {
+        std::cerr << "error: unknown context spec: " << args.context_spec << "\n";
+        return 2;
+    }
+
+    Context ctx(*spec);
+    auto sk_bytes = read_bytes(args.secret_key_path);
+    auto sk = fhe_toolkit::crypto::SecretKey::deserialize(ctx, sk_bytes);
+
+    fhe_toolkit::crypto::EvalKey out;
+    if (args.round == 1 && args.role == "lead") {
+        out = ctx.relin_round1_initial(sk);
+    } else if (args.round == 1 && args.role == "main") {
+        auto prev_bytes = read_bytes(args.peer_share_path);
+        auto prev = fhe_toolkit::crypto::EvalKey::deserialize(ctx, prev_bytes);
+        out = ctx.relin_round1_continue(sk, prev);
+    } else {  // round 2
+        auto c1_bytes = read_bytes(args.combined_r1_path);
+        auto c1 = fhe_toolkit::crypto::EvalKey::deserialize(ctx, c1_bytes);
+        auto jpk_bytes = read_bytes(args.joint_pk_path);
+        auto jpk = fhe_toolkit::crypto::PublicKey::deserialize(ctx, jpk_bytes);
+        out = ctx.relin_round2(sk, c1, jpk);
+    }
+
+    auto out_bytes = out.serialize();
+    const fs::path out_path(args.output_path);
+    if (out_path.has_parent_path()) fs::create_directories(out_path.parent_path());
+    write_bytes(out_path, out_bytes);
+
+    if (args.emit_json) {
+        json j;
+        j["status"]       = "ok";
+        j["keyType"]      = "relinearization";
+        j["round"]        = args.round;
+        if (args.round == 1) j["role"] = args.role;
+        j["outputPath"]   = out_path.string();
+        j["outputBytes"]  = out_bytes.size();
+        std::cout << j.dump(2) << "\n";
+    } else {
+        std::cout << "Relinearization key contribution (round " << args.round;
+        if (args.round == 1) std::cout << ", role " << args.role;
+        std::cout << ").\n";
+        std::cout << "  Output: " << out_path.string()
+                  << " (" << out_bytes.size() << " bytes)\n";
+        std::cout << "\nUpload this file to the platform's keysetup endpoint for the\n";
+        std::cout << "current sub-round, then wait for the peer's contribution and\n";
+        std::cout << "the combined output before advancing to the next sub-round.\n";
+    }
+    return 0;
+}
+
+// Deterministic combine for joint relinearization key. Both parties run
+// this independently on the same inputs and produce byte-identical output.
+// Platform verifies byte-equality across submissions.
+int run_crypto_relin_combine(const CryptoRelinCombineArgs& args) {
+    namespace fs = std::filesystem;
+
+    if (args.round != 1 && args.round != 2) {
+        std::cerr << "error: --round must be 1 or 2\n";
+        return 2;
+    }
+    if (args.share_a_path.empty() || args.share_b_path.empty() || args.output_path.empty()) {
+        std::cerr << "error: --share-a, --share-b, and --output are required\n";
+        return 2;
+    }
+    if (args.round == 1 && args.joint_pk_path.empty()) {
+        std::cerr << "error: --joint-pk is required for round 1 combine\n";
+        return 2;
+    }
+    if (args.round == 2 && args.combined_r1_path.empty()) {
+        std::cerr << "error: --combined-r1 is required for round 2 combine\n";
+        return 2;
+    }
+
+    auto spec = get_crypto_context_spec(args.context_spec);
+    if (!spec) {
+        std::cerr << "error: unknown context spec: " << args.context_spec << "\n";
+        return 2;
+    }
+
+    Context ctx(*spec);
+    auto a = fhe_toolkit::crypto::EvalKey::deserialize(ctx, read_bytes(args.share_a_path));
+    auto b = fhe_toolkit::crypto::EvalKey::deserialize(ctx, read_bytes(args.share_b_path));
+
+    fhe_toolkit::crypto::EvalKey out;
+    if (args.round == 1) {
+        auto jpk = fhe_toolkit::crypto::PublicKey::deserialize(ctx, read_bytes(args.joint_pk_path));
+        out = ctx.relin_combine_round1(a, b, jpk);
+    } else {
+        auto c1 = fhe_toolkit::crypto::EvalKey::deserialize(ctx, read_bytes(args.combined_r1_path));
+        out = ctx.relin_combine_round2(a, b, c1);
+    }
+
+    auto out_bytes = out.serialize();
+    const fs::path out_path(args.output_path);
+    if (out_path.has_parent_path()) fs::create_directories(out_path.parent_path());
+    write_bytes(out_path, out_bytes);
+
+    if (args.emit_json) {
+        json j;
+        j["status"]      = "ok";
+        j["keyType"]     = "relinearization";
+        j["round"]       = args.round;
+        j["combineKind"] = (args.round == 1) ? "intermediate" : "final";
+        j["outputPath"]  = out_path.string();
+        j["outputBytes"] = out_bytes.size();
+        std::cout << j.dump(2) << "\n";
+    } else {
+        std::cout << "Relinearization key " << (args.round == 1 ? "round-1 intermediate" : "final")
+                  << " combine.\n";
+        std::cout << "  Output: " << out_path.string()
+                  << " (" << out_bytes.size() << " bytes)\n";
+        std::cout << "\nUpload this (or its hash) to the platform for byte-equality\n";
+        std::cout << "verification against the peer's independently-computed combine.\n";
+    }
+    return 0;
+}
+
+// Per-party joint sum key contribution. Lead and main run different toolkit
+// primitives; the resulting share files have the same format.
+int run_crypto_sum_contribute(const CryptoSumContributeArgs& args) {
+    namespace fs = std::filesystem;
+
+    if (args.role != "lead" && args.role != "main") {
+        std::cerr << "error: --role must be 'lead' or 'main'\n";
+        return 2;
+    }
+    if (args.secret_key_path.empty() || args.output_path.empty()) {
+        std::cerr << "error: --secret-key and --output are required\n";
+        return 2;
+    }
+    if (args.role == "main" && (args.peer_share_path.empty() || args.joint_pk_path.empty())) {
+        std::cerr << "error: --peer-share and --joint-pk are required for role=main\n";
+        return 2;
+    }
+    if (args.role == "lead" && (!args.peer_share_path.empty() || !args.joint_pk_path.empty())) {
+        std::cerr << "error: --peer-share and --joint-pk must NOT be set for role=lead\n";
+        return 2;
+    }
+
+    auto spec = get_crypto_context_spec(args.context_spec);
+    if (!spec) {
+        std::cerr << "error: unknown context spec: " << args.context_spec << "\n";
+        return 2;
+    }
+
+    Context ctx(*spec);
+    auto sk = fhe_toolkit::crypto::SecretKey::deserialize(ctx, read_bytes(args.secret_key_path));
+
+    fhe_toolkit::crypto::SumKeyMap out;
+    if (args.role == "lead") {
+        out = ctx.sum_round1_initial(sk);
+    } else {
+        auto prev = fhe_toolkit::crypto::SumKeyMap::deserialize(ctx, read_bytes(args.peer_share_path));
+        auto jpk = fhe_toolkit::crypto::PublicKey::deserialize(ctx, read_bytes(args.joint_pk_path));
+        out = ctx.sum_round1_continue(sk, prev, jpk);
+    }
+
+    auto out_bytes = out.serialize();
+    const fs::path out_path(args.output_path);
+    if (out_path.has_parent_path()) fs::create_directories(out_path.parent_path());
+    write_bytes(out_path, out_bytes);
+
+    if (args.emit_json) {
+        json j;
+        j["status"]      = "ok";
+        j["keyType"]     = "sum";
+        j["role"]        = args.role;
+        j["outputPath"]  = out_path.string();
+        j["outputBytes"] = out_bytes.size();
+        std::cout << j.dump(2) << "\n";
+    } else {
+        std::cout << "Sum key contribution (role " << args.role << ").\n";
+        std::cout << "  Output: " << out_path.string()
+                  << " (" << out_bytes.size() << " bytes)\n";
+        std::cout << "\nUpload this to the platform for the peer to download.\n";
+    }
+    return 0;
+}
+
+// Deterministic combine for joint sum key. Both parties run this on the same
+// inputs and produce byte-identical output; platform verifies byte-equality.
+int run_crypto_sum_combine(const CryptoSumCombineArgs& args) {
+    namespace fs = std::filesystem;
+
+    if (args.share_a_path.empty() || args.share_b_path.empty() ||
+        args.joint_pk_path.empty() || args.output_path.empty()) {
+        std::cerr << "error: --share-a, --share-b, --joint-pk, and --output are required\n";
+        return 2;
+    }
+
+    auto spec = get_crypto_context_spec(args.context_spec);
+    if (!spec) {
+        std::cerr << "error: unknown context spec: " << args.context_spec << "\n";
+        return 2;
+    }
+
+    Context ctx(*spec);
+    auto a = fhe_toolkit::crypto::SumKeyMap::deserialize(ctx, read_bytes(args.share_a_path));
+    auto b = fhe_toolkit::crypto::SumKeyMap::deserialize(ctx, read_bytes(args.share_b_path));
+    auto jpk = fhe_toolkit::crypto::PublicKey::deserialize(ctx, read_bytes(args.joint_pk_path));
+
+    auto out = ctx.sum_combine(a, b, jpk);
+    auto out_bytes = out.serialize();
+    const fs::path out_path(args.output_path);
+    if (out_path.has_parent_path()) fs::create_directories(out_path.parent_path());
+    write_bytes(out_path, out_bytes);
+
+    if (args.emit_json) {
+        json j;
+        j["status"]      = "ok";
+        j["keyType"]     = "sum";
+        j["combineKind"] = "final";
+        j["outputPath"]  = out_path.string();
+        j["outputBytes"] = out_bytes.size();
+        std::cout << j.dump(2) << "\n";
+    } else {
+        std::cout << "Sum key final combine.\n";
+        std::cout << "  Output: " << out_path.string()
+                  << " (" << out_bytes.size() << " bytes)\n";
+        std::cout << "\nUpload this (or its hash) to the platform for byte-equality\n";
+        std::cout << "verification against the peer's independently-computed combine.\n";
+    }
+    return 0;
+}
+
+// Parse a "1,2,4,-1,-2" comma-separated integer list into a vector<int32_t>.
+// Whitespace around commas is tolerated. Empty entries are skipped. Throws on
+// any token that doesn't fully parse as an integer.
+std::vector<int32_t> parse_indices_csv(std::string_view csv) {
+    std::vector<int32_t> out;
+    std::string buf;
+    auto flush = [&]() {
+        if (buf.empty()) return;
+        std::size_t pos = 0;
+        int v = std::stoi(buf, &pos);
+        if (pos != buf.size()) throw std::runtime_error("bad index token: '" + buf + "'");
+        out.push_back(static_cast<int32_t>(v));
+        buf.clear();
+    };
+    for (char c : csv) {
+        if (c == ' ' || c == '\t') continue;
+        if (c == ',') flush();
+        else buf.push_back(c);
+    }
+    flush();
+    return out;
+}
+
+// Per-party joint rotation key contribution. Mirrors sum-contribute but
+// requires --indices specifying which rotation indices to generate keys for.
+int run_crypto_rotation_contribute(const CryptoRotationContributeArgs& args) {
+    namespace fs = std::filesystem;
+
+    if (args.role != "lead" && args.role != "main") {
+        std::cerr << "error: --role must be 'lead' or 'main'\n";
+        return 2;
+    }
+    if (args.secret_key_path.empty() || args.output_path.empty()) {
+        std::cerr << "error: --secret-key and --output are required\n";
+        return 2;
+    }
+    if (args.indices_csv.empty()) {
+        std::cerr << "error: --indices is required (e.g. --indices '1,2,4,-1,-2')\n";
+        return 2;
+    }
+    if (args.role == "main" && (args.peer_share_path.empty() || args.joint_pk_path.empty())) {
+        std::cerr << "error: --peer-share and --joint-pk are required for role=main\n";
+        return 2;
+    }
+    if (args.role == "lead" && (!args.peer_share_path.empty() || !args.joint_pk_path.empty())) {
+        std::cerr << "error: --peer-share and --joint-pk must NOT be set for role=lead\n";
+        return 2;
+    }
+
+    auto spec = get_crypto_context_spec(args.context_spec);
+    if (!spec) {
+        std::cerr << "error: unknown context spec: " << args.context_spec << "\n";
+        return 2;
+    }
+
+    std::vector<int32_t> indices;
+    try {
+        indices = parse_indices_csv(args.indices_csv);
+    } catch (const std::exception& e) {
+        std::cerr << "error: --indices parse error: " << e.what() << "\n";
+        return 2;
+    }
+    if (indices.empty()) {
+        std::cerr << "error: --indices parsed to empty list\n";
+        return 2;
+    }
+
+    Context ctx(*spec);
+    auto sk = fhe_toolkit::crypto::SecretKey::deserialize(ctx, read_bytes(args.secret_key_path));
+
+    fhe_toolkit::crypto::RotationKeyMap out;
+    if (args.role == "lead") {
+        out = ctx.rotation_round1_initial(sk, indices);
+    } else {
+        auto prev = fhe_toolkit::crypto::RotationKeyMap::deserialize(ctx, read_bytes(args.peer_share_path));
+        auto jpk = fhe_toolkit::crypto::PublicKey::deserialize(ctx, read_bytes(args.joint_pk_path));
+        out = ctx.rotation_round1_continue(sk, prev, indices, jpk);
+    }
+
+    auto out_bytes = out.serialize();
+    const fs::path out_path(args.output_path);
+    if (out_path.has_parent_path()) fs::create_directories(out_path.parent_path());
+    write_bytes(out_path, out_bytes);
+
+    if (args.emit_json) {
+        json j;
+        j["status"]      = "ok";
+        j["keyType"]     = "rotation";
+        j["role"]        = args.role;
+        j["indexCount"]  = indices.size();
+        j["outputPath"]  = out_path.string();
+        j["outputBytes"] = out_bytes.size();
+        std::cout << j.dump(2) << "\n";
+    } else {
+        std::cout << "Rotation key contribution (role " << args.role << ", "
+                  << indices.size() << " indices).\n";
+        std::cout << "  Output: " << out_path.string()
+                  << " (" << out_bytes.size() << " bytes)\n";
+        std::cout << "\nUpload this to the platform for the peer to download.\n";
+    }
+    return 0;
+}
+
+// Deterministic combine for joint rotation key. Both parties run this on the
+// same inputs and produce byte-identical output.
+int run_crypto_rotation_combine(const CryptoRotationCombineArgs& args) {
+    namespace fs = std::filesystem;
+
+    if (args.share_a_path.empty() || args.share_b_path.empty() ||
+        args.joint_pk_path.empty() || args.output_path.empty()) {
+        std::cerr << "error: --share-a, --share-b, --joint-pk, and --output are required\n";
+        return 2;
+    }
+
+    auto spec = get_crypto_context_spec(args.context_spec);
+    if (!spec) {
+        std::cerr << "error: unknown context spec: " << args.context_spec << "\n";
+        return 2;
+    }
+
+    Context ctx(*spec);
+    auto a = fhe_toolkit::crypto::RotationKeyMap::deserialize(ctx, read_bytes(args.share_a_path));
+    auto b = fhe_toolkit::crypto::RotationKeyMap::deserialize(ctx, read_bytes(args.share_b_path));
+    auto jpk = fhe_toolkit::crypto::PublicKey::deserialize(ctx, read_bytes(args.joint_pk_path));
+
+    auto out = ctx.rotation_combine(a, b, jpk);
+    auto out_bytes = out.serialize();
+    const fs::path out_path(args.output_path);
+    if (out_path.has_parent_path()) fs::create_directories(out_path.parent_path());
+    write_bytes(out_path, out_bytes);
+
+    if (args.emit_json) {
+        json j;
+        j["status"]      = "ok";
+        j["keyType"]     = "rotation";
+        j["combineKind"] = "final";
+        j["outputPath"]  = out_path.string();
+        j["outputBytes"] = out_bytes.size();
+        std::cout << j.dump(2) << "\n";
+    } else {
+        std::cout << "Rotation key final combine.\n";
+        std::cout << "  Output: " << out_path.string()
+                  << " (" << out_bytes.size() << " bytes)\n";
+        std::cout << "\nUpload this (or its hash) to the platform for byte-equality\n";
+        std::cout << "verification against the peer's independently-computed combine.\n";
+    }
+    return 0;
+}
+
+int run_crypto_partial_decrypt(const CryptoPartialDecryptArgs& args) {
+    if (args.input_path.empty() || args.secret_key_path.empty() || args.output_path.empty()) {
+        std::cerr << "error: --input, --secret-key, and --output are all required\n";
+        return 2;
+    }
+
+    auto spec = get_crypto_context_spec(args.context_spec);
+    if (!spec) {
+        std::cerr << "error: unknown context spec: " << args.context_spec << "\n";
+        return 2;
+    }
+
+    auto ct_bytes = read_bytes(args.input_path);
+    auto sk_bytes = read_bytes(args.secret_key_path);
+
+    Context ctx(*spec);
+    auto sk = fhe_toolkit::crypto::SecretKey::deserialize(ctx, sk_bytes);
+
+    // A large-dataset itemized result is many ciphertexts in one file: partially decrypt each,
+    // into one partial file (psi/itemized_result). Everything else is one ciphertext.
+    std::vector<std::byte> partial_bytes;
+    const auto kind = fhe_toolkit::psi::itemized_kind(ct_bytes);
+    if (kind != fhe_toolkit::psi::ItemizedKind::none) {
+        try {
+            partial_bytes = fhe_toolkit::psi::partial_decrypt_itemized(ctx, sk, ct_bytes, args.lead);
+        } catch (const std::exception& e) {
+            std::cerr << "error: " << e.what() << "\n";
+            return 1;
+        }
+    } else {
+        auto ct = fhe_toolkit::crypto::Ciphertext::deserialize(ctx, ct_bytes);
+        auto partial = args.lead
+            ? ctx.partial_decrypt_lead(sk, ct)
+            : ctx.partial_decrypt_main(sk, ct);
+        partial_bytes = partial.serialize();
+    }
+
+    // Guard has_parent_path() as every other output path in this file does. A bare
+    // filename (--output partial.bin) has an EMPTY parent, and create_directories("")
+    // throws; nothing here catches it, so the process died via abort() with exit code
+    // 0xC0000409 and not one byte on stdout or stderr. The crypto had already succeeded -
+    // only the directory bookkeeping failed - but from outside it looked like threshold
+    // decryption was broken. The MCP always passes absolute paths, so this only ever hit
+    // people driving the CLI directly, which is exactly what the docs tell them to do.
+    const std::filesystem::path out_path(args.output_path);
+    if (out_path.has_parent_path()) std::filesystem::create_directories(out_path.parent_path());
+    write_bytes(args.output_path, partial_bytes);
+
+    if (args.emit_json) {
+        json out;
+        out["status"]           = "ok";
+        out["role"]             = args.lead ? "lead" : "main";
+        out["outputPath"]       = args.output_path;
+        out["partialBytes"]     = partial_bytes.size();
+        out["contextSpec"]      = spec->id;
+        std::cout << out.dump(2) << "\n";
+    } else {
+        std::cout << "Produced partial decryption.\n";
+        std::cout << "  Role:           " << (args.lead ? "lead" : "main") << "\n";
+        std::cout << "  Input ct:       " << args.input_path << "\n";
+        std::cout << "  Secret key:     " << args.secret_key_path << "\n";
+        std::cout << "  Output:         " << args.output_path
+                  << " (" << partial_bytes.size() << " bytes)\n";
+        std::cout << "  Context:        " << spec->id << "\n";
+        std::cout << "\nThe output is a partial-decryption blob; on its own it reveals\n";
+        std::cout << "nothing about the plaintext. Combine it with every other party's\n";
+        std::cout << "partial to recover the plaintext.\n";
+    }
+    return 0;
+}
+
+// ---------------------------------------------------------------------------
+// Large-dataset itemized results (psi/itemized_result): many ciphertexts in one file. Partial
+// decryption and combining recognise them by their first line, so the connector's and the
+// scripts' steps (partial-decrypt, combine, then resolve) stay the same as for every itemized
+// function; `crypto resolve-rows` is the last step.
+// ---------------------------------------------------------------------------
+static int combine_itemized_partials(const CryptoCombineArgs& args, const Context& ctx,
+                                     const fhe_toolkit::crypto::CryptoContextSpec& spec) {
+    namespace psi = fhe_toolkit::psi;
+    if (args.out_file_path.empty()) {
+        std::cerr << "error: a large-dataset itemized result is written to a file: pass --out-file\n";
+        return 2;
+    }
+    std::vector<std::vector<std::byte>> files;
+    for (const auto& path : args.partial_paths) files.push_back(read_bytes(path));
+    psi::ItemizedMasks masks;
+    try {
+        masks = psi::combine_itemized(ctx, spec.plaintext_modulus, files);
+    } catch (const std::exception& e) {
+        std::cerr << "error: " << e.what() << "\n";
+        return 1;
+    }
+    // The masks are the answer in encoded form: written to the file, never printed.
+    const std::filesystem::path op(args.out_file_path);
+    if (op.has_parent_path()) std::filesystem::create_directories(op.parent_path());
+    write_text(op, psi::itemized_masks_json(masks));
+    if (args.emit_json) {
+        json out;
+        out["status"]           = "ok";
+        out["kind"]             = "psi-itemized";
+        out["partialsCombined"] = args.partial_paths.size();
+        out["contextSpec"]      = spec.id;
+        out["outputPath"]       = op.string();
+        std::cout << out.dump(2) << "\n";
+    } else {
+        std::cout << "ok: wrote the itemized result to " << op.string()
+                  << "; resolve it against your CSV with 'crypto resolve-rows'\n";
+    }
+    return 0;
+}
+
+int run_crypto_psi_resolve(const CryptoPsiResolveArgs& args) {
+    namespace psi = fhe_toolkit::psi;
+
+    // The definition says how the rows were read and hashed; it must be the signed one, as at encrypt.
+    json fn_def;
+    try {
+        std::ifstream fn_in(args.function_def_path);
+        if (!fn_in) {
+            std::cerr << "error: cannot open function-def file: " << args.function_def_path << "\n";
+            return 1;
+        }
+        fn_in >> fn_def;
+    } catch (const std::exception& e) {
+        std::cerr << "error: failed to parse function-def JSON: " << e.what() << "\n";
+        return 1;
+    }
+    if (!fhe_toolkit::registry::verify_function_definition_signature(
+            fn_def, fhe_toolkit::registry::registry_public_key())) {
+        std::cerr << "error: function-definition signature verification FAILED: the definition is unsigned "
+                     "or has been altered\n";
+        return 1;
+    }
+    json input_def;
+    std::size_t input_index = 0;
+    if (fn_def.contains("inputs") && fn_def["inputs"].is_array()) {
+        std::size_t idx = 0;
+        for (const auto& in : fn_def["inputs"]) {
+            if (in.value("name", std::string{}) == args.input_name) { input_def = in; input_index = idx; break; }
+            ++idx;
+        }
+    }
+    if (input_def.is_null()) {
+        std::cerr << "error: function-def has no input named '" << args.input_name << "'\n";
+        return 1;
+    }
+    if (input_def.value("schema", std::string{}) != "signature-table") {
+        std::cerr << "error: input '" << args.input_name << "' is not a large-dataset (signature-table) input\n";
+        return 2;
+    }
+    if (input_index > 1) {
+        std::cerr << "error: input '" << args.input_name << "' has no signature-table role\n";
+        return 2;
+    }
+    const json params = input_def.value("schemaParams", json::object());
+
+    psi::EncodeRequest req;
+    req.input       = args.input_csv_path;
+    const std::string sep = params.value("separator", std::string{});
+    req.separator   = sep.empty() ? '\0' : sep[0];
+    req.columns     = psi::parse_columns(args.columns.empty() ? params.value("columns", std::string{"all"}) : args.columns);
+    req.skip_header = params.value("skipHeader", false);
+    req.domain      = !args.domain_separator.empty() ? args.domain_separator
+                    : params.value("domainSeparator", std::string{"julenny-psi-v1"});
+    if (req.domain.empty()) req.domain = "julenny-psi-v1";
+    req.role        = input_index == 0 ? "A" : "B";
+    req.size_class  = args.size_class;
+    req.cells       = args.cells;
+    req.tables      = args.tables;
+    req.limbs       = args.limbs;
+    req.count_groups = args.count_groups;
+    req.shards      = args.shards;
+
+    psi::ItemizedRows rows;
+    try {
+        std::ifstream mf(args.masks_path);
+        if (!mf) {
+            std::cerr << "error: cannot open " << args.masks_path << "\n";
+            return 1;
+        }
+        std::stringstream text;
+        text << mf.rdbuf();
+        rows = psi::resolve_itemized_rows(req, psi::itemized_masks_from_json(text.str()));
+    } catch (const std::exception& e) {
+        std::cerr << "error: " << e.what() << "\n";
+        return 1;
+    }
+
+    const std::filesystem::path op(args.out_file_path);
+    if (op.has_parent_path()) std::filesystem::create_directories(op.parent_path());
+    std::string body;
+    if (!rows.header_line.empty()) body += rows.header_line + "\n";
+    for (const auto& r : rows.rows) body += r + "\n";
+    write_text(op, body);
+
+    if (args.emit_json) {
+        json out;
+        out["status"]      = "ok";
+        out["outputPath"]  = op.string();
+        out["matchedRows"] = rows.rows.size();
+        std::cout << out.dump(2) << "\n";
+    } else {
+        // Same sentences as the app; the file is written even with no matches (header line kept).
+        if (rows.rows.empty())
+            std::cout << "None of the rows of your data overlap with your partner's data. A file with no matching rows was saved in: ";
+        else if (rows.rows.size() == 1)
+            std::cout << "1 row of your data overlaps with your partner's data. It is saved in: ";
+        else
+            std::cout << rows.rows.size() << " rows of your data overlap with your partner's data. They are saved in: ";
+        std::cout << op.string() << "\n";
+    }
+    return 0;
+}
+
+int run_crypto_dataset_size(const CryptoDatasetSizeArgs& args) {
+    namespace psi = fhe_toolkit::psi;
+
+    // How the rows are read comes from the signed definition, exactly as at encrypt.
+    json fn_def;
+    try {
+        std::ifstream fn_in(args.function_def_path);
+        if (!fn_in) {
+            std::cerr << "error: cannot open function-def file: " << args.function_def_path << "\n";
+            return 1;
+        }
+        fn_in >> fn_def;
+    } catch (const std::exception& e) {
+        std::cerr << "error: failed to parse function-def JSON: " << e.what() << "\n";
+        return 1;
+    }
+    if (!fhe_toolkit::registry::verify_function_definition_signature(
+            fn_def, fhe_toolkit::registry::registry_public_key())) {
+        std::cerr << "error: function-definition signature verification FAILED: the definition is unsigned "
+                     "or has been altered\n";
+        return 1;
+    }
+    json input_def;
+    if (fn_def.contains("inputs") && fn_def["inputs"].is_array()) {
+        for (const auto& in : fn_def["inputs"]) {
+            if (in.value("name", std::string{}) == args.input_name) { input_def = in; break; }
+        }
+    }
+    if (input_def.is_null()) {
+        std::cerr << "error: function-def has no input named '" << args.input_name << "'\n";
+        return 1;
+    }
+    if (input_def.value("schema", std::string{}) != "signature-table") {
+        std::cerr << "error: input '" << args.input_name << "' does not take a dataset size\n";
+        return 2;
+    }
+    const json params = input_def.value("schemaParams", json::object());
+    const std::string sep = params.value("separator", std::string{});
+    std::string domain = params.value("domainSeparator", std::string{"julenny-psi-v1"});
+    if (domain.empty()) domain = "julenny-psi-v1";
+
+    psi::RecordCount count;
+    try {
+        count = psi::count_records(args.input_path, sep.empty() ? '\0' : sep[0],
+                                   psi::parse_columns(args.columns.empty()
+                                                          ? params.value("columns", std::string{"all"})
+                                                          : args.columns),
+                                   params.value("skipHeader", false), domain);
+    } catch (const psi::EncodeError& e) {
+        std::cerr << "error: " << e.what() << "\n";
+        return 1;
+    }
+    if (count.distinct_records == 0) {
+        std::cerr << "error: This file has no records.\n";
+        return 1;
+    }
+
+    // Only the size leaves this command: a caller that must stay blind passes it on as it is.
+    const auto* size = psi::smallest_size_class_for(count.distinct_records);
+    if (!size) {
+        const auto all = psi::size_classes();
+        const std::string largest(all.back().id);
+        if (args.emit_json) {
+            json out;
+            out["status"]  = "too-large";
+            out["message"] = "This file has more records than the largest dataset size (up to " + largest
+                             + " records) allows.";
+            std::cout << out.dump(2) << "\n";
+        }
+        std::cerr << "error: This file has more records than the largest dataset size (up to " << largest
+                  << " records) allows.\n";
+        return 3;
+    }
+    if (args.emit_json) {
+        json out;
+        out["status"]      = "ok";
+        out["datasetSize"] = std::string(size->id);
+        std::cout << out.dump(2) << "\n";
+    } else {
+        std::cout << size->id << "\n";
+    }
+    return 0;
+}
+
+int run_crypto_combine(const CryptoCombineArgs& args) {
+    if (args.partial_paths.size() < 2) {
+        std::cerr << "error: at least 2 partial files required (got " << args.partial_paths.size() << ")\n";
+        return 2;
+    }
+
+    auto spec = get_crypto_context_spec(args.context_spec);
+    if (!spec) {
+        std::cerr << "error: unknown context spec: " << args.context_spec << "\n";
+        return 2;
+    }
+
+    Context ctx(*spec);
+
+    if (fhe_toolkit::psi::itemized_kind(read_bytes(args.partial_paths.front()))
+            == fhe_toolkit::psi::ItemizedKind::partial) {
+        return combine_itemized_partials(args, ctx, *spec);
+    }
+
+    // Read every partial as a Ciphertext (partial decryptions are
+    // Ciphertext-shaped blobs in the underlying scheme). We keep the
+    // deserialised objects alive for the entire combine call and pass
+    // raw pointers to combine_partials.
+    std::vector<fhe_toolkit::crypto::Ciphertext> partials;
+    partials.reserve(args.partial_paths.size());
+    for (const auto& path : args.partial_paths) {
+        auto bytes = read_bytes(path);
+        partials.push_back(fhe_toolkit::crypto::Ciphertext::deserialize(ctx, bytes));
+    }
+    std::vector<const fhe_toolkit::crypto::Ciphertext*> ptrs;
+    ptrs.reserve(partials.size());
+    for (const auto& p : partials) ptrs.push_back(&p);
+
+    auto pt = ctx.combine_partials(ptrs);
+
+    // Real-valued output (weight-vector style results, e.g. federated-average
+    // global weights). Slot values are fractional by design; integer rounding
+    // would destroy them, so emit raw doubles and skip the indicator-style
+    // uniform/non-zero analysis entirely.
+    if (args.real_output) {
+        if (spec->scheme != "CKKS") {
+            std::cerr << "error: --real requires a CKKS context spec; got '"
+                      << spec->id << "' (" << spec->scheme << ")\n";
+            return 2;
+        }
+        auto reals = pt.real_values();
+        const auto n = std::min<std::size_t>(reals.size(),
+                                              static_cast<std::size_t>(args.show_slots));
+        if (!args.out_file_path.empty()) {
+            // Blind-by-design: write the plaintext result to a local file; stdout
+            // returns references only (no values), so an agent never sees the
+            // decrypted result. Viewing the file is the user's local choice.
+            // Separate signal from CKKS noise. Noise sits ~1e-14 while any real value is
+            // O(1), so a threshold relative to the largest magnitude splits them with an
+            // enormous margin. Without this a one-value result arrived as 8,192 raw
+            // doubles and was unreadable.
+            double max_abs = 0.0;
+            for (double v : reals) max_abs = std::max(max_abs, std::abs(v));
+            const double threshold = std::max(1e-9, max_abs * 1e-6);
+
+            // ordered_json, not json: plain nlohmann::json is map-backed and sorts keys as
+            // STRINGS, so slots come out 0, 1, 10, 11, ... 15, 2, 3 - which invites a reader
+            // to line the wrong value up against the wrong slot. The loop below inserts in
+            // ascending slot order, so preserving insertion order is all that is needed.
+            nlohmann::ordered_json significant = nlohmann::ordered_json::object();
+            std::size_t significant_count = 0;
+            double sum_significant = 0.0;
+            for (std::size_t i = 0; i < reals.size(); ++i) {
+                if (std::abs(reals[i]) > threshold) {
+                    if (significant_count < 4096) {
+                        significant[std::to_string(i)] = reals[i];
+                    }
+                    ++significant_count;
+                    sum_significant += reals[i];
+                }
+            }
+
+            // How many decimals are meaningful here. noiseThreshold is maxAbsValue * 1e-6,
+            // so anything past this is noise. Computed before the summary figures below so
+            // they are shown at the same precision as the values themselves.
+            int decimals = 6;
+            if (threshold > 0.0) {
+                decimals = static_cast<int>(std::ceil(-std::log10(threshold)));
+                if (decimals < 0)  decimals = 0;
+                if (decimals > 12) decimals = 12;
+            }
+            const double displayScale = std::pow(10.0, decimals);
+            auto roundToDisplay = [displayScale](double v) {
+                return std::round(v * displayScale) / displayScale;
+            };
+            // The threshold is a magnitude, not a measurement: rounding it to `decimals`
+            // places would print 0.000001 every time and hide the scale it exists to show.
+            // Three significant figures keeps it as 1.19e-06.
+            auto roundSignificant = [](double v, int digits) {
+                if (v == 0.0) return 0.0;
+                const double m = std::pow(10.0, digits - 1 - static_cast<int>(std::floor(std::log10(std::abs(v)))));
+                return std::round(v * m) / m;
+            };
+
+            nlohmann::ordered_json result;
+            result["valueType"]         = "real";
+            result["totalSlots"]        = reals.size();
+            result["contextSpec"]       = spec->id;
+            result["significantSlots"]  = significant_count;
+            result["significantValues"] = significant;
+            result["sumOfSignificant"]  = roundToDisplay(sum_significant);
+            result["maxAbsValue"]       = roundToDisplay(max_abs);
+            result["noiseThreshold"]    = roundSignificant(threshold, 3);
+            // CKKS is approximate, so a count of three arrives as 2.999999999999586.
+            // Round when every meaningful value sits within a whisker of a whole
+            // number, which is the case for counts and match vectors and is not the
+            // case for real results like averaged model weights. Never round those.
+            bool all_whole = significant_count > 0;
+            nlohmann::ordered_json rounded = nlohmann::ordered_json::object();
+            for (auto& [slot, val] : significant.items()) {
+                const double v = val.get<double>();
+                const double nearest = std::round(v);
+                if (std::abs(v - nearest) > std::max(1e-6, std::abs(v) * 1e-9)) {
+                    all_whole = false;
+                    break;
+                }
+                rounded[slot] = static_cast<std::int64_t>(nearest);
+            }
+            // significantValues carries the READABLE figures, not the raw ones. CKKS is
+            // approximate, so a weight of 0.77 decrypts as 0.770000000000093 and a count of
+            // three as 2.999999999999586. Printing that to a person is noise dressed as
+            // precision, and the scripts and the desktop app all display this field directly.
+            //
+            // Whole-number results (counts, match vectors) round to integers. Real results
+            // round to the precision this file already declares meaningful: noiseThreshold is
+            // maxAbsValue * 1e-6, so anything past that many decimals is noise either way.
+            //
+            // The exact figures are still available, but only with --full-vector, next to
+            // allValues: they matter for diagnosing an engine whose arithmetic is subtly
+            // wrong, which is a developer's need rather than a reader's.
+            if (all_whole) {
+                result["significantValues"] = rounded;
+                // The common case is a single answer. Put it where a person will
+                // find it instead of making them read a map with one entry.
+                if (significant_count == 1) {
+                    result["result"] = rounded.begin().value();
+                }
+            } else {
+                nlohmann::ordered_json readable = nlohmann::ordered_json::object();
+                for (auto& [slot, val] : significant.items()) {
+                    readable[slot] = roundToDisplay(val.get<double>());
+                }
+                result["significantValues"] = readable;
+            }
+            if (args.full_vector) {
+                result["significantValuesExact"] = significant;
+            }
+
+            result["note"] = std::string(
+                "significantValues holds the slots above the noise threshold, keyed by "
+                "slot index. CKKS leaves every other slot at a tiny non-zero value "
+                "(~1e-14) which carries no meaning.")
+                + (all_whole ? " Values are whole numbers."
+                             : " Values are rounded to the precision noiseThreshold supports.")
+                + (args.full_vector ? " allValues has every slot and significantValuesExact"
+                                          " has the unrounded figures."
+                                    : " Pass --full-vector to also write every slot and the"
+                                      " unrounded figures.");
+            if (args.full_vector) {
+                result["allValues"] = std::vector<double>(reals.begin(), reals.end());
+            }
+            std::filesystem::path op(args.out_file_path);
+            if (op.has_parent_path()) std::filesystem::create_directories(op.parent_path());
+            std::ofstream of(op, std::ios::trunc);
+            if (!of) { std::cerr << "error: cannot open --out-file: " << args.out_file_path << "\n"; return 1; }
+            of << result.dump(2) << "\n";
+            if (!of) { std::cerr << "error: write failed: " << args.out_file_path << "\n"; return 1; }
+            if (args.emit_json) {
+                json ref;
+                ref["status"]           = "ok";
+                ref["partialsCombined"] = args.partial_paths.size();
+                ref["totalSlots"]       = reals.size();
+                ref["significantSlots"] = significant_count;
+                ref["valueType"]        = "real";
+                ref["contextSpec"]      = spec->id;
+                ref["outputPath"]       = op.string();
+                std::cout << ref.dump(2) << "\n";
+            } else {
+                std::cout << "ok: wrote real-valued plaintext result ("
+                          << significant_count << " meaningful of " << reals.size()
+                          << " slots) to " << op.string() << "\n";
+            }
+            return 0;
+        }
+        if (args.emit_json) {
+            json out;
+            out["status"]           = "ok";
+            out["partialsCombined"] = args.partial_paths.size();
+            out["totalSlots"]       = reals.size();
+            out["valueType"]        = "real";
+            out["contextSpec"]      = spec->id;
+            out["firstSlots"]       = std::vector<double>(reals.begin(), reals.begin() + n);
+            std::cout << out.dump(2) << "\n";
+        } else {
+            std::cout << "Combined " << args.partial_paths.size()
+                      << " partial decryptions into a real-valued plaintext.\n";
+            std::cout << "  Context:        " << spec->id << "\n";
+            std::cout << "  Total slots:    " << reals.size() << "\n";
+            std::cout << "  First " << n << " slots:\n";
+            for (std::size_t i = 0; i < n; ++i) {
+                char buf[32];
+                std::snprintf(buf, sizeof(buf), "%.6f", reals[i]);
+                std::cout << "    [" << i << "] = " << buf << "\n";
+            }
+        }
+        return 0;
+    }
+
+    auto values = values_as_int64(pt, *spec);
+
+    // A dataset size names its count groups (psi/size_class); --count-groups is the expert path.
+    std::uint64_t count_groups = args.count_groups;
+    if (!args.size_class.empty()) {
+        const auto* size = fhe_toolkit::psi::size_class(args.size_class);
+        if (!size) {
+            std::cerr << "error: unknown dataset size '" << args.size_class << "'\n";
+            return 2;
+        }
+        count_groups = size->count_groups;
+    }
+
+    // Large-dataset count (psi-signature-match-count): the total of the G partial sums, and only
+    // the total. The reading, and the shapes it refuses, are psi/count in core, shared with the app.
+    if (count_groups > 0) {
+        std::int64_t total = 0;
+        try {
+            total = fhe_toolkit::psi::count_answer(values, count_groups);
+        } catch (const std::invalid_argument& e) {
+            std::cerr << "error: " << e.what() << "\n";
+            return 1;
+        }
+        if (!args.out_file_path.empty()) {
+            json result;
+            result["answer"] = total;
+            std::filesystem::path op(args.out_file_path);
+            if (op.has_parent_path()) std::filesystem::create_directories(op.parent_path());
+            std::ofstream of(op, std::ios::trunc);
+            if (!of) { std::cerr << "error: cannot open --out-file: " << args.out_file_path << "\n"; return 1; }
+            of << result.dump(2) << "\n";
+            if (!of) { std::cerr << "error: write failed: " << args.out_file_path << "\n"; return 1; }
+            if (args.emit_json) {
+                json ref;
+                ref["status"]           = "ok";
+                ref["partialsCombined"] = args.partial_paths.size();
+                ref["contextSpec"]      = spec->id;
+                ref["outputPath"]       = op.string();
+                std::cout << ref.dump(2) << "\n";
+            } else {
+                std::cout << "ok: wrote the count to " << op.string() << "\n";
+            }
+        } else if (args.emit_json) {
+            json out;
+            out["status"]           = "ok";
+            out["partialsCombined"] = args.partial_paths.size();
+            out["contextSpec"]      = spec->id;
+            out["answer"]           = total;
+            std::cout << out.dump(2) << "\n";
+        } else {
+            std::cout << "Combined " << args.partial_paths.size() << " partial decryptions.\n";
+            std::cout << "\nAnswer: " << total << "\n";
+        }
+        return 0;
+    }
+
+    std::size_t non_zero = 0;
+    std::int64_t total_sum = 0;
+    std::int64_t max_value = 0;
+    for (auto v : values) {
+        if (v != 0) ++non_zero;
+        total_sum += v;
+        if (v > max_value) max_value = v;
+    }
+
+    // Uniform detection: every non-zero slot holds the same value (count-
+    // aggregation, replicated by EvalSum; or itemized indicator with all
+    // matches as 1). Collapse the per-slot dump into a single "Answer"
+    // line so we don't print 16384 identical entries.
+    //
+    // All-zeros is trivially uniform with value 0. This is the count-style
+    // result for "no overlap", and we still want to report it as
+    // Answer: 0 rather than silently dropping the answer field.
+    bool uniform = true;
+    std::int64_t uniform_value = 0;
+    bool seeded = false;
+    for (auto v : values) {
+        if (v == 0) continue;
+        if (!seeded) { uniform_value = v; seeded = true; }
+        else if (v != uniform_value) { uniform = false; break; }
+    }
+    // If !seeded, every slot was 0; uniform stays true, uniform_value stays 0.
+
+    if (!args.out_file_path.empty()) {
+        // Blind-by-design: write the plaintext result to a local file; stdout
+        // returns references only (no values, not even non-zero counts), so an
+        // agent never sees the decrypted answer. Viewing the file is the user's
+        // local choice.
+        // The file holds what the scripts show on screen and nothing more.
+        //  - A COUNT is a sum broadcast to every slot, so every slot holds the same
+        //    value. Write {"answer": N} alone, not every identical slot: listing all
+        //    8192 of them would take 130 KB to say one number.
+        //  - An all-zero result is {"answer": 0}.
+        //  - Anything else is an ITEMIZED result: write only the positions that lit up,
+        //    under nonZeroValues, which resolve_matches and resolve_rules read. No
+        //    "answer" here: two matches valued 1 written as "answer": 1 would read
+        //    as a count of one.
+        const bool broadcast = uniform && non_zero == values.size();
+        json result;
+        if (!seeded || broadcast) {
+            result["answer"] = uniform_value;
+        } else {
+            json nz = json::object();
+            for (std::size_t i = 0; i < values.size(); ++i)
+                if (values[i] != 0) nz[std::to_string(i)] = values[i];
+            result["nonZeroValues"] = nz;
+        }
+        std::filesystem::path op(args.out_file_path);
+        if (op.has_parent_path()) std::filesystem::create_directories(op.parent_path());
+        std::ofstream of(op, std::ios::trunc);
+        if (!of) { std::cerr << "error: cannot open --out-file: " << args.out_file_path << "\n"; return 1; }
+        of << result.dump(2) << "\n";
+        if (!of) { std::cerr << "error: write failed: " << args.out_file_path << "\n"; return 1; }
+        if (args.emit_json) {
+            json ref;
+            ref["status"]           = "ok";
+            ref["partialsCombined"] = args.partial_paths.size();
+            ref["totalSlots"]       = values.size();
+            ref["contextSpec"]      = spec->id;
+            ref["outputPath"]       = op.string();
+            std::cout << ref.dump(2) << "\n";
+        } else {
+            std::cout << "ok: wrote plaintext result (" << values.size() << " slots) to "
+                      << op.string() << "\n";
+        }
+        return 0;
+    }
+
+    if (args.emit_json) {
+        json out;
+        out["status"]           = "ok";
+        out["partialsCombined"] = args.partial_paths.size();
+        out["totalSlots"]       = values.size();
+        out["nonZeroSlots"]     = non_zero;
+        out["sumOfSlots"]       = total_sum;
+        out["maxSlotValue"]     = max_value;
+        out["contextSpec"]      = spec->id;
+
+        // .answer is set whenever the non-zero slots all hold the same
+        // value (count-style functions, or itemized indicator vectors
+        // where every match is 1). Independent of --non-zero.
+        if (uniform) {
+            out["answer"] = uniform_value;
+        }
+
+        // --non-zero ALWAYS populates .nonZeroValues when set, even if
+        // .answer is also set. Itemized functions need the slot
+        // positions for post-decrypt resolve-indicator; emitting both
+        // .answer and .nonZeroValues for uniform outputs costs nothing
+        // and lets callers branch on the function-def output shape
+        // rather than on which fields happen to be present.
+        if (args.non_zero_only) {
+            json sample = json::object();
+            for (std::size_t i = 0; i < values.size(); ++i) {
+                if (values[i] != 0) sample[std::to_string(i)] = values[i];
+            }
+            out["nonZeroValues"] = sample;
+        } else {
+            const auto n = std::min<std::size_t>(values.size(),
+                                                  static_cast<std::size_t>(args.show_slots));
+            out["firstSlots"] = std::vector<std::int64_t>(values.begin(), values.begin() + n);
+        }
+        std::cout << out.dump(2) << "\n";
+    } else {
+        std::cout << "Combined " << args.partial_paths.size() << " partial decryptions into plaintext.\n";
+        std::cout << "  Context:        " << spec->id << "\n";
+        std::cout << "  Total slots:    " << values.size() << "\n";
+        std::cout << "  Non-zero slots: " << non_zero << "\n";
+        std::cout << "  Sum of slots:   " << total_sum << "\n";
+        std::cout << "  Max slot value: " << max_value << "\n";
+        if (uniform) {
+            std::cout << "\nAnswer: " << uniform_value
+                      << "  (uniform across " << non_zero << " non-zero slot"
+                      << (non_zero == 1 ? "" : "s") << ")\n";
+        } else if (args.non_zero_only) {
+            std::cout << "  Non-zero slot positions and values:\n";
+            for (std::size_t i = 0; i < values.size(); ++i) {
+                if (values[i] != 0) {
+                    std::cout << "    [" << i << "] = " << values[i] << "\n";
+                }
+            }
+        } else {
+            const auto n = std::min<std::size_t>(values.size(),
+                                                  static_cast<std::size_t>(args.show_slots));
+            std::cout << "  First " << n << " slots:\n    [";
+            for (std::size_t i = 0; i < n; ++i) {
+                if (i > 0) std::cout << ", ";
+                std::cout << values[i];
+            }
+            std::cout << "]\n";
+        }
+    }
+    return 0;
+}
+
+// Diagnostic: dump a ciphertext file's metadata + embedded context params.
+int run_crypto_inspect(const CryptoInspectArgs& args) {
+    const std::string spec_id =
+        args.context_spec.empty() ? std::string{"ckks-default-v1"} : args.context_spec;
+    auto spec = get_crypto_context_spec(spec_id);
+    if (!spec) {
+        std::cerr << "error: unknown context spec: " << spec_id << "\n";
+        return 2;
+    }
+
+    auto ct_bytes = read_bytes(args.input_path);
+    Context ctx(*spec);
+    auto ct = fhe_toolkit::crypto::Ciphertext::deserialize(ctx, ct_bytes);
+
+    if (args.emit_json) {
+        json out;
+        out["status"]      = "ok";
+        out["file"]        = args.input_path;
+        out["fileBytes"]   = ct_bytes.size();
+        out["contextSpec"] = spec->id;
+        out["describe"]    = ct.describe();  // non-secret ciphertext/context metadata
+        std::cout << out.dump(2) << "\n";
+    } else {
+        std::cout << "file:           " << args.input_path << "\n";
+        std::cout << "fileBytes:      " << ct_bytes.size() << "\n";
+        std::cout << ct.describe();
+    }
+    return 0;
+}
+
+// Map indicator-hash non-zero slot positions back to the records that
+// produced them. After a threshold-decrypt of an indicator-hash result, the
+// non-zero slots tell us "these hash buckets matched" but not "which records
+// landed in those buckets". This command re-hashes each line of the local
+// CSV the same way crypto encrypt did, and emits the lines whose hash falls
+// into the non-zero slot set.
+int run_crypto_resolve_indicator(const CryptoResolveIndicatorArgs& args) {
+    if (args.slots_csv.empty() || args.input_csv_path.empty() ||
+        args.function_def_path.empty() || args.input_name.empty()) {
+        std::cerr << "error: --slots, --input, --function-def, and --input-name are all required\n";
+        return 2;
+    }
+
+    auto spec = get_crypto_context_spec(args.context_spec);
+    if (!spec) {
+        std::cerr << "error: unknown context spec: " << args.context_spec << "\n";
+        return 2;
+    }
+    const auto slot_count = resolve_slot_count(args.context_spec);
+
+    // Parse --slots into a set for O(1) membership tests.
+    std::unordered_set<std::uint64_t> non_zero_set;
+    {
+        std::string buf;
+        bool parse_error = false;
+        auto flush = [&]() {
+            if (buf.empty()) return;
+            try {
+                std::size_t pos = 0;
+                unsigned long long v = std::stoull(buf, &pos);
+                if (pos != buf.size()) throw std::runtime_error("trailing chars");
+                non_zero_set.insert(v);
+            } catch (const std::exception&) {
+                std::cerr << "error: bad slot token: '" << buf << "'\n";
+                parse_error = true;
+            }
+            buf.clear();
+        };
+        for (char c : args.slots_csv) {
+            if (c == ' ' || c == '\t') continue;
+            if (c == ',') flush();
+            else buf.push_back(c);
+        }
+        flush();
+        if (parse_error) return 2;
+    }
+    if (non_zero_set.empty()) {
+        std::cerr << "error: --slots parsed to empty set\n";
+        return 2;
+    }
+
+    // Read function-def to get schema + schemaParams for the named input.
+    json fn_def;
+    try {
+        std::ifstream fn_in(args.function_def_path);
+        if (!fn_in) {
+            std::cerr << "error: cannot open function-def: " << args.function_def_path << "\n";
+            return 1;
+        }
+        fn_in >> fn_def;
+    } catch (const std::exception& e) {
+        std::cerr << "error: failed to parse function-def JSON: " << e.what() << "\n";
+        return 1;
+    }
+
+    json input_def;
+    if (fn_def.contains("inputs") && fn_def["inputs"].is_array()) {
+        for (const auto& in : fn_def["inputs"]) {
+            if (in.value("name", "") == args.input_name) { input_def = in; break; }
+        }
+    }
+    if (input_def.is_null()) {
+        std::cerr << "error: function-def has no input named '" << args.input_name << "'\n";
+        return 1;
+    }
+
+    const std::string schema_name = input_def.value("schema", std::string{});
+    if (schema_name != "indicator-hash") {
+        std::cerr << "error: resolve-indicator only supports indicator-hash schema; got '"
+                  << schema_name << "'\n";
+        return 2;
+    }
+    const json params = input_def.value("schemaParams", json::object());
+    const std::string sep_str = params.value("separator", std::string{});
+    const bool skip_header    = params.value("skipHeader", false);
+    // An explicit --columns wins over the function-def, because the party may have encrypted
+    // a subset. Each side chooses its own columns: the two CSVs can hold the same fields in
+    // different positions. What must agree between the sides is the ORDER of the chosen
+    // columns, since they are joined in the order given before hashing.
+    const std::string cols_spec = args.columns.empty()
+        ? params.value("columns", std::string{"all"})
+        : args.columns;
+
+    const char sep_char = sep_str.empty() ? '\0' : sep_str[0];
+    auto cols = parse_columns_spec(cols_spec);
+
+    // Walk the CSV, rehashing each line the same way crypto encrypt did,
+    // and collect the lines whose hash falls in non_zero_set.
+    std::ifstream in_file(args.input_csv_path);
+    if (!in_file) {
+        std::cerr << "error: cannot open input file: " << args.input_csv_path << "\n";
+        return 1;
+    }
+
+    std::vector<std::string> matches;
+    // Two DIFFERENT things make a slot hold more than one of your rows, and users
+    // cannot be expected to tell them apart from a count alone:
+    //
+    //   1. The same record listed twice in your file. compose_record trims every
+    //      field, so "Susan Mitchell ,2002-12-13" and "Susan Mitchell,2002-12-13"
+    //      compose identically. Both rows are the same person, both genuinely match,
+    //      and nothing is wrong. This is by far the common case.
+    //   2. A real hash collision: two GENUINELY DIFFERENT records landing in one slot.
+    //      Here one of them really is a false positive.
+    //
+    // We hold the composed value - the exact bytes that were hashed - so we can tell
+    // these apart exactly rather than leaving a caller to guess. Reporting only the
+    // raw count invites a wrong and alarming explanation.
+    std::unordered_map<std::uint64_t, std::vector<std::string>> matched_by_slot;
+    std::size_t lines_seen = 0, lines_skipped = 0;
+    bool header_consumed = false;
+    std::string line;
+    while (std::getline(in_file, line)) {
+        ++lines_seen;
+        auto trimmed = trim_inplace(line);
+        if (trimmed.empty() || trimmed[0] == '#') { ++lines_skipped; continue; }
+        if (skip_header && !header_consumed) { header_consumed = true; ++lines_skipped; continue; }
+        auto composed = compose_record(trimmed, sep_char, cols);
+        if (composed.empty()) { ++lines_skipped; continue; }
+        auto slot = fnv1a_64(composed) % static_cast<std::uint64_t>(slot_count);
+        if (non_zero_set.contains(slot)) {
+            matches.push_back(std::string(trimmed));
+            matched_by_slot[slot].push_back(composed);
+        }
+    }
+
+    // Classify every slot that matched more than one of our rows.
+    std::size_t duplicate_rows = 0;    // extra rows that are the SAME record
+    std::size_t colliding_slots = 0;   // slots holding genuinely different records
+    for (const auto& [slot, composed_list] : matched_by_slot) {
+        std::set<std::string> distinct(composed_list.begin(), composed_list.end());
+        duplicate_rows += composed_list.size() - distinct.size();
+        if (distinct.size() > 1) ++colliding_slots;
+    }
+    const std::size_t distinct_matches = matches.size() - duplicate_rows;
+
+    if (args.emit_json) {
+        json out;
+        out["status"]            = "ok";
+        out["matchCount"]          = matches.size();
+        out["distinctMatchCount"]  = distinct_matches;
+        out["duplicateRowCount"]   = duplicate_rows;
+        out["collidingSlotCount"]  = colliding_slots;
+        out["nonZeroSlotCount"]  = non_zero_set.size();
+        out["linesRead"]         = lines_seen;
+        out["linesSkipped"]      = lines_skipped;
+        out["matches"]           = matches;
+        std::cout << out.dump(2) << "\n";
+    } else {
+        std::cout << "Resolved indicator-hash slots against " << args.input_csv_path << ".\n";
+        std::cout << "  Non-zero slots:   " << non_zero_set.size() << "\n";
+        std::cout << "  Lines read:       " << lines_seen << "\n";
+        std::cout << "  Lines matched:    " << matches.size() << "\n";
+        if (duplicate_rows > 0) {
+            std::cout << "  Distinct records: " << distinct_matches << "\n";
+            std::cout << "    (" << duplicate_rows << " matched row(s) are the same record listed more\n";
+            std::cout << "     than once in your file - e.g. rows differing only by spacing. They\n";
+            std::cout << "     are genuine matches, not false positives.)\n";
+        }
+        if (colliding_slots > 0) {
+            std::cout << "  Hash collisions:  " << colliding_slots << " slot(s) hold genuinely different\n";
+            std::cout << "     records of yours; one record per affected slot is a false positive.\n";
+        }
+        std::cout << "  Matched records:\n";
+        for (const auto& m : matches) std::cout << "    " << m << "\n";
+        if (matches.empty()) {
+            std::cout << "    (none - the non-zero slots correspond to records not in this CSV,\n";
+            std::cout << "     which is expected for indicator-hash overlap: only the matching\n";
+            std::cout << "     party's records that ALSO appear in the other party's set will\n";
+            std::cout << "     surface here.)\n";
+        }
+    }
+    return 0;
+}
+
+// Map itemized cross-match slots back to rule rows.
+//
+// The itemized circuit puts rule row i in slot i, so this is a positional lookup,
+// not a hash resolve. resolve-indicator cannot answer it: that command re-hashes
+// local records to find which slot they landed in, which is correct for overlap
+// and the wrong question here.
+//
+// The parse mirrors the platform's parseCsvPairs exactly: strip trailing CR/LF,
+// skip empty lines, skip lines with no comma, trim spaces around each half. Row
+// numbering is defined by which lines survive that filter, so any divergence
+// makes the output name the wrong rules while looking perfectly plausible.
+int run_crypto_resolve_rules(const CryptoResolveRulesArgs& args) {
+    if (args.slots_csv.empty() || args.rule_pairs_path.empty() || args.output_path.empty()) {
+        std::cerr << "error: --slots, --rule-pairs and --output are all required\n";
+        return 2;
+    }
+
+    std::vector<std::size_t> slots;
+    {
+        std::string buf;
+        auto flush = [&]() {
+            if (buf.empty()) return true;
+            try {
+                std::size_t pos = 0;
+                long long v = std::stoll(buf, &pos);
+                if (pos != buf.size()) throw std::runtime_error("trailing chars");
+                if (v < 0) throw std::runtime_error("negative");
+                slots.push_back(static_cast<std::size_t>(v));
+            } catch (const std::exception&) {
+                std::cerr << "error: bad slot token: '" << buf << "'\n";
+                return false;
+            }
+            buf.clear();
+            return true;
+        };
+        for (char c : args.slots_csv) {
+            if (c == ' ' || c == '\t') continue;
+            if (c == ',') { if (!flush()) return 2; }
+            else buf.push_back(c);
+        }
+        if (!flush()) return 2;
+    }
+    if (slots.empty()) {
+        std::cerr << "error: --slots parsed to an empty set\n";
+        return 2;
+    }
+
+    std::ifstream rf(args.rule_pairs_path);
+    if (!rf) {
+        std::cerr << "error: cannot open --rule-pairs: " << args.rule_pairs_path << "\n";
+        return 2;
+    }
+    std::vector<std::string> rows;
+    std::string line;
+    while (std::getline(rf, line)) {
+        while (!line.empty() && (line.back() == '\r' || line.back() == '\n')) line.pop_back();
+        if (line.empty()) continue;
+        auto comma = line.find(',');
+        if (comma == std::string::npos) continue;
+        std::string left  = line.substr(0, comma);
+        std::string right = line.substr(comma + 1);
+        auto trim_spaces = [](std::string& v) {
+            while (!v.empty() && v.front() == ' ') v.erase(v.begin());
+            while (!v.empty() && v.back()  == ' ') v.pop_back();
+        };
+        trim_spaces(left);
+        trim_spaces(right);
+        rows.push_back(left + "," + right);
+    }
+
+    std::vector<std::string> matched;
+    std::vector<std::size_t> out_of_range;
+    for (auto slot : slots) {
+        if (slot < rows.size()) matched.push_back(rows[slot]);
+        else out_of_range.push_back(slot);
+    }
+
+    std::filesystem::path op(args.output_path);
+    if (op.has_parent_path()) std::filesystem::create_directories(op.parent_path());
+    std::ofstream of(op, std::ios::trunc);
+    if (!of) {
+        std::cerr << "error: cannot open --output: " << args.output_path << "\n";
+        return 1;
+    }
+    for (const auto& m : matched) of << m << "\n";
+    if (!of) {
+        std::cerr << "error: write failed: " << args.output_path << "\n";
+        return 1;
+    }
+    of.close();
+
+    if (args.emit_json) {
+        json out;
+        out["status"]     = "ok";
+        out["outputPath"] = args.output_path;
+        // A slot past the end of the rule list means the two sides are not using the
+        // same file. Flag that it happened; the answer itself stays in the file.
+        out["outOfRange"] = !out_of_range.empty();
+        std::cout << out.dump(2) << "\n";
+    } else {
+        std::cout << "Wrote " << matched.size() << " matched rule(s) to " << args.output_path << "\n";
+        for (const auto& m : matched) std::cout << "    " << m << "\n";
+        if (!out_of_range.empty()) {
+            std::cout << "  WARNING: " << out_of_range.size() << " slot(s) fall past the end of this\n";
+            std::cout << "  rule list (" << rows.size() << " rows). The two sides are not using the\n";
+            std::cout << "  same rule file, so this answer cannot be trusted.\n";
+        }
+    }
+    return 0;
+}
+
+// Derive the rotation index set from rule_pairs alone, using FNV1a-64 mod
+// slotCount on every name. Toolkit-side mirror of the platform's
+// derivation, which matches rule-based-cross-match's hash-based slot
+// assignment. Used by phase 4.5 as a defensive
+// cross-check vs pendingRotationKeySetup.indices.
+//
+// Normalization (must match the platform exactly; see contract):
+//   - strip leading/trailing ASCII whitespace from each row and each field
+//   - skip blank rows (after whitespace strip)
+//   - rule_pairs is bare CSV: split on the FIRST comma only
+//   - case-sensitive
+//   - trailing \r tolerated for \r\n line endings
+//   - empty left or right name after normalization: that half is skipped
+//     (the OTHER half of the row still contributes its hash)
+int run_crypto_derive_rotation_indices(const CryptoDeriveRotationIndicesArgs& args) {
+    if (args.rule_pairs_path.empty()) {
+        std::cerr << "error: --rule-pairs is required\n";
+        return 2;
+    }
+    if (args.context_spec.empty()) {
+        std::cerr << "error: --context-spec is required (used to look up slot count)\n";
+        return 2;
+    }
+    auto spec = get_crypto_context_spec(args.context_spec);
+    if (!spec) {
+        std::cerr << "error: unknown context spec: " << args.context_spec << "\n";
+        return 2;
+    }
+    const std::int64_t slot_count = resolve_slot_count(spec->id);
+
+    auto normalize = [](std::string s) -> std::string {
+        auto not_space = [](unsigned char c) { return !std::isspace(c); };
+        s.erase(s.begin(), std::find_if(s.begin(), s.end(), not_space));
+        s.erase(std::find_if(s.rbegin(), s.rend(), not_space).base(), s.end());
+        return s;
+    };
+
+    std::set<std::int32_t> indices;
+    std::size_t rows_seen = 0, rows_skipped_blank = 0, rows_no_comma = 0;
+    std::size_t names_hashed = 0, halves_skipped_blank = 0;
+
+    std::ifstream in(args.rule_pairs_path);
+    if (!in) {
+        std::cerr << "error: cannot open rule-pairs: " << args.rule_pairs_path << "\n";
+        return 1;
+    }
+    std::string line;
+    while (std::getline(in, line)) {
+        ++rows_seen;
+        if (!line.empty() && line.back() == '\r') line.pop_back();
+        auto row = normalize(line);
+        if (row.empty()) { ++rows_skipped_blank; continue; }
+        auto comma = row.find(',');
+        if (comma == std::string::npos) { ++rows_no_comma; continue; }
+        auto left  = normalize(row.substr(0, comma));
+        auto right = normalize(row.substr(comma + 1));
+        for (const auto& name : { left, right }) {
+            if (name.empty()) { ++halves_skipped_blank; continue; }
+            auto slot = static_cast<std::int32_t>(
+                fnv1a_64(name) % static_cast<std::uint64_t>(slot_count));
+            indices.insert(slot);
+            ++names_hashed;
+        }
+    }
+
+    // -1 shifts the accumulator one slot right, which is how the itemized variant
+    // gives each rule row its own slot. MUST match the platform's rotation-index
+    // derivation: if the two sets differ by even one
+    // index the keys are built for a circuit the platform is not running.
+    if (!indices.empty()) indices.insert(-1);
+
+    std::vector<std::int32_t> sorted_indices(indices.begin(), indices.end());
+
+    if (args.emit_json) {
+        json out;
+        out["status"]               = "ok";
+        out["indices"]              = sorted_indices;
+        out["indexCount"]           = sorted_indices.size();
+        out["slotCount"]            = slot_count;
+        out["contextSpec"]          = spec->id;
+        out["rulePairsRowsSeen"]    = rows_seen;
+        out["rulePairsRowsBlank"]   = rows_skipped_blank;
+        out["rulePairsRowsNoComma"] = rows_no_comma;
+        out["namesHashed"]          = names_hashed;
+        out["halvesSkippedBlank"]   = halves_skipped_blank;
+        std::cout << out.dump(2) << "\n";
+    } else {
+        std::cout << "Derived rotation index set: " << sorted_indices.size() << " unique indices.\n";
+        std::cout << "  Context spec:        " << spec->id << " (slotCount = " << slot_count << ")\n";
+        std::cout << "  Rule pairs rows:     " << rows_seen << " seen, "
+                  << rows_skipped_blank << " blank, " << rows_no_comma << " missing comma\n";
+        std::cout << "  Names hashed:        " << names_hashed
+                  << " (" << halves_skipped_blank << " row-halves were blank, skipped)\n";
+        std::cout << "  Hash collisions:     " << (names_hashed - sorted_indices.size())
+                  << " (names that hashed to a slot already in the set)\n";
+        std::cout << "  Indices:             ";
+        for (std::size_t i = 0; i < sorted_indices.size(); ++i) {
+            if (i > 0) std::cout << ",";
+            std::cout << sorted_indices[i];
+        }
+        std::cout << "\n";
+    }
+    return 0;
+}
+
+int encrypt_bundle(const std::string& input_path,
+                   const std::string& joint_public_key_path,
+                   const std::string& output_path,
+                   const std::string& context_spec_id,
+                   bool emit_json) {
+    namespace fs = std::filesystem;
+
+    // The input is a generic, cleartext bundle description produced upstream
+    // (e.g. by the MCP/scripts executing the function-def's encodingRecipe).
+    // The toolkit stays function-agnostic: it knows nothing about trees or any
+    // other business shape, only "encode these real vectors, write this header".
+    //   { "header": ["LINE", ...],
+    //     "vectors": [ [v0, v1, ...]  |  {"fill": x}, ... ] }
+    json desc;
+    {
+        std::ifstream in(input_path);
+        if (!in) { std::cerr << "error: cannot open bundle-input file: " << input_path << "\n"; return 1; }
+        try { in >> desc; }
+        catch (const std::exception& e) {
+            std::cerr << "error: invalid bundle-input JSON: " << e.what() << "\n"; return 1;
+        }
+    }
+    if (!desc.contains("vectors") || !desc["vectors"].is_array() || desc["vectors"].empty()) {
+        std::cerr << "error: bundle-input must contain a non-empty 'vectors' array\n"; return 2;
+    }
+
+    std::vector<std::string> header_lines;
+    if (desc.contains("header")) {
+        if (!desc["header"].is_array()) {
+            std::cerr << "error: bundle-input 'header' must be an array of strings\n"; return 2;
+        }
+        for (const auto& h : desc["header"]) {
+            if (!h.is_string()) { std::cerr << "error: bundle-input 'header' entries must be strings\n"; return 2; }
+            header_lines.push_back(h.get<std::string>());
+        }
+    }
+
+    const std::string ctx_id =
+        context_spec_id.empty() ? std::string{"ckks-tree-v1"} : context_spec_id;
+    auto spec = get_crypto_context_spec(ctx_id);
+    if (!spec) { std::cerr << "error: unknown context spec: " << ctx_id << "\n"; return 2; }
+    if (spec->scheme != "CKKS") {
+        std::cerr << "error: encrypted-bundle encoding requires a CKKS context; got '"
+                  << spec->id << "' (" << spec->scheme << ")\n"; return 2;
+    }
+    const std::int64_t slot_count = resolve_slot_count(spec->id);
+
+    auto pk_bytes = read_bytes(joint_public_key_path);
+    Context ctx(*spec);
+    auto pk = fhe_toolkit::crypto::PublicKey::deserialize(ctx, pk_bytes);
+
+    // Build each plaintext vector from its generic description and encrypt it.
+    //   [a, b, ...]   explicit values in the low slots (CKKS zero-pads the rest)
+    //   {"fill": x}   scalar x replicated across all slots
+    // Both are plain real-vector forms; no domain semantics here.
+    std::vector<fhe_toolkit::crypto::Ciphertext> cts;
+    cts.reserve(desc["vectors"].size());
+    std::size_t vi = 0;
+    for (const auto& v : desc["vectors"]) {
+        std::vector<double> vals;
+        if (v.is_array()) {
+            vals.reserve(v.size());
+            for (const auto& x : v) {
+                if (!x.is_number()) { std::cerr << "error: vectors[" << vi << "] has a non-numeric value\n"; return 2; }
+                vals.push_back(x.get<double>());
+            }
+        } else if (v.is_object() && v.contains("fill")) {
+            if (!v.at("fill").is_number()) { std::cerr << "error: vectors[" << vi << "].fill must be a number\n"; return 2; }
+            vals.assign(static_cast<std::size_t>(slot_count), v.at("fill").get<double>());
+        } else {
+            std::cerr << "error: vectors[" << vi << "] must be an array or {\"fill\": <number>}\n"; return 2;
+        }
+        if (vals.size() > static_cast<std::size_t>(slot_count)) {
+            std::cerr << "error: vectors[" << vi << "] has " << vals.size()
+                      << " values, exceeds slot count " << slot_count << "\n"; return 2;
+        }
+        cts.push_back(ctx.encrypt(pk, ctx.encode_ckks_packed(vals)));
+        ++vi;
+    }
+
+    // Serialize ALL vectors in ONE cereal archive (the bundle payload).
+    auto payload = ctx.serialize_ciphertext_vector(cts);
+
+    const fs::path out_path(output_path);
+    if (out_path.has_parent_path()) std::filesystem::create_directories(out_path.parent_path());
+    {
+        std::ofstream out(out_path, std::ios::binary | std::ios::trunc);
+        if (!out) { std::cerr << "error: cannot open output: " << output_path << "\n"; return 1; }
+        for (const auto& line : header_lines) { out << line << "\n"; }
+        out << "PAYLOAD\n";
+        out.write(reinterpret_cast<const char*>(payload.data()),
+                  static_cast<std::streamsize>(payload.size()));
+        if (!out) { std::cerr << "error: write failed: " << output_path << "\n"; return 1; }
+    }
+
+    if (emit_json) {
+        json o;
+        o["status"]          = "ok";
+        o["ciphertextCount"] = cts.size();
+        o["contextSpec"]     = spec->id;
+        o["outputPath"]      = out_path.string();
+        if (!header_lines.empty()) o["bundleFormat"] = header_lines.front();
+        std::cout << o.dump(2) << "\n";
+    } else {
+        std::cout << "ok: wrote encrypted bundle (" << cts.size() << " ciphertexts; context "
+                  << spec->id << ") to " << out_path.string() << "\n";
+    }
+    return 0;
+}
+
+}  // namespace
+
+void register_crypto(CLI::App& app,
+                     CryptoSelftestArgs& selftest_args,
+                     CryptoSigningKeygenArgs& signing_keygen_args,
+                     CryptoSignArgs& sign_args,
+                     CryptoVerifyArgs& verify_args,
+                     CryptoEncryptArgs& encrypt_args,
+                     CryptoPsiEstimateArgs& psi_estimate_args,
+                     CryptoDecryptArgs& decrypt_args,
+                     CryptoKeysetupContributeArgs& keysetup_contribute_args,
+                     CryptoRelinContributeArgs& relin_contribute_args,
+                     CryptoRelinCombineArgs& relin_combine_args,
+                     CryptoSumContributeArgs& sum_contribute_args,
+                     CryptoSumCombineArgs& sum_combine_args,
+                     CryptoRotationContributeArgs& rotation_contribute_args,
+                     CryptoRotationCombineArgs& rotation_combine_args,
+                     CryptoWrapEnvelopeArgs& wrap_envelope_args,
+                     CryptoWrapFinalKeysEnvelopeArgs& wrap_final_keys_envelope_args,
+                     CryptoPartialDecryptArgs& partial_args,
+                     CryptoCombineArgs& combine_args,
+                     CryptoResolveIndicatorArgs& resolve_indicator_args,
+                     CryptoResolveRulesArgs& resolve_rules_args,
+                     CryptoDeriveRotationIndicesArgs& derive_rotation_indices_args,
+                     CryptoInspectArgs& inspect_args,
+                     int* exit_code) {
+    auto* crypto = app.add_subcommand("crypto",
+        "Cryptographic operations and diagnostics");
+
+    auto* selftest = crypto->add_subcommand("self-test",
+        "Verify the OpenFHE install with an encrypt-decrypt round-trip");
+    selftest->add_option("--context-spec", selftest_args.context_spec,
+                         "Crypto context spec (default: bfv-default-v1)");
+    selftest->add_flag  ("--multi-party", selftest_args.multi_party,
+                         "Run a 2-party in-process scenario: joint keysetup (relin + rotation) + EvalMult + EvalAtIndex + threshold decrypt");
+    selftest->add_flag  ("--json", selftest_args.emit_json, "Emit JSON output");
+    selftest->callback([&selftest_args, exit_code]() {
+        *exit_code = run_crypto_selftest(selftest_args);
+    });
+
+    // Ed25519 signing keypair. One per company; secret stays local, public
+    // is registered with the platform via POST /api/companies/{id}/signing-public-key.
+    auto* signing_keygen = crypto->add_subcommand("signing-keygen",
+        "Generate an Ed25519 signing keypair (one-time per company; secret stays local)");
+    signing_keygen->add_option("--output-secret", signing_keygen_args.output_secret_path,
+                               "Where to write the 32-byte secret key (owner-only)")->required();
+    signing_keygen->add_option("--output-public", signing_keygen_args.output_public_path,
+                               "Where to write the 32-byte public key (to upload to the platform)")->required();
+    signing_keygen->add_flag  ("--json", signing_keygen_args.emit_json, "Emit JSON output");
+    signing_keygen->callback([&signing_keygen_args, exit_code]() {
+        *exit_code = run_crypto_signing_keygen(signing_keygen_args);
+    });
+
+    // Sign an arbitrary file with an Ed25519 secret key.
+    auto* sign = crypto->add_subcommand("sign",
+        "Sign a file's bytes with an Ed25519 secret key (produces a 64-byte detached signature)");
+    sign->add_option("--input", sign_args.input_path,
+                     "File whose bytes are signed")->required();
+    sign->add_option("--secret-key", sign_args.secret_key_path,
+                     "Ed25519 secret key file (32-byte seed)")->required();
+    sign->add_option("--output", sign_args.output_path,
+                     "Where to write the 64-byte signature")->required();
+    sign->add_flag  ("--json", sign_args.emit_json, "Emit JSON output");
+    sign->callback([&sign_args, exit_code]() {
+        *exit_code = run_crypto_sign(sign_args);
+    });
+
+    // Verify a detached signature.
+    auto* verify = crypto->add_subcommand("verify",
+        "Verify an Ed25519 signature against a public key (exit 0 = valid, 1 = invalid)");
+    verify->add_option("--input", verify_args.input_path,
+                       "File that was signed")->required();
+    verify->add_option("--public-key", verify_args.public_key_path,
+                       "Ed25519 public key file (32 bytes)")->required();
+    verify->add_option("--signature", verify_args.signature_path,
+                       "Signature file (64 bytes)")->required();
+    verify->add_flag  ("--json", verify_args.emit_json, "Emit JSON output");
+    verify->callback([&verify_args, exit_code]() {
+        *exit_code = run_crypto_verify(verify_args);
+    });
+
+    auto* encrypt = crypto->add_subcommand("encrypt",
+        "Encrypt a plaintext input file under a joint public key. Two modes: --function-def + --input-name (production; reads encoding rules from a signed function-definition file) OR --schema + per-schema flags (ad-hoc; specify encoding directly).");
+    encrypt->add_option("--input", encrypt_args.input_path,
+                        "Plaintext input file")->required();
+    encrypt->add_option("--joint-public-key", encrypt_args.joint_public_key_path,
+                        "Joint public key file (binary)")->required();
+    encrypt->add_option("--output", encrypt_args.output_path,
+                        "Output ciphertext file (binary)")->required();
+    // Mode A: function-def-driven.
+    encrypt->add_option("--function-def", encrypt_args.function_def_path,
+                        "Signed function-definition JSON file (downloaded from the platform). "
+                        "Exclusive with --schema.");
+    encrypt->add_option("--input-name", encrypt_args.input_name,
+                        "Which input in the function-def to encode for (e.g. 'dataset_a'). "
+                        "Required when --function-def is set.");
+    // Mode B: explicit-flag.
+    encrypt->add_option("--schema", encrypt_args.schema,
+                        "Encoding schema name: 'indicator-hash', 'weight-vector' "
+                        "(one real value per line, CKKS only), or 'binary-indicator' "
+                        "(one 0/1 per line, slot = line position). "
+                        "Exclusive with --function-def.");
+    encrypt->add_option("--separator", encrypt_args.separator,
+                        "Field separator for indicator-hash (e.g. ',', '\\t', ';', '|'); "
+                        "empty/omitted means hash the whole line. Mode B only.");
+    encrypt->add_option("--columns", encrypt_args.columns,
+                        "Columns to include in indicator-hash: 'all' or comma-separated 1-based "
+                        "indices like '1,3'. Default: whatever the function-def says ('all'). "
+                        "Overrides the function-def, so each party can pick the columns that "
+                        "suit ITS file. Pass the SAME spec to 'crypto resolve-indicator' later, "
+                        "or the rehash will match nothing.");
+    encrypt->add_flag  ("--skip-header", encrypt_args.skip_header,
+                        "Skip the first non-blank line of the input. Mode B only.");
+    // schema 'signature-table' (large-dataset PSI). Both parties must pass the same cells/tables/limbs and
+    // opposite roles; the wrapper refuses the execution if the two bundles disagree.
+    encrypt->add_option("--role", encrypt_args.psi_role,
+                        "signature-table: this party's role, A or B (decides which sentinel fills "
+                        "empty cells). Defaults in mode A to the input's position in the function-def.")->group("");
+    encrypt->add_option("--signature-bits", encrypt_args.signature_bits,
+                        "signature-table: the false-match guarantee in bits (default 128). Limbs are "
+                        "derived from it and the cell address.")->group("");
+    encrypt->add_option("--cells", encrypt_args.cells,
+                        "signature-table: number of cells m, a power of two (default: solved)")->group("");
+    encrypt->add_option("--tables", encrypt_args.tables,
+                        "signature-table: number of parallel tables T (default: solved)")->group("");
+    encrypt->add_flag  ("--dynamic-tables", encrypt_args.dynamic_tables,
+                        "signature-table: use exactly as many tables as this data's fullest cell needs - more "
+                        "than the model expected if it collides more, fewer if tables would be empty. Needs at "
+                        "least one ciphertext of cells; the other party's table count may then differ")->group("");
+    encrypt->add_option("--limbs", encrypt_args.limbs,
+                        "signature-table: 16-bit limbs per signature (advanced; default: derived "
+                        "from --signature-bits)")->group("");
+    encrypt->add_option("--count-groups", encrypt_args.count_groups,
+                        "signature-table: partial sums the count comes back as (default: solved)")->group("");
+    encrypt->add_option("--shards", encrypt_args.shards,
+                        "signature-table: split the dataset into this many shards, a power of two dividing "
+                        "--cells (default: the solver's choice). Writes <output>.shard-NNNNN plus a manifest")->group("");
+    encrypt->add_option("--capacity", encrypt_args.capacity,
+                        "signature-table: size the tables for this many records (default: the ones read)")->group("");
+    encrypt->add_option("--dataset-size", encrypt_args.size_class,
+                        "Large datasets: the permission's dataset size, e.g. 1K. A file with more records "
+                        "than the size allows is refused");
+    encrypt->add_option("--target-overflow", encrypt_args.target_overflow,
+                        "signature-table: expected fraction of records that would not fit, to size for "
+                        "(default 1e-6). No record is ever left out: one that does not fit refuses the encode")->group("");
+    encrypt->add_option("--domain-separator", encrypt_args.domain_separator,
+                        "signature-table: hashed in front of every record; both parties must match "
+                        "(default: the function-def's, else 'julenny-psi-v1')")->group("");
+    encrypt->add_option("--context-spec", encrypt_args.context_spec,
+                        "Crypto context spec override (default: read from function-def in mode A, "
+                        "or 'bfv-default-v1' in mode B)");
+    encrypt->add_flag  ("--json", encrypt_args.emit_json, "Emit JSON output");
+    encrypt->callback([&encrypt_args, exit_code]() {
+        *exit_code = run_crypto_encrypt(encrypt_args);
+    });
+
+    auto* psi_estimate = crypto->add_subcommand("psi-estimate",
+        "Dry run for schema 'signature-table': the parameters crypto encrypt would pick for these flags, "
+        "and what it would cost in bytes, compute and accuracy. Needs no input, key or grant; writes nothing.");
+    psi_estimate->add_option("--records", psi_estimate_args.records,
+                             "Records this party will encode (the rows crypto encrypt would read)")->required();
+    psi_estimate->add_option("--peer-records", psi_estimate_args.peer_records,
+                             "The other party's records (default: the same); affects accuracy only");
+    psi_estimate->add_option("--context-spec", psi_estimate_args.context_spec,
+                             "Crypto context spec (default: bfv-large-psi-v1)");
+    psi_estimate->add_option("--signature-bits", psi_estimate_args.signature_bits,
+                             "As crypto encrypt (default 128)");
+    psi_estimate->add_option("--cells", psi_estimate_args.cells, "As crypto encrypt (default: solved)");
+    psi_estimate->add_option("--tables", psi_estimate_args.tables, "As crypto encrypt (default: solved)");
+    psi_estimate->add_flag  ("--dynamic-tables", psi_estimate_args.dynamic_tables,
+                             "As crypto encrypt: also quote how many tables the data is likely to need");
+    psi_estimate->add_option("--peer-tables", psi_estimate_args.peer_tables,
+                             "The other party's table count, when it differs (per-level tables only)");
+    psi_estimate->add_option("--limbs", psi_estimate_args.limbs,
+                             "As crypto encrypt (default: derived from --signature-bits)");
+    psi_estimate->add_option("--count-groups", psi_estimate_args.count_groups,
+                             "As crypto encrypt (default: solved)");
+    psi_estimate->add_option("--shards", psi_estimate_args.shards, "As crypto encrypt");
+    psi_estimate->add_option("--target-overflow", psi_estimate_args.target_overflow,
+                             "As crypto encrypt (default 1e-6)");
+    psi_estimate->add_option("--storage-quota-bytes", psi_estimate_args.storage_quota_bytes,
+                             "Your plan's storage quota, to check this upload fits (0 = no limit)");
+    psi_estimate->add_option("--storage-used-bytes", psi_estimate_args.storage_used_bytes,
+                             "Storage already in use against that quota (default 0)");
+    psi_estimate->add_flag  ("--json", psi_estimate_args.emit_json, "Emit JSON output");
+    psi_estimate->group("");  // expert dry run of the table settings: not for customers
+    psi_estimate->callback([&psi_estimate_args, exit_code]() {
+        *exit_code = run_crypto_psi_estimate(psi_estimate_args);
+    });
+
+    auto* decrypt = crypto->add_subcommand("decrypt",
+        "Decrypt a single-party ciphertext (for round-trip testing and inspection)");
+    decrypt->add_option("--input",      decrypt_args.input_path,
+                        "Ciphertext file (binary)")->required();
+    decrypt->add_option("--secret-key", decrypt_args.secret_key_path,
+                        "Secret key file (binary, cereal-serialized)")->required();
+    decrypt->add_option("--context-spec", decrypt_args.context_spec,
+                        "Crypto context spec (default: bfv-default-v1)");
+    decrypt->add_option("--show-slots", decrypt_args.show_slots,
+                        "Number of leading slots to print (default: 16)");
+    decrypt->add_flag  ("--non-zero",   decrypt_args.non_zero_only,
+                        "Print only slot positions with non-zero values");
+    decrypt->add_flag  ("--json",       decrypt_args.emit_json, "Emit JSON output");
+    decrypt->callback([&decrypt_args, exit_code]() {
+        *exit_code = run_crypto_decrypt(decrypt_args);
+    });
+
+    // Per-party keysetup contribution. Customer runs this on their own
+    // machine; secret never leaves. Lead = party 1 (no peer input). Main =
+    // party 2+ (chains on previous party's public-key contribution; the
+    // resulting public output IS the joint public key).
+    auto* keysetup_contrib = crypto->add_subcommand("keysetup-contribute",
+        "Generate this party's contribution to a joint key setup (offline; local files only)");
+    keysetup_contrib->add_option("--role", keysetup_contribute_args.role,
+                                 "'lead' (party 1, no peer input) or 'main' (party 2+, chains on peer)")
+                    ->required();
+    keysetup_contrib->add_option("--peer-share", keysetup_contribute_args.peer_share_path,
+                                 "Path to peer's public contribution (required for --role main)");
+    keysetup_contrib->add_option("--output-secret", keysetup_contribute_args.output_secret_path,
+                                 "Where to write this party's secret share (stays local; NEVER upload)")
+                    ->required();
+    keysetup_contrib->add_option("--output-public", keysetup_contribute_args.output_public_path,
+                                 "Where to write this party's public output. Lead: contribution to upload. Main: the joint public key.")
+                    ->required();
+    keysetup_contrib->add_option("--context-spec", keysetup_contribute_args.context_spec,
+                                 "Crypto context spec (default: bfv-default-v1)");
+    keysetup_contrib->add_flag  ("--json", keysetup_contribute_args.emit_json,
+                                 "Emit JSON output");
+    keysetup_contrib->callback([&keysetup_contribute_args, exit_code]() {
+        *exit_code = run_crypto_keysetup_contribute(keysetup_contribute_args);
+    });
+
+    // Per-party joint relinearization key contribution.
+    auto* relin_contrib = crypto->add_subcommand("relin-contribute",
+        "Generate this party's contribution to a joint relinearization key (one round at a time; offline; local files only)");
+    relin_contrib->add_option("--round", relin_contribute_args.round,
+                              "Sub-round number: 1 or 2")->required();
+    relin_contrib->add_option("--role", relin_contribute_args.role,
+                              "'lead' or 'main' (required for round 1; ignored for round 2)");
+    relin_contrib->add_option("--secret-key", relin_contribute_args.secret_key_path,
+                              "This party's FHE secret share")->required();
+    relin_contrib->add_option("--peer-share", relin_contribute_args.peer_share_path,
+                              "Peer's contribution (required for round 1 + role=main)");
+    relin_contrib->add_option("--combined-r1", relin_contribute_args.combined_r1_path,
+                              "Combined round-1 output (required for round 2)");
+    relin_contrib->add_option("--joint-pk", relin_contribute_args.joint_pk_path,
+                              "Joint public key (required for round 2)");
+    relin_contrib->add_option("--output", relin_contribute_args.output_path,
+                              "Where to write this party's contribution")->required();
+    relin_contrib->add_option("--context-spec", relin_contribute_args.context_spec,
+                              "Crypto context spec (default: bfv-default-v1)");
+    relin_contrib->add_flag  ("--json", relin_contribute_args.emit_json, "Emit JSON output");
+    relin_contrib->callback([&relin_contribute_args, exit_code]() {
+        *exit_code = run_crypto_relin_contribute(relin_contribute_args);
+    });
+
+    // Deterministic combine for joint relinearization key.
+    auto* relin_combine = crypto->add_subcommand("relin-combine",
+        "Deterministically combine two parties' relinearization contributions for the given round (offline; local files only)");
+    relin_combine->add_option("--round", relin_combine_args.round,
+                              "Sub-round number: 1 (intermediate) or 2 (final)")->required();
+    relin_combine->add_option("--share-a", relin_combine_args.share_a_path,
+                              "Party A's contribution for this round")->required();
+    relin_combine->add_option("--share-b", relin_combine_args.share_b_path,
+                              "Party B's contribution for this round")->required();
+    relin_combine->add_option("--joint-pk", relin_combine_args.joint_pk_path,
+                              "Joint public key (required for round 1)");
+    relin_combine->add_option("--combined-r1", relin_combine_args.combined_r1_path,
+                              "Combined round-1 output (required for round 2)");
+    relin_combine->add_option("--output", relin_combine_args.output_path,
+                              "Where to write the combined result")->required();
+    relin_combine->add_option("--context-spec", relin_combine_args.context_spec,
+                              "Crypto context spec (default: bfv-default-v1)");
+    relin_combine->add_flag  ("--json", relin_combine_args.emit_json, "Emit JSON output");
+    relin_combine->callback([&relin_combine_args, exit_code]() {
+        *exit_code = run_crypto_relin_combine(relin_combine_args);
+    });
+
+    // Per-party joint sum key contribution.
+    auto* sum_contrib = crypto->add_subcommand("sum-contribute",
+        "Generate this party's contribution to a joint sum key (offline; local files only)");
+    sum_contrib->add_option("--role", sum_contribute_args.role,
+                            "'lead' or 'main'")->required();
+    sum_contrib->add_option("--secret-key", sum_contribute_args.secret_key_path,
+                            "This party's FHE secret share")->required();
+    sum_contrib->add_option("--peer-share", sum_contribute_args.peer_share_path,
+                            "Lead's contribution (required for role=main)");
+    sum_contrib->add_option("--joint-pk", sum_contribute_args.joint_pk_path,
+                            "Joint public key (required for role=main)");
+    sum_contrib->add_option("--output", sum_contribute_args.output_path,
+                            "Where to write this party's contribution")->required();
+    sum_contrib->add_option("--context-spec", sum_contribute_args.context_spec,
+                            "Crypto context spec (default: bfv-default-v1)");
+    sum_contrib->add_flag  ("--json", sum_contribute_args.emit_json, "Emit JSON output");
+    sum_contrib->callback([&sum_contribute_args, exit_code]() {
+        *exit_code = run_crypto_sum_contribute(sum_contribute_args);
+    });
+
+    // Deterministic combine for joint sum key.
+    auto* sum_combine = crypto->add_subcommand("sum-combine",
+        "Deterministically combine two parties' sum-key contributions to produce the final joint sum key (offline; local files only)");
+    sum_combine->add_option("--share-a", sum_combine_args.share_a_path,
+                            "Party A's contribution")->required();
+    sum_combine->add_option("--share-b", sum_combine_args.share_b_path,
+                            "Party B's contribution")->required();
+    sum_combine->add_option("--joint-pk", sum_combine_args.joint_pk_path,
+                            "Joint public key")->required();
+    sum_combine->add_option("--output", sum_combine_args.output_path,
+                            "Where to write the final sum key")->required();
+    sum_combine->add_option("--context-spec", sum_combine_args.context_spec,
+                            "Crypto context spec (default: bfv-default-v1)");
+    sum_combine->add_flag  ("--json", sum_combine_args.emit_json, "Emit JSON output");
+    sum_combine->callback([&sum_combine_args, exit_code]() {
+        *exit_code = run_crypto_sum_combine(sum_combine_args);
+    });
+
+    // Per-party joint rotation key contribution. Mirrors sum-contribute but
+    // requires --indices specifying which rotation indices to generate keys
+    // for. Used by CKKS functions (and any other function whose function-def
+    // requiredEvalKeys includes "rotation").
+    auto* rot_contrib = crypto->add_subcommand("rotation-contribute",
+        "Generate this party's contribution to a joint rotation key (offline; local files only)");
+    rot_contrib->add_option("--role", rotation_contribute_args.role,
+                            "'lead' or 'main'")->required();
+    rot_contrib->add_option("--secret-key", rotation_contribute_args.secret_key_path,
+                            "This party's FHE secret share")->required();
+    rot_contrib->add_option("--peer-share", rotation_contribute_args.peer_share_path,
+                            "Lead's contribution (required for role=main)");
+    rot_contrib->add_option("--joint-pk", rotation_contribute_args.joint_pk_path,
+                            "Joint public key (required for role=main)");
+    rot_contrib->add_option("--indices", rotation_contribute_args.indices_csv,
+                            "Comma-separated rotation indices, e.g. '1,2,4,-1,-2'")->required();
+    rot_contrib->add_option("--output", rotation_contribute_args.output_path,
+                            "Where to write this party's contribution")->required();
+    rot_contrib->add_option("--context-spec", rotation_contribute_args.context_spec,
+                            "Crypto context spec (default: bfv-default-v1)");
+    rot_contrib->add_flag  ("--json", rotation_contribute_args.emit_json, "Emit JSON output");
+    rot_contrib->callback([&rotation_contribute_args, exit_code]() {
+        *exit_code = run_crypto_rotation_contribute(rotation_contribute_args);
+    });
+
+    // Deterministic combine for joint rotation key.
+    auto* rot_combine = crypto->add_subcommand("rotation-combine",
+        "Deterministically combine two parties' rotation-key contributions to produce the final joint rotation key (offline; local files only)");
+    rot_combine->add_option("--share-a", rotation_combine_args.share_a_path,
+                            "Party A's contribution")->required();
+    rot_combine->add_option("--share-b", rotation_combine_args.share_b_path,
+                            "Party B's contribution")->required();
+    rot_combine->add_option("--joint-pk", rotation_combine_args.joint_pk_path,
+                            "Joint public key")->required();
+    rot_combine->add_option("--output", rotation_combine_args.output_path,
+                            "Where to write the final rotation key")->required();
+    rot_combine->add_option("--context-spec", rotation_combine_args.context_spec,
+                            "Crypto context spec (default: bfv-default-v1)");
+    rot_combine->add_flag  ("--json", rotation_combine_args.emit_json, "Emit JSON output");
+    rot_combine->callback([&rotation_combine_args, exit_code]() {
+        *exit_code = run_crypto_rotation_combine(rotation_combine_args);
+    });
+
+    // Wrap a contribution .bin in the platform's signed JSON envelope.
+    // This is a separate step from producing the share so the crypto code
+    // and the signing/serialization code stay decoupled. Same wrap-and-sign
+    // step is used for pk-share, relin-roundN, sum-roundN, etc; the round
+    // number and messageType come from the platform's per-project manifest.
+    auto* wrap_env = crypto->add_subcommand("wrap-envelope",
+        "Wrap a binary share into the signed JSON envelope the platform's keysetup endpoint expects");
+    wrap_env->add_option("--payload", wrap_envelope_args.payload_path,
+                         "Binary share file (inline mode). Either this or --object-key is required.");
+    wrap_env->add_option("--object-key", wrap_envelope_args.object_key,
+                         "GCS object key for out-of-band uploads (large-payload mode). "
+                         "Requires --size-bytes; pairs with the platform's keysetup-messages/upload-url endpoint.");
+    wrap_env->add_option("--size-bytes", wrap_envelope_args.size_bytes,
+                         "Raw payload size in bytes (required with --object-key).");
+    wrap_env->add_option("--sha256", wrap_envelope_args.sha256_hex,
+                         "sha256 of the payload, 64 lowercase hex characters (optional, "
+                         "large-payload mode). Signed with the envelope and kept by the platform, "
+                         "so a client can later check whether the copy on its own disk is still "
+                         "the key the collaboration is computing with. Omit it and the envelope "
+                         "signs exactly as before.");
+    wrap_env->add_option("--secret-key", wrap_envelope_args.secret_key_path,
+                         "Ed25519 signing secret key (32-byte seed; from signing-keygen)")
+            ->required();
+    wrap_env->add_option("--output", wrap_envelope_args.output_path,
+                         "Where to write the signed .json upload body")->required();
+    wrap_env->add_option("--permission-id", wrap_envelope_args.permission_id,
+                         "Permission ID this share is for")->required();
+    wrap_env->add_option("--round", wrap_envelope_args.round,
+                         "Manifest round number (1, 2, 3, ...)")->required();
+    wrap_env->add_option("--message-type", wrap_envelope_args.message_type,
+                         "Message type (e.g. pk-share, relin-round1, sum-round1-continue)")
+            ->required();
+    wrap_env->add_option("--timestamp", wrap_envelope_args.timestamp,
+                         "Override the ISO 8601 timestamp (default: now-UTC). "
+                         "Mostly useful for reproducible tests.");
+    wrap_env->add_flag  ("--json", wrap_envelope_args.emit_json, "Emit JSON output");
+    wrap_env->callback([&wrap_envelope_args, exit_code]() {
+        *exit_code = run_crypto_wrap_envelope(wrap_envelope_args);
+    });
+
+    // Sign the multi-party keysetup finalization envelope. Final keys are
+    // already uploaded to GCS by the caller (web UI or customer script); the
+    // app's job is purely to sign the (keyType, objectKey, sha256Hex) tuples
+    // with the company's Ed25519 key. Output is the POST body for
+    // /keysetup/final-keys.
+    auto* wrap_fk = crypto->add_subcommand("wrap-final-keys-envelope",
+        "Sign the multi-party keysetup finalization envelope (final-keys submission)");
+    wrap_fk->add_option("--to-sign", wrap_final_keys_envelope_args.to_sign_path,
+                        "Input to-sign JSON file (emitted by the web UI's finalization flow, "
+                        "or hand-built by a customer script; contains keys[], "
+                        "permissionId, timestamp)")
+           ->required();
+    wrap_fk->add_option("--secret-key", wrap_final_keys_envelope_args.secret_key_path,
+                        "Ed25519 signing secret key (32-byte seed; from signing-keygen)")
+           ->required();
+    wrap_fk->add_option("--output", wrap_final_keys_envelope_args.output_path,
+                        "Where to write the signed .json upload body (POST to /keysetup/final-keys)")
+           ->required();
+    wrap_fk->add_flag  ("--json", wrap_final_keys_envelope_args.emit_json, "Emit JSON output");
+    wrap_fk->callback([&wrap_final_keys_envelope_args, exit_code]() {
+        *exit_code = run_crypto_wrap_final_keys_envelope(wrap_final_keys_envelope_args);
+    });
+
+    auto* partial = crypto->add_subcommand("partial-decrypt",
+        "Produce this party's partial decryption of a ciphertext");
+    partial->add_option("--input",      partial_args.input_path,
+                        "Ciphertext file to partially decrypt (binary)")->required();
+    partial->add_option("--secret-key", partial_args.secret_key_path,
+                        "This party's secret key share (binary)")->required();
+    partial->add_option("--output",     partial_args.output_path,
+                        "Output partial-decryption file (binary)")->required();
+    partial->add_option("--context-spec", partial_args.context_spec,
+                        "Crypto context spec (default: bfv-default-v1)");
+    partial->add_flag  ("--lead",       partial_args.lead,
+                        "This party is the lead in the threshold protocol (use exactly once across all parties)");
+    partial->add_flag  ("--json",       partial_args.emit_json, "Emit JSON output");
+    partial->callback([&partial_args, exit_code]() {
+        *exit_code = run_crypto_partial_decrypt(partial_args);
+    });
+
+    auto* combine = crypto->add_subcommand("combine",
+        "Combine all parties' partial decryptions to recover the plaintext locally");
+    combine->add_option("--partials",   combine_args.partial_paths,
+                        "Partial-decryption files (one per party), space- or comma-separated")
+            ->required()->expected(-2);  // at least 2
+    combine->add_option("--context-spec", combine_args.context_spec,
+                        "Crypto context spec (default: bfv-default-v1)");
+    combine->add_option("--show-slots", combine_args.show_slots,
+                        "Number of leading slots to print (default: 16)");
+    combine->add_flag  ("--non-zero",   combine_args.non_zero_only,
+                        "Print only slot positions with non-zero values");
+    combine->add_flag  ("--real",       combine_args.real_output,
+                        "Emit raw real-valued slots without integer rounding "
+                        "(CKKS only; for weight-vector style outputs)");
+    combine->add_flag  ("--json",       combine_args.emit_json, "Emit JSON output");
+    combine->add_option("--out-file",   combine_args.out_file_path,
+                        "Write the plaintext result to this file; stdout returns references "
+                        "only (blind: no values printed). For agent/MCP use.");
+    combine->add_option("--count-groups", combine_args.count_groups,
+                        "Without --dataset-size: how many partial sums the count comes back as. Only "
+                        "the total is written or printed.")->group("");
+    combine->add_option("--dataset-size", combine_args.size_class,
+                        "Large-dataset count: the permission's dataset size, e.g. 1K. Only the total is "
+                        "written or printed.");
+    combine->add_flag  ("--full-vector", combine_args.full_vector,
+                        "Include every slot in --out-file. Off by default: a count result is "
+                        "one number, and writing all 8,192 slots made a 240KB file nobody "
+                        "could read.");
+    combine->callback([&combine_args, exit_code]() {
+        *exit_code = run_crypto_combine(combine_args);
+    });
+
+    // Large datasets: the smallest dataset size that holds a file. Prints only the size.
+    static CryptoDatasetSizeArgs dataset_size_args;
+    auto* dataset_size = crypto->add_subcommand("dataset-size",
+        "Large datasets: the smallest dataset size that holds your file, counted as encryption counts it");
+    dataset_size->add_option("--input", dataset_size_args.input_path, "Your CSV")->required();
+    dataset_size->add_option("--function-def", dataset_size_args.function_def_path,
+                             "Signed function-definition JSON")->required();
+    dataset_size->add_option("--input-name", dataset_size_args.input_name,
+                             "Which input this CSV is for")->required();
+    dataset_size->add_option("--columns", dataset_size_args.columns,
+                             "Columns to compare, as you will pass to crypto encrypt (default: the definition's)");
+    dataset_size->add_flag  ("--json", dataset_size_args.emit_json, "Emit JSON output");
+    dataset_size->callback([exit_code]() {
+        *exit_code = run_crypto_dataset_size(dataset_size_args);
+    });
+
+    // Map decrypted indicator-hash non-zero slot positions back to the
+    // original CSV records that produced them. Used by 06-decrypt for
+    // itemized-overlap-style functions: after threshold decrypt produces a
+    // sparse indicator vector, this rehashes each line of the local CSV the
+    // same way crypto encrypt did, and emits the records whose hash falls
+    // into the non-zero slot set. Strictly local; no network, no crypto.
+    // Large-dataset itemized: the combined masks back to this party's rows. Its arguments live as
+    // long as the parsed command line, like every other subcommand's.
+    static CryptoPsiResolveArgs psi_resolve_args;
+    auto* psi_resolve = crypto->add_subcommand("resolve-rows",
+        "Large-dataset itemized: write the rows of your data that overlap with your partner's data");
+    psi_resolve->add_option("--masks", psi_resolve_args.masks_path,
+                            "The file 'crypto combine --out-file' wrote")->required();
+    psi_resolve->add_option("--input", psi_resolve_args.input_csv_path,
+                            "Your CSV, exactly as encrypted")->required();
+    psi_resolve->add_option("--function-def", psi_resolve_args.function_def_path, "Signed function-definition JSON")->required();
+    psi_resolve->add_option("--input-name", psi_resolve_args.input_name, "Which input this CSV was encrypted as")->required();
+    psi_resolve->add_option("--dataset-size", psi_resolve_args.size_class, "The dataset size it was encrypted with, e.g. 64K");
+    psi_resolve->add_option("--cells", psi_resolve_args.cells, "Without --dataset-size: the cells it was encrypted with")->group("");
+    psi_resolve->add_option("--tables", psi_resolve_args.tables, "Without --dataset-size: the tables")->group("");
+    psi_resolve->add_option("--limbs", psi_resolve_args.limbs, "Without --dataset-size: the limbs")->group("");
+    psi_resolve->add_option("--count-groups", psi_resolve_args.count_groups, "Without --dataset-size: the count groups")->group("");
+    psi_resolve->add_option("--shards", psi_resolve_args.shards, "Without --dataset-size: the shards")->group("");
+    psi_resolve->add_option("--columns", psi_resolve_args.columns, "Columns hashed at encrypt time (default: the definition's)");
+    psi_resolve->add_option("--domain-separator", psi_resolve_args.domain_separator, "As at encrypt (default: the definition's)")->group("");
+    psi_resolve->add_option("--out-file", psi_resolve_args.out_file_path, "Where to write the matching rows")->required();
+    psi_resolve->add_flag  ("--json", psi_resolve_args.emit_json, "Emit JSON output");
+    psi_resolve->callback([exit_code]() {
+        *exit_code = run_crypto_psi_resolve(psi_resolve_args);
+    });
+
+    auto* resolve = crypto->add_subcommand("resolve-indicator",
+        "Resolve indicator-hash non-zero slot positions back to local CSV records (post-decrypt step for itemized overlap)");
+    resolve->add_option("--slots", resolve_indicator_args.slots_csv,
+                        "Comma-separated non-zero slot indices (e.g. '3215,7890,12044')")->required();
+    resolve->add_option("--input", resolve_indicator_args.input_csv_path,
+                        "Local CSV to resolve against (this party's plaintext records)")->required();
+    resolve->add_option("--function-def", resolve_indicator_args.function_def_path,
+                        "Function-definition JSON (provides schema + schemaParams)")->required();
+    resolve->add_option("--input-name", resolve_indicator_args.input_name,
+                        "Which input in the function-def this CSV is for (e.g. 'dataset_a')")->required();
+    resolve->add_option("--context-spec", resolve_indicator_args.context_spec,
+                        "Crypto context spec (default: bfv-default-v1)");
+    resolve->add_option("--columns", resolve_indicator_args.columns,
+                        "Columns that were hashed at encrypt time: 'all' or comma-separated "
+                        "1-based indices like '1,3'. MUST match what --columns was at encrypt, "
+                        "or nothing will match. Default: whatever the function-def says.");
+    resolve->add_flag  ("--json", resolve_indicator_args.emit_json, "Emit JSON output");
+    resolve->callback([&resolve_indicator_args, exit_code]() {
+        *exit_code = run_crypto_resolve_indicator(resolve_indicator_args);
+    });
+
+    // Re-derive the rotation index set from local plaintext files. Defensive
+    // cross-check used by 04.5-rotation-keysetup.sh against the platform's
+    // pendingRotationKeySetup.indices. Pure local: no FHE crypto, no network.
+    auto* resolve_rules = crypto->add_subcommand("resolve-rules",
+        "Map itemized cross-match result slots back to the rule rows that fired (positional, not hash-based; use resolve-indicator for overlap results)");
+    resolve_rules->add_option("--slots", resolve_rules_args.slots_csv,
+                              "Comma-separated slot indices from the decrypted result")->required();
+    resolve_rules->add_option("--rule-pairs", resolve_rules_args.rule_pairs_path,
+                              "The same rule list that was declared as the plaintext input")->required();
+    resolve_rules->add_option("--output", resolve_rules_args.output_path,
+                              "File to write the matched rules to")->required();
+    resolve_rules->add_flag  ("--json", resolve_rules_args.emit_json, "Emit JSON output");
+    resolve_rules->callback([&resolve_rules_args, exit_code]() {
+        *exit_code = run_crypto_resolve_rules(resolve_rules_args);
+    });
+
+    auto* derive_rot = crypto->add_subcommand("derive-rotation-indices",
+        "Re-derive the rotation index set from a local rule_pairs file using FNV1a-64 hash mod slot count (toolkit-side mirror of the platform's derivation)");
+    derive_rot->add_option("--rule-pairs", derive_rotation_indices_args.rule_pairs_path,
+                           "Rule-pairs CSV: each row 'left_name,right_name' (split on first comma)")->required();
+    derive_rot->add_option("--context-spec", derive_rotation_indices_args.context_spec,
+                           "Crypto context spec (e.g. 'ckks-default-v1'); used to look up slot count")->required();
+    derive_rot->add_flag  ("--json", derive_rotation_indices_args.emit_json, "Emit JSON output");
+    derive_rot->callback([&derive_rotation_indices_args, exit_code]() {
+        *exit_code = run_crypto_derive_rotation_indices(derive_rotation_indices_args);
+    });
+
+    // Diagnostic: dump a ciphertext file's metadata + embedded crypto context
+    // parameters. No validation against a local context; pure inspection.
+    auto* inspect = crypto->add_subcommand("inspect",
+        "Dump a ciphertext file's metadata and its EMBEDDED crypto context parameters (diagnostic for cross-component 'ValidateCiphertext' mismatches)");
+    inspect->add_option("--input", inspect_args.input_path,
+                        "Ciphertext file (binary)")->required();
+    inspect->add_option("--context-spec", inspect_args.context_spec,
+                        "Context spec for the deserialization shim (default: ckks-default-v1)");
+    inspect->add_flag  ("--json", inspect_args.emit_json, "Emit JSON output (non-secret metadata only)");
+    inspect->callback([&inspect_args, exit_code]() {
+        *exit_code = run_crypto_inspect(inspect_args);
+    });
+}
+
+}  // namespace julenny_fhe::cli

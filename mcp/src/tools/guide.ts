@@ -1,0 +1,448 @@
+// next_step - the navigation verb. Given a permissionId, it reads LIVE platform
+// state (permission detail, keysetup manifest, declared inputs, executions) and
+// returns the caller's current stage plus the exact next verb(s) to call. It is
+// a family-1 read only: no crypto, no secret material, no plaintext. It does not
+// replace the per-verb security checks (the platform stays the backstop); it
+// just lets an agent navigate the flow without carrying the scripts.
+//
+// Stage model mirrors the server instructions block:
+//   discover -> keysetup -> provide-inputs -> run -> decrypt
+//
+// TWO ROLES, and they are independent. Never assume "owner == keysetup LEAD".
+//
+//   the DATA role     permission.role: 'dataOwner' | 'dataConsumer'. Per PERMISSION.
+//                     Says whose data goes in, who triggers, and which function-def
+//                     inputs are yours ('dataOwner' | 'queryAnalyst').
+//   the KEYSETUP role /keysetup yourKeysetupRole: 'lead' | 'main'. Per JOINT KEY,
+//                     fixed when that key was built. Says which half of the ceremony
+//                     this machine performs, which rounds it owes, and - critically -
+//                     which flag its partial decryption carries.
+//
+// They agree whenever a collaboration only runs permissions in the direction it was
+// created in. They stop agreeing the moment one is created the other way round, and
+// a partial decryption produced with the wrong flag is not an error: it is a wrong
+// answer. The scripts got a missing file as a warning; an agent passes the filename
+// itself, so there is nothing here to go wrong loudly.
+//
+// participants{} on the keysetup response is keyed by the DATA role, because it is
+// just "which collaboration id is mine". expectedParty on the round manifest is the
+// KEYSETUP role. Two different lookups, deliberately.
+
+import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import { z } from 'zod';
+import { JulennyApiClient } from '../api-client.js';
+
+const ok = (obj: Record<string, unknown>) => ({
+  content: [{ type: 'text' as const, text: JSON.stringify({ ok: true, ...obj }, null, 2) }],
+});
+const fail = (error: string, extra: Record<string, unknown> = {}) => ({
+  content: [{ type: 'text' as const, text: JSON.stringify({ ok: false, error, ...extra }, null, 2) }],
+  isError: true,
+});
+
+interface RoundEntry { round: number; messageType: string; description: string; expectedParty: 'both' | 'lead' | 'main'; }
+
+export function registerGuideTools(server: McpServer, api: JulennyApiClient) {
+  server.tool(
+    'next_step',
+    "Navigate the multi-party FHE flow: given a permissionId, read live platform state and report your current stage (discover/keysetup/provide-inputs/run/decrypt) and the exact next verb(s) to call. Read-only and blind; the platform still enforces every action independently. Call this whenever you are unsure what to do next.",
+    {
+      permissionId: z.string().describe('Permission id to evaluate'),
+    },
+    async (p) => {
+      try {
+        const perm = await api.get(`/api/fhe-permissions/${p.permissionId}`);
+
+        const role: string = perm.role; // 'dataOwner' | 'dataConsumer'
+        // DATA role. Used for the function-def inputs, for result visibility, and to
+        // index participants{}, which is keyed that way.
+        const myParty: 'owner' | 'consumer' = role === 'dataOwner' ? 'owner' : 'consumer';
+        const fnRole: string = role === 'dataOwner' ? 'dataOwner' : 'queryAnalyst';
+        const amViewer: boolean = perm.resultVisibility === role;
+
+        // The KEYSETUP role, fetched at most once and only when a stage needs it.
+        // Null on joint keys built before the platform recorded a lead; those are not
+        // backfilled, so fall back to the old assumption, right wherever the roles agree.
+        let keysetupRoleCache: 'lead' | 'main' | null = null;
+        const keysetupRole = async (): Promise<'lead' | 'main'> => {
+          if (keysetupRoleCache) return keysetupRoleCache;
+          try {
+            const k = await api.get(`/api/fhe-permissions/${p.permissionId}/keysetup`);
+            if (k?.yourKeysetupRole === 'lead' || k?.yourKeysetupRole === 'main') {
+              const fromPlatform: 'lead' | 'main' = k.yourKeysetupRole;
+              keysetupRoleCache = fromPlatform;
+              return fromPlatform;
+            }
+          } catch { /* fall through to the data-role assumption */ }
+          const assumed: 'lead' | 'main' = role === 'dataOwner' ? 'lead' : 'main';
+          keysetupRoleCache = assumed;
+          return assumed;
+        };
+
+        // An INTERNAL grant is a solo self-test: one company on both sides. It follows a
+        // different sequence (see SOLO SELF-TEST in the server instructions) and, critically,
+        // its keysetup is reported COMPLETE at creation while holding no keys. The stage
+        // machine below is built for the two-party flow, so flag the difference rather than
+        // silently routing a solo caller down it.
+        const isSolo = perm.grantType === 'internal';
+
+        // A large-dataset permission's size: null for every other function. While it is only
+        // proposed, the size-confirm / size-wait stages below say so; once confirmed it rides on
+        // every stage, so the user can always see what the permission was set up for.
+        const datasetSize = (perm as { datasetSize?: { size?: string; status?: string } | null }).datasetSize;
+
+        const base = {
+          permissionId: p.permissionId,
+          role,
+          resultVisibility: perm.resultVisibility,
+          youAre: isSolo ? 'both parties (solo self-test)' : (amViewer ? 'result viewer' : 'result releaser'),
+          function: perm.fheFunction,
+          functionVersion: perm.functionVersion,
+          ...(datasetSize?.status === 'confirmed' && datasetSize.size
+            ? { datasetSize: `Up to ${datasetSize.size} records, confirmed by both companies` } : {}),
+          ...(isSolo ? {
+            grantType: 'internal',
+            soloWarning: 'SOLO SELF-TEST. Keysetup shows complete but this grant may hold NO KEYS - that is how internal grants are created. Before encrypting or running, confirm you have built and registered the joint public key and the final relinearization key yourself (SOLO SELF-TEST in the server instructions). Skipping that spends a credit and fails inside the engine. There is no release step and no peer to wait for; decrypt with TWO partial_decrypt calls (one per secret share) and decrypt_result.',
+          } : {}),
+        };
+
+        // ---- expiry / terminal ----
+        if (perm.isExpired || perm.status === 'expired') {
+          return ok({ ...base, stage: 'expired', summary: 'This permission has expired; no further actions are possible.', nextActions: [] });
+        }
+
+        // ---- A large-dataset size the partner has not confirmed yet ----
+        // Nothing is set up or encrypted against it until it is: the partner may still increase it.
+        if (datasetSize?.status === 'proposed') {
+          return role === 'dataConsumer'
+            ? ok({ ...base, stage: 'size-confirm', summary: `TELL THE USER: Confirm the dataset size first: your partner proposed up to ${datasetSize.size} records.`, nextActions: ['ASK THE USER which file in the working folder holds their data for this permission (its name only, never its contents)', 'confirm_dataset_size(permissionId, dataFile): the local toolkit checks the file and confirms the size, or increases it if the file is larger; you learn only the size', 'then call next_step again'] })
+            : ok({ ...base, stage: 'size-wait', summary: `TELL THE USER: Waiting for your partner to confirm the dataset size (up to ${datasetSize.size} records). Encryption can start once it's confirmed.`, nextActions: ['TELL THE USER to ask their partner to confirm the dataset size', 'then call next_step again'] });
+        }
+        // The size to encrypt against, once both sides have settled it.
+        const confirmedSize = datasetSize?.status === 'confirmed' ? datasetSize.size : undefined;
+
+        // ---- A key the COLLABORATION does not have ----
+        //
+        // Reached with keysetup COMPLETE and the permission active, so every stage below
+        // would happily walk past it: the joint key genuinely exists, it was just built for
+        // a function needing fewer evaluation keys than this one needs. The rounds that make
+        // the missing key have to be run first, by BOTH parties, and until they are every
+        // run is refused.
+        //
+        // Checked before the keysetup stage because that stage only fires when keysetup is
+        // unfinished, which this is not.
+        const readiness = perm.runReadiness as { canRun?: boolean; code?: string; reason?: string; missingEvalKeys?: string[] } | undefined;
+        if (readiness && readiness.code === 'missing-eval-key') {
+          const missing = readiness.missingEvalKeys ?? [];
+          const rounds = missing.includes('sum')
+            ? "sum-round1 (owner, round 5) then sum-round1-continue (consumer, round 6)"
+            : "the rounds this key needs, from the keysetup round manifest";
+          return ok({
+            ...base,
+            stage: 'keysetup-augment',
+            missingEvalKeys: missing,
+            summary: readiness.reason
+              ?? `This collaboration is missing: ${missing.join(', ')}. Both parties must build it before this permission can run.`,
+            nextActions: [
+              `sum_contribute / the matching contribute verb for: ${missing.join(', ')}, using the secret share you ALREADY have. Do not run keysetup_contribute again - it would make a new share that does not match this collaboration's joint key.`,
+              `publish_keysetup_message for ${rounds}.`,
+              'publish_final_keys with the newly built key once both sides have contributed. It is merged into the collaboration, so every later permission gets it too.',
+              'TELL THE USER the other party has to do their half as well; this cannot complete from one side.',
+            ],
+          });
+        }
+
+        // ---- STAGE 1: keysetup (permission not active, OR keysetup unfinished) ----
+        //
+        // Gate on keysetupState as well as status. A permission can be
+        // status:'active' - a valid, granted permission - while its joint keys
+        // are still being built. Checking status alone skipped this entire stage
+        // and reported 'provide-inputs', sending the agent to encrypt under a
+        // joint key that does not exist yet. run.sh branches on keysetupState for
+        // exactly this reason.
+        const ksState = String(perm.keysetupState || '');
+        const keysetupUnfinished = ksState !== '' && ksState !== 'complete';
+        if (perm.status !== 'active' || keysetupUnfinished) {
+          let ks: any;
+          try { ks = await api.get(`/api/fhe-permissions/${p.permissionId}/keysetup`); }
+          catch {
+            return ok({ ...base, stage: 'keysetup', summary: `Keysetup is in progress (permission status: ${perm.status}). Follow STAGE 1 in the server instructions.`, nextActions: ['register_signing_key (once per crypto context)', 'keysetup_contribute / relin_contribute per round', 'publish_keysetup_message / download_keysetup_message to exchange'] });
+          }
+
+          // participants{} is keyed by the DATA role: this is only "my collaboration id".
+          const myCollab: string | undefined = ks?.participants?.[myParty]?.collaborationId;
+          const myContribs: number[] = (myCollab && ks.contributions?.[myCollab]) || [];
+
+          // The KEYSETUP role, straight from the platform. Null on joint keys built
+          // before it was recorded; those are not backfilled, so fall back to the old
+          // assumption, which is right wherever the two roles agree.
+          const myKeysetupRole: 'lead' | 'main' =
+            (ks?.yourKeysetupRole === 'lead' || ks?.yourKeysetupRole === 'main')
+              ? ks.yourKeysetupRole
+              : (role === 'dataOwner' ? 'lead' : 'main');
+          keysetupRoleCache = myKeysetupRole;
+
+          // The platform spells this 'awaiting-finalization' (lower, hyphen); this branch
+          // compared against 'AWAITING_FINALIZATION' and so NEVER fired. Execution fell
+          // through to the round-manifest lookup, where finalization sits at currentRound 5
+          // in a manifest of 4 rounds, found no entry, and reported "BLOCKED on the other
+          // party" - sending the side that owed the finalize off to chase the side that was
+          // already waiting for it. Normalise instead of swapping the literal, so either
+          // spelling works.
+          const ksStateNorm = String(ks.state || '').toUpperCase().replace(/-/g, '_');
+          if (ksStateNorm === 'AWAITING_FINALIZATION') {
+            const iFinalized = !!(myCollab && ks.finalKeySubmissions?.[myCollab]);
+            if (iFinalized) {
+              return ok({ ...base, stage: 'keysetup-finalize-wait', keysetup: { state: ks.state }, summary: 'You have submitted final keys. BLOCKED on the other party to finalize theirs before the permission activates. TELL THE USER to ask them to run their finalize step; polling alone will not unblock it.', nextActions: ['TELL THE USER to ask the other party to finalize', 'then call next_step again'] });
+            }
+            return ok({ ...base, stage: 'keysetup-finalize', keysetup: { state: ks.state }, summary: 'All keysetup rounds are in. Finalize the joint keys.', nextActions: ['publish_final_keys (joint public key + relin key, plus sum/rotation keys only if requiredEvalKeys lists them)'] });
+          }
+
+          const entry: RoundEntry | undefined = (ks.roundManifest || []).find((e: RoundEntry) => e.round === ks.currentRound);
+          const ksInfo = { state: ks.state, currentRound: ks.currentRound, totalRounds: ks.totalRounds, round: entry ? { messageType: entry.messageType, description: entry.description, expectedParty: entry.expectedParty } : null };
+
+          // Report EVERY round this party still owes, not just currentRound.
+          //
+          // currentRound only advances once the round it names is satisfied, so when it sits on a
+          // round the peer owes, this side looked "blocked" - even when a LATER round is ours alone
+          // and needs nothing from them. That is exactly why the scripts bundle pk-share
+          // with relin-round1 and publish both at once: relin-round1 is owner-only and does not
+          // depend on the peer's pk-share at all.
+          //
+          // Gating on currentRound alone stopped an agent one message short and stalled the whole
+          // collaboration, with each side waiting on the other. Scan the manifest instead.
+          const owed: RoundEntry[] = (ks.roundManifest || []).filter((e: RoundEntry) =>
+            (e.expectedParty === 'both' || e.expectedParty === myKeysetupRole) && !myContribs.includes(e.round),
+          ).sort((a: RoundEntry, b: RoundEntry) => a.round - b.round);
+
+          if (owed.length > 0) {
+            const first = owed[0];
+            const alsoOwed = owed.slice(1);
+            return ok({
+              ...base,
+              stage: 'keysetup',
+              keysetup: { ...ksInfo, roundsYouOwe: owed.map(e => ({ round: e.round, messageType: e.messageType, expectedParty: e.expectedParty })) },
+              summary: owed.length === 1
+                ? `Your turn: keysetup round ${first.round}/${ks.totalRounds} (${first.messageType} - ${first.description}). Contribute it, then publish the round message for the peer.`
+                : `You owe ${owed.length} keysetup rounds: ${owed.map(e => `${e.round} (${e.messageType})`).join(', ')}. Do them ALL now, in order, publishing each. Do not stop after the first and wait: the later ones do not depend on the peer, and stopping early stalls both sides.`,
+              nextActions: [
+                'register_signing_key first if you have not for this crypto context',
+                ...owed.map(e => `contribute round ${e.round} (${e.messageType}) via the matching keysetup verb, then publish_keysetup_message`),
+                ...(alsoOwed.length > 0 ? ['then call next_step again to confirm nothing else is outstanding'] : []),
+              ],
+            });
+          }
+          return ok({ ...base, stage: 'keysetup-wait', keysetup: ksInfo, summary: `BLOCKED on the ${entry ? entry.expectedParty : 'other'} party for keysetup round ${ks.currentRound}/${ks.totalRounds}. Nothing on this side can progress until they act, and polling alone will never unblock it. TELL THE USER to contact the other party and ask them to run their side now, naming the round that is outstanding. Do not call further keysetup verbs until their message has landed.`, nextActions: ['TELL THE USER to ask the other party to run their side for this round', 'download_keysetup_message (from=peer) once it has landed', 'then call next_step again'] });
+        }
+
+        // A solo (internal) grant is created with keysetupState already 'complete' while
+        // holding NO keys, so the two-party gate above never fires and the caller was routed
+        // straight to 'provide-inputs' - told to encrypt under a joint key that does not
+        // exist. The soloWarning said the opposite in the same response, leaving the agent to
+        // reconcile a contradiction against its own tool. Settle it from live state instead:
+        // if no final keys are registered, this IS the keysetup stage, whatever state claims.
+        if (isSolo) {
+          let soloKs: any = null;
+          try {
+            soloKs = await api.get('/api/fhe-permissions/' + p.permissionId + '/keysetup');
+          } catch { soloKs = null; }
+          const finalSubs = (soloKs && soloKs.finalKeySubmissions) || {};
+          if (Object.keys(finalSubs).length === 0) {
+            return ok({
+              ...base,
+              stage: 'keysetup',
+              summary: 'SOLO SELF-TEST: no final keys are registered for this permission yet, even though keysetup reports complete. You hold BOTH sides, so nothing is blocked on anyone else - build and register the keys yourself before encrypting. Follow SOLO SELF-TEST in the server instructions.',
+              nextActions: [
+                'signing_keygen, then register_signing_key for the crypto context',
+                "keysetup_contribute role 'lead', then role 'main' with peerShare - keep BOTH secrets",
+                'relin_contribute rounds 1 and 2, then relin_combine for the final relin key (plus sum_/rotation_ verbs only if requiredEvalKeys lists them)',
+                'publish_final_keys with the JOINT public key and the FINAL relin key',
+                'then call next_step again',
+              ],
+            });
+          }
+        }
+
+        // ---- permission is active: fetch def inputs + declared datasets ----
+        const v = perm.functionVersion || '1.0.0';
+        let def: any;
+        try { def = await api.get(`/api/functions/${perm.fheFunction}/${v}/definition`); }
+        catch (e) { return fail(`could not load function definition for ${perm.fheFunction} ${v}: ${(e as Error).message}`); }
+        const inputs: Array<{ name: string; role: string; layout?: string; schema?: string; encoding?: string; encodingRecipe?: unknown }> = def.inputs || [];
+
+        // Rotation state lives on the keysetup document, not the permission, and nothing
+        // else in the MCP surfaced it - an agent that had submitted all three rounds had
+        // no way to confirm the platform accepted them.
+        let ksRotation: unknown = null;
+        let rotationRounds: Array<{ round: number; messageType: string }> = [];
+        try {
+          const ksDoc = await api.get(`/api/fhe-permissions/${p.permissionId}/keysetup`) as Record<string, unknown>;
+          ksRotation = ksDoc.pendingRotationKeySetup ?? null;
+          rotationRounds = ((ksDoc.roundManifest as Array<{ round: number; messageType: string }>) || [])
+            .filter((e) => typeof e.messageType === 'string' && e.messageType.startsWith('rotation-'));
+        } catch { ksRotation = null; }
+
+        let declared: Record<string, { datasetId?: string }> = {};
+        try { declared = await api.get(`/api/fhe-permissions/${p.permissionId}/preferred-datasets`); }
+        catch { declared = {}; }
+        const isDeclared = (name: string) => !!declared?.[name]?.datasetId;
+
+        // Solo means one company holds BOTH roles, so every input is yours. Filtering by
+        // fnRole listed only dataset_a and silently hid dataset_b, which the caller must also
+        // provide - the run then blocks on an input nothing ever asked them for.
+        const myInputs = isSolo ? inputs : inputs.filter(i => i.role === fnRole);
+        const missingMine = myInputs.filter(i => !isDeclared(i.name));
+        const allDeclared = inputs.every(i => isDeclared(i.name));
+
+        // ---- STAGE 2: provide your inputs ----
+        if (missingMine.length > 0) {
+          // Check the local keys FIRST, before anything is encrypted under them.
+          //
+          // The scripts do this automatically at exactly this point. The connector
+          // cannot: verify_keys is a verb someone has to call, so unless it is named here
+          // it never runs and the check exists on paper only. Named first in the list
+          // because a key that is stale or missing makes every step after it wasted work.
+          const keyCheck = `verify_keys(permissionId=${p.permissionId}) FIRST: confirm the public keys on this `
+            + 'machine are still the ones this collaboration agreed on, and re-download any that are not. '
+            + 'A key left over from an earlier index set looks identical to a current one on disk. '
+            + "A permission that reuses its collaboration's keys did no key setup or finalize of its own: that "
+            + "is normal, nothing is missing, and verify_keys checks the collaboration's keys for it.";
+          const actions = missingMine.map(i => {
+            // The itemized large-dataset result side is settled by the permission: one verb,
+            // nothing to ask.
+            if (i.encoding === 'plaintext-party-tag') {
+              return `input '${i.name}': send_result_side(permissionId=${p.permissionId}). It works the side out from the permission; ask the user nothing.`;
+            }
+            const bundle = i.layout === 'encrypted-bundle' && i.encodingRecipe;
+            // upload takes inputName: naming it here is what stops the dataset being
+            // offered for every other input later, on both sides.
+            const steps = bundle
+              ? `encode_recipe -> encrypt -> upload(inputName='${i.name}') -> declare_input_dataset`
+              : `encrypt (or upload as-is if plaintext) -> upload(inputName='${i.name}') -> declare_input_dataset`;
+            return `input '${i.name}' (layout ${i.layout || 'n/a'}): ${steps}`;
+          });
+          // Hash-matched inputs need one question answered before anything is encrypted,
+          // and the encoding is the only place it is visible. Asked afterwards it is too
+          // late in the worst way: the run completes and reports no matches, because
+          // every row was hashed with fields the other side does not hold.
+          // `schema`, NOT `encoding`. They are different fields with different vocabularies:
+          // the overlap family is encoding 'integer-packed' and schema 'indicator-hash'.
+          // Comparing a schema name against an encoding name matches nothing, so the
+          // question would never be raised.
+          const hashed = myInputs.some(i => i.schema === 'indicator-hash' || i.schema === 'signature-table');
+          if (hashed) {
+            actions.push(
+              "BEFORE encrypting, ASK THE USER which columns of each file identify a record: the whole line "
+              + "('all', the default), or specific columns like '1,3'. Pass the answer to encrypt as `columns`. "
+              + 'Both sides must hash the SAME FIELDS in the SAME ORDER; a file carrying extra fields the '
+              + 'other party does not hold will match nothing, and the run will report that as no overlap. '
+              + 'Do not read the file to decide, and do not ask for its contents.',
+            );
+          }
+          // A large-dataset input is encoded to the permission's dataset size, which both sides share.
+          if (myInputs.some(i => i.schema === 'signature-table')) {
+            actions.push(`Large-dataset input: pass datasetSize="${confirmedSize}" (this permission's dataset size) `
+              + 'to encrypt, with reportOutput set, and pass that report to upload as encodingReport.');
+          }
+          return ok({ ...base, stage: 'provide-inputs', summary: `Provide your ${missingMine.length} undeclared input(s). Get the signed def first with get_function_definition(saveAs) if you have not.`, yourUndeclaredInputs: missingMine.map(i => i.name), nextActions: [keyCheck, ...actions] });
+        }
+
+        // ---- your inputs are in; look at executions ----
+        let execs: any[] = [];
+        try { const r = await api.get(`/api/fhe-permissions/${p.permissionId}/executions`); execs = r.executions || r || []; }
+        catch { execs = []; }
+        const byState = (s: string) => execs.find(e => e.state === s);
+        const released = byState('released');
+        const awaitingRelease = byState('awaiting-release');
+        const inFlight = execs.find(e => !['released', 'failed', 'completed', 'viewed', 'expired'].includes(e.state) && e.state !== 'awaiting-release');
+
+        // ---- STAGE 4: decrypt / release ----
+        if (released && amViewer) {
+          // --lead is set by the KEY CEREMONY role, never by the data role. Getting it
+          // wrong here does not fail: it combines two partials that do not belong
+          // together and prints a plausible number.
+          const leadFlag = (await keysetupRole()) === 'lead';
+          // Which resolver applies depends on what a slot MEANS in this function's
+          // output, which the agent cannot infer from the verb names. Say it here.
+          const pairList = /cross-match/.test(String(base.function ?? ''));
+          const largeItemized = String(base.function ?? '') === 'joint-record-overlap-large-itemized';
+          const resolveHint = pairList
+            ? 'resolve_rules(plaintext, rulePairs, output) to turn the slots into the rule rows that fired. NOT resolve_matches: that one re-hashes your own records, which is the wrong question here and fails outright.'
+            : largeItemized
+              ? `resolve_matches(plaintext, csv, functionDef, inputName, output, datasetSize="${confirmedSize}") to turn the result back into your own matching records.`
+              : 'resolve_matches(plaintext, csv, functionDef, inputName, output) to turn the slots back into your own matching records.';
+          // The large-dataset count comes back as partial sums; decrypt_result must be told the
+          // dataset size to write their total. A count names no records, so there is nothing to
+          // resolve afterwards.
+          const largeCount = String(base.function ?? '') === 'joint-record-overlap-large-count';
+          const combineStep = largeCount
+            ? `decrypt_result to combine, with datasetSize="${confirmedSize}"; the total is written to a workdir file you read from disk`
+            : 'decrypt_result to combine; the plaintext is written to a workdir file you read from disk';
+          return ok({ ...base, stage: 'decrypt', executionId: released.id, summary: 'The result is released and you are the viewer. Download both partials and combine.', nextActions: [`download_result(executionId=${released.id})`, `download_partial(executionId=${released.id}) for the releaser's partial`, `partial_decrypt your own share (lead:${leadFlag})`, combineStep, ...(largeCount ? [] : [resolveHint])] });
+        }
+        if (awaitingRelease && !amViewer) {
+          return ok({ ...base, stage: 'release', executionId: awaitingRelease.id, summary: 'An execution is awaiting release and you are the releaser. Release your partial so the viewer can combine.', nextActions: [`release(executionId=${awaitingRelease.id})`] });
+        }
+        if (awaitingRelease && amViewer) {
+          return ok({ ...base, stage: 'decrypt-wait', executionId: awaitingRelease.id, summary: 'BLOCKED on the releaser: they must upload their partial decryption before you can combine and see the answer. TELL THE USER to ask the other party to run their release step; polling alone will not unblock it.', nextActions: ['TELL THE USER to ask the other party to release', 'then call next_step again'] });
+        }
+        if (released && !amViewer) {
+          return ok({ ...base, stage: 'done', executionId: released.id, summary: 'Released. The other party is the viewer; nothing left on your side for this execution.', nextActions: [] });
+        }
+        if (inFlight) {
+          return ok({ ...base, stage: 'running', executionId: inFlight.id, summary: `Execution ${inFlight.id} is in state '${inFlight.state}'. Poll until it releases.`, nextActions: [`get_execution_status(executionId=${inFlight.id})`, 'then call next_step again'] });
+        }
+
+        // ---- STAGE 3: ready to run (no pending execution) ----
+        // Solo callers never reach here with undeclared inputs (myInputs covers both roles
+        // above), and there is no peer to be blocked on regardless.
+        if (!allDeclared && !isSolo) {
+          return ok({ ...base, stage: 'await-peer-inputs', summary: 'Your inputs are declared. BLOCKED on the other party to declare theirs before an execution can run. TELL THE USER to ask them to upload and declare their input; polling alone will not unblock it.', nextActions: ['TELL THE USER to ask the other party to declare their inputs', 'then call next_step again'] });
+        }
+        // Rotation is the last gate and the only one with no round of its own until the
+        // rule-list input is declared: the platform derives the index set from that file,
+        // then grows the manifest. Until this reads 'complete' an execution will spend a
+        // credit and fail inside the engine, so check it before ever reporting 'run'.
+        {
+          const rot = ksRotation as Record<string, unknown> | null | undefined;
+          if (rot && rot.status !== 'complete') {
+            const status = String(rot.status ?? 'unknown');
+            const outstanding = (rotationRounds.length ? rotationRounds : [
+              { round: '?', messageType: 'rotation-round1' },
+              { round: '?', messageType: 'rotation-round1-continue' },
+              { round: '?', messageType: 'rotation-combine' },
+            ]).map((e) => `round ${e.round}: ${e.messageType}`);
+            return ok({
+              ...base,
+              stage: 'rotation-keysetup',
+              rotation: { status, indexCount: ((rot.indices as unknown[]) || []).length },
+              summary: `This function needs a ROTATION key and its setup is '${status}', not 'complete'. Do NOT trigger: it would spend a credit and fail inside the engine. Build the rotation key and submit it with publish_rotation_key, which handles all three rounds. Rotation keys are NOT accepted by publish_final_keys, and putting one in another key's slot is accepted by the platform but silently produces a wrong answer.`,
+              outstandingRounds: outstanding,
+              nextActions: [
+                'derive_rotation_indices(rulePairs, contextSpec) to get the index set - do NOT read the rule file or ask for filesystem access',
+                'rotation_contribute for each secret share, then rotation_combine',
+                'publish_rotation_key(leadContribution, mainContribution, combined, signingKey)',
+                'get_rotation_status to confirm it reads complete, then call next_step again',
+              ],
+            });
+          }
+        }
+
+        if (role === 'dataConsumer') {
+          if ((perm.remainingExecutions ?? 1) <= 0) {
+            return ok({ ...base, stage: 'exhausted', summary: 'All inputs are declared but this permission has no remaining executions.', nextActions: ['request more executions from the data owner (add_executions on their side)'] });
+          }
+          return ok({ ...base, stage: 'run', remainingExecutions: perm.remainingExecutions, summary: 'All inputs are declared. You are the consumer; trigger the execution.', nextActions: ['estimate_execution (optional cost preview)', 'trigger_execution'] });
+        }
+        if (isSolo) {
+          // There is no consumer to ask: the caller holds both roles. Telling a solo tester to
+          // go and chase a counterparty is advice for a person who does not exist.
+          return ok({ ...base, stage: 'run', remainingExecutions: perm.remainingExecutions, summary: 'All inputs are declared. This is a solo self-test, so you are the consumer as well - trigger the execution yourself. There is nobody to wait for.', nextActions: ['estimate_execution (optional cost preview)', 'trigger_execution'] });
+        }
+        return ok({ ...base, stage: 'await-trigger', summary: 'All inputs are declared. You are the data owner. BLOCKED on the consumer to trigger the execution; you then release or they view, per resultVisibility. TELL THE USER to ask the consumer to run it; polling alone will not unblock it.', nextActions: ['TELL THE USER to ask the consumer to trigger the execution', 'then call next_step again'] });
+      } catch (e) {
+        return fail(e instanceof Error ? e.message : 'next_step failed');
+      }
+    },
+  );
+}

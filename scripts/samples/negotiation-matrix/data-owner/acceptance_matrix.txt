@@ -1,0 +1,34 @@
+# Encrypted Negotiation Matrix - Buyer (Acme): acceptance_matrix (role dataOwner)
+# Common Table (both sides MUST use this identical grid), length 24:
+#   index = (q_idx*4 + p_idx)*3 + d_idx
+#   Quantity: 1000, 5000        (q_idx 0..1)
+#   Price:    12, 13, 14, 15     (p_idx 0..3)
+#   Delivery: 1, 2, 3 weeks      (d_idx 0..2)
+# Buyer accepts Quantity=5000, Price 12..14, Delivery 1-2 weeks
+#   -> 1s at indices 12,13,15,16,18,19 (the rest 0).
+# Format: one 0/1 per line; comment (#) and blank lines are skipped; each
+# remaining line's position (0-based) is its grid index.
+0
+0
+0
+0
+0
+0
+0
+0
+0
+0
+0
+0
+1
+1
+0
+1
+1
+0
+1
+1
+0
+0
+0
+0
