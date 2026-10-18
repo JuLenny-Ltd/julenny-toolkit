@@ -140,7 +140,7 @@ MAIN_SHARE=""
 
 if i_am_keysetup_lead; then
     MY_ROT_SHARE="$JL_KEYS_DIR/rotation-round1.bin"
-    if [[ -f "$MY_ROT_SHARE" && "${JULENNY_FORCE_ROTATION_REGEN:-0}" != "1" ]]; then
+    if [[ -s "$MY_ROT_SHARE" && "${JULENNY_FORCE_ROTATION_REGEN:-0}" != "1" ]]; then
         info "Reusing existing rotation-round1 share at $MY_ROT_SHARE ($(stat -c%s "$MY_ROT_SHARE") bytes)."
     else
         info "Computing ${JL_OUR_LABEL}'s rotation-round1 contribution (lead)..."
@@ -171,7 +171,7 @@ else
     download_peer_share "rotation-round1" "$PEER_SHARE"
 
     MY_ROT_SHARE="$JL_KEYS_DIR/rotation-round1-continue.bin"
-    if [[ -f "$MY_ROT_SHARE" && "${JULENNY_FORCE_ROTATION_REGEN:-0}" != "1" ]]; then
+    if [[ -s "$MY_ROT_SHARE" && "${JULENNY_FORCE_ROTATION_REGEN:-0}" != "1" ]]; then
         info "Reusing existing rotation-round1-continue share at $MY_ROT_SHARE ($(stat -c%s "$MY_ROT_SHARE") bytes)."
     else
         info "Computing ${JL_OUR_LABEL}'s rotation-round1-continue contribution (main)..."

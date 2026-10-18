@@ -112,14 +112,14 @@ fi
 # combine below is skipped, so only insist on the intermediates when there is a
 # combine still to do.
 FINAL_RELIN_PRECHECK="$JL_KEYS_DIR/final_relin_key.bin"
-[[ "$NEEDS_RELIN" != "yes" || -f "$FINAL_RELIN_PRECHECK" || -f "$MY_R2" ]] \
+[[ "$NEEDS_RELIN" != "yes" || -s "$FINAL_RELIN_PRECHECK" || -s "$MY_R2" ]] \
     || die "Missing $MY_R2. Did 02-keysetup-2.sh run?"
 # Same reasoning as the relin intermediates: sum-round-1 is only needed to PRODUCE
 # the final sum key, so a reused joint key that already has it needs nothing.
 FINAL_SUM_PRECHECK="$JL_KEYS_DIR/final_sum_key.bin"
-[[ "$NEEDS_SUM" != "yes" || -f "$FINAL_SUM_PRECHECK" || -f "$MY_SUM" ]] \
+[[ "$NEEDS_SUM" != "yes" || -s "$FINAL_SUM_PRECHECK" || -s "$MY_SUM" ]] \
     || die "Missing $MY_SUM. Did 01-keysetup-1.sh run?"
-[[ "$NEEDS_RELIN" != "yes" || -f "$FINAL_RELIN_PRECHECK" || -f "$COMBINED_R1" ]] \
+[[ "$NEEDS_RELIN" != "yes" || -s "$FINAL_RELIN_PRECHECK" || -s "$COMBINED_R1" ]] \
     || die "Missing $COMBINED_R1. Did 02-keysetup-2.sh run?"
 
 # Joint PK can be at either of two paths depending on prior steps.
@@ -146,8 +146,8 @@ fi
 # skipped when the final key is already on disk. Waiting for a share we will never use
 # deadlocks a reused-joint-key permission whose peer-share cache happens to be empty:
 # the peer walks straight past its own (cached) wait and never re-publishes.
-if [[ "$NEEDS_RELIN" == "yes" && ! -f "$FINAL_RELIN_PRECHECK" ]]; then
-    if [[ ! -f "$PEER_R2" ]]; then
+if [[ "$NEEDS_RELIN" == "yes" && ! -s "$FINAL_RELIN_PRECHECK" ]]; then
+    if [[ ! -s "$PEER_R2" ]]; then
         info "Waiting for ${JL_PEER_LABEL}'s relin-round2 contribution..."
         wait_for_peer_share "relin-round2"
         download_peer_share "relin-round2" "$PEER_R2"
@@ -155,8 +155,8 @@ if [[ "$NEEDS_RELIN" == "yes" && ! -f "$FINAL_RELIN_PRECHECK" ]]; then
         info "Reusing existing peer share: $PEER_R2"
     fi
 fi
-if [[ "$NEEDS_SUM" == "yes" && ! -f "$FINAL_SUM_PRECHECK" ]]; then
-    if [[ ! -f "$PEER_SUM" ]]; then
+if [[ "$NEEDS_SUM" == "yes" && ! -s "$FINAL_SUM_PRECHECK" ]]; then
+    if [[ ! -s "$PEER_SUM" ]]; then
         # Wait rather than download blind. A blind download is fine only while the
         # lead has certainly published first, which is not something this phase can
         # assume.
@@ -176,7 +176,7 @@ FINAL_SUM="$JL_KEYS_DIR/final_sum_key.bin"
 
 if [[ "$NEEDS_RELIN" != "yes" ]]; then
     info "Function does not require a relinearization key; no relin combine."
-elif [[ ! -f "$FINAL_RELIN" ]]; then
+elif [[ ! -s "$FINAL_RELIN" ]]; then
     info "Combining round-2 relin shares -> final relin key..."
     julenny-toolkit crypto relin-combine \
         --context-spec "$JULENNY_CRYPTO_CONTEXT_SPEC" \
@@ -192,7 +192,7 @@ else
 fi
 
 if [[ "$NEEDS_SUM" == "yes" ]]; then
-    if [[ ! -f "$FINAL_SUM" ]]; then
+    if [[ ! -s "$FINAL_SUM" ]]; then
         info "Combining sum-round-1 shares -> final sum key..."
         julenny-toolkit crypto sum-combine \
             --context-spec "$JULENNY_CRYPTO_CONTEXT_SPEC" \

@@ -21,7 +21,7 @@
 ; self-contained build: the Windows App SDK runtime ships inside it and the
 ; customer installs no prerequisites.
 
-#define AppVersion "0.8.0"
+#define AppVersion "0.8.1"
 ; Unpackaged (WindowsPackageType=None, self-contained) WinUI 3 build output (#23).
 #define AppSourceDir "..\..\windows\JuLennyToolkit\x64\Release\JuLennyToolkit"
 

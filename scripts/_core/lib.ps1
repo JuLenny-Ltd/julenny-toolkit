@@ -639,6 +639,14 @@ function Get-JlLocalCollabs {
 
 # The joint key id to use when none was explicitly chosen: CURRENT if it still
 # exists on disk, otherwise the most recently touched collab.
+# A file counts as present only when it exists and is not empty: a step that failed part-way
+# can leave an empty file behind, and reusing it would publish an empty key. Twin of bash -s.
+function Test-JlFileReady {
+    param([Parameter(Mandatory = $true)][string] $Path)
+    if (-not (Test-Path -LiteralPath $Path)) { return $false }
+    return ((Get-Item -LiteralPath $Path).Length -gt 0)
+}
+
 function Get-JlActiveJointKey {
     if (Test-Path -LiteralPath $script:JL_CURRENT_FILE) {
         $current = ([System.IO.File]::ReadAllText($script:JL_CURRENT_FILE)).Trim()
@@ -1064,17 +1072,32 @@ function Get-JlMyDatasetsInProject {
 # Every crypto operation shells out to julenny-toolkit. PowerShell does not fail
 # on a native non-zero exit, so $LASTEXITCODE must be checked every time or a
 # failed encrypt looks like a success and the wrong bytes get uploaded.
+# Runs the CLI with 'Continue' in force: under the library-wide 'Stop', Windows PowerShell turns
+# the CLI's first stderr line into a terminating NativeCommandError, so the run would end on a raw
+# PowerShell trace before the exit code below is ever checked. Output comes back as plain lines.
+function Invoke-JlNativeCli {
+    param([Parameter(Mandatory = $true)][string[]] $CliArgs)
+    $exe = 'julenny-toolkit'
+    if ($env:JULENNY_TOOLKIT_BIN) { $exe = $env:JULENNY_TOOLKIT_BIN }
+    $prev = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        $lines = @(& $exe @CliArgs 2>&1 | ForEach-Object { "$_" })
+    } finally {
+        $ErrorActionPreference = $prev
+    }
+    return [pscustomobject]@{ ExitCode = $LASTEXITCODE; Lines = $lines }
+}
+
 function Invoke-JlCli {
     param(
         [Parameter(Mandatory = $true)][string[]] $CliArgs,
         [switch] $PassThru
     )
-    $exe = 'julenny-toolkit'
-    if ($env:JULENNY_TOOLKIT_BIN) { $exe = $env:JULENNY_TOOLKIT_BIN }
-
-    $output = & $exe @CliArgs 2>&1
-    if ($LASTEXITCODE -ne 0) {
-        Stop-JlWithError ("julenny-toolkit {0} failed (exit {1}):`n{2}" -f ($CliArgs -join ' '), $LASTEXITCODE, ($output -join "`n"))
+    $r = Invoke-JlNativeCli $CliArgs
+    $output = $r.Lines
+    if ($r.ExitCode -ne 0) {
+        Stop-JlWithError ("julenny-toolkit {0} failed (exit {1}):`n{2}" -f ($CliArgs -join ' '), $r.ExitCode, ($output -join "`n"))
     }
     if ($PassThru) { return ($output -join "`n") }
 }
@@ -1083,11 +1106,10 @@ function Invoke-JlCli {
 # skip an item and carry on rather than end the run.
 function Invoke-JlCliAllowFail {
     param([Parameter(Mandatory = $true)][string[]] $CliArgs)
-    $exe = 'julenny-toolkit'
-    if ($env:JULENNY_TOOLKIT_BIN) { $exe = $env:JULENNY_TOOLKIT_BIN }
-    $output = & $exe @CliArgs 2>&1
-    if ($LASTEXITCODE -ne 0) {
-        Write-JlWarn ("julenny-toolkit {0} failed (exit {1}):" -f ($CliArgs -join ' '), $LASTEXITCODE)
+    $r = Invoke-JlNativeCli $CliArgs
+    $output = $r.Lines
+    if ($r.ExitCode -ne 0) {
+        Write-JlWarn ("julenny-toolkit {0} failed (exit {1}):" -f ($CliArgs -join ' '), $r.ExitCode)
         $output | ForEach-Object { Write-Host "    $_" }
         return $false
     }
@@ -3134,14 +3156,14 @@ function Invoke-JlFinalizeKeysetup {
     # combine below is skipped, so demanding the intermediates here refuses a case that
     # works perfectly well. Only insist on them when there is a combine still to do.
     $finalRelinPath = Join-Path $script:JL_KEYS_DIR 'final_relin_key.bin'
-    if ($needsRelin -and -not (Test-Path -LiteralPath $finalRelinPath)) {
+    if ($needsRelin -and -not (Test-JlFileReady $finalRelinPath)) {
         if (-not (Test-Path -LiteralPath $mineR2))     { Stop-JlWithError "Missing $mineR2. Did 02-keysetup-2.ps1 run?" }
         if (-not (Test-Path -LiteralPath $combinedR1)) { Stop-JlWithError "Missing $combinedR1. Did 02-keysetup-2.ps1 run?" }
     }
     # Same reasoning as the relin intermediates above: sum-round-1 is only needed to
     # PRODUCE the final sum key, so a reused joint key that already has it needs nothing.
     $finalSumPath = Join-Path $script:JL_KEYS_DIR 'final_sum_key.bin'
-    if ($needsSum -and -not (Test-Path -LiteralPath $finalSumPath) -and -not (Test-Path -LiteralPath $mineSum)) {
+    if ($needsSum -and -not (Test-JlFileReady $finalSumPath) -and -not (Test-JlFileReady $mineSum)) {
         Stop-JlWithError "Missing $mineSum. Did 01-keysetup-1.ps1 run?"
     }
 
@@ -3171,8 +3193,8 @@ function Invoke-JlFinalizeKeysetup {
     # skipped when the final key is already on disk. Waiting for a share we will never use
     # deadlocks a reused-joint-key permission whose peer-share cache happens to be empty:
     # the peer walks straight past its own (cached) wait and never re-publishes.
-    if ($needsRelin -and -not (Test-Path -LiteralPath $finalRelinPath)) {
-        if (-not (Test-Path -LiteralPath $peerR2)) {
+    if ($needsRelin -and -not (Test-JlFileReady $finalRelinPath)) {
+        if (-not (Test-JlFileReady $peerR2)) {
             Write-JlInfo "Waiting for $($script:JL_PEER_LABEL)'s relin-round2 contribution..."
             Wait-JlPeerShare 'relin-round2'
             Save-JlPeerShare -MessageType 'relin-round2' -OutPath $peerR2
@@ -3180,8 +3202,8 @@ function Invoke-JlFinalizeKeysetup {
             Write-JlInfo "Reusing existing peer share: $peerR2"
         }
     }
-    if ($needsSum -and -not (Test-Path -LiteralPath $finalSumPath)) {
-        if (-not (Test-Path -LiteralPath $peerSum)) {
+    if ($needsSum -and -not (Test-JlFileReady $finalSumPath)) {
+        if (-not (Test-JlFileReady $peerSum)) {
             Write-JlInfo "Waiting for $($script:JL_PEER_LABEL)'s $peerSumMessageType contribution..."
             Wait-JlPeerShare $peerSumMessageType
             Save-JlPeerShare -MessageType $peerSumMessageType -OutPath $peerSum
@@ -3195,7 +3217,7 @@ function Invoke-JlFinalizeKeysetup {
     $finalSum   = Join-Path $script:JL_KEYS_DIR 'final_sum_key.bin'
 
     if ($needsRelin) {
-        if (-not (Test-Path -LiteralPath $finalRelin)) {
+        if (-not (Test-JlFileReady $finalRelin)) {
             Write-JlInfo "Combining round-2 relin shares -> final relin key..."
             Invoke-JlCli @(
                 'crypto', 'relin-combine',
@@ -3215,7 +3237,7 @@ function Invoke-JlFinalizeKeysetup {
     }
 
     if ($needsSum) {
-        if (-not (Test-Path -LiteralPath $finalSum)) {
+        if (-not (Test-JlFileReady $finalSum)) {
             Write-JlInfo "Combining sum-round-1 shares -> final sum key..."
             Invoke-JlCli @(
                 'crypto', 'sum-combine',

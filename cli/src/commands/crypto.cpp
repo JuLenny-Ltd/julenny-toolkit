@@ -72,20 +72,39 @@ values_as_int64(const fhe_toolkit::crypto::PlaintextPacked& pt,
     return pt.values();
 }
 
+// Every output is written to "<name>.partial" first and takes its real name only once it is
+// complete, so a step that fails part-way (out of memory, a full disk) never leaves a file that
+// looks finished. The scripts and the connector skip work whose output already exists.
+void write_file_safely(const std::filesystem::path& path, const char* data, std::size_t size,
+                       bool binary) {
+    auto partial = path;
+    partial += ".partial";
+    std::error_code ignored;
+    {
+        std::ofstream out(partial, binary ? (std::ios::binary | std::ios::trunc) : std::ios::trunc);
+        if (!out) throw std::runtime_error("cannot open for writing: " + path.string());
+        out.write(data, static_cast<std::streamsize>(size));
+        out.close();
+        if (!out) {
+            std::filesystem::remove(partial, ignored);
+            throw std::runtime_error("write failed (is the disk full?): " + path.string());
+        }
+    }
+    std::error_code ec;
+    std::filesystem::rename(partial, path, ec);
+    if (ec) {
+        std::filesystem::remove(partial, ignored);
+        throw std::runtime_error("write failed: " + path.string() + ": " + ec.message());
+    }
+}
+
 void write_bytes(const std::filesystem::path& path,
                  std::span<const std::byte> bytes) {
-    std::ofstream out(path, std::ios::binary | std::ios::trunc);
-    if (!out) throw std::runtime_error("cannot open for writing: " + path.string());
-    out.write(reinterpret_cast<const char*>(bytes.data()),
-              static_cast<std::streamsize>(bytes.size()));
-    if (!out) throw std::runtime_error("write failed: " + path.string());
+    write_file_safely(path, reinterpret_cast<const char*>(bytes.data()), bytes.size(), true);
 }
 
 void write_text(const std::filesystem::path& path, const std::string& s) {
-    std::ofstream out(path, std::ios::trunc);
-    if (!out) throw std::runtime_error("cannot open for writing: " + path.string());
-    out << s;
-    if (!out) throw std::runtime_error("write failed: " + path.string());
+    write_file_safely(path, s.data(), s.size(), false);
 }
 
 std::vector<std::byte> read_bytes(const std::filesystem::path& path) {
@@ -2855,10 +2874,8 @@ int run_crypto_combine(const CryptoCombineArgs& args) {
             }
             std::filesystem::path op(args.out_file_path);
             if (op.has_parent_path()) std::filesystem::create_directories(op.parent_path());
-            std::ofstream of(op, std::ios::trunc);
-            if (!of) { std::cerr << "error: cannot open --out-file: " << args.out_file_path << "\n"; return 1; }
-            of << result.dump(2) << "\n";
-            if (!of) { std::cerr << "error: write failed: " << args.out_file_path << "\n"; return 1; }
+            try { write_text(op, result.dump(2) + "\n"); }
+            catch (const std::exception& e) { std::cerr << "error: " << e.what() << "\n"; return 1; }
             if (args.emit_json) {
                 json ref;
                 ref["status"]           = "ok";
@@ -2928,10 +2945,8 @@ int run_crypto_combine(const CryptoCombineArgs& args) {
             result["answer"] = total;
             std::filesystem::path op(args.out_file_path);
             if (op.has_parent_path()) std::filesystem::create_directories(op.parent_path());
-            std::ofstream of(op, std::ios::trunc);
-            if (!of) { std::cerr << "error: cannot open --out-file: " << args.out_file_path << "\n"; return 1; }
-            of << result.dump(2) << "\n";
-            if (!of) { std::cerr << "error: write failed: " << args.out_file_path << "\n"; return 1; }
+            try { write_text(op, result.dump(2) + "\n"); }
+            catch (const std::exception& e) { std::cerr << "error: " << e.what() << "\n"; return 1; }
             if (args.emit_json) {
                 json ref;
                 ref["status"]           = "ok";
@@ -3009,10 +3024,8 @@ int run_crypto_combine(const CryptoCombineArgs& args) {
         }
         std::filesystem::path op(args.out_file_path);
         if (op.has_parent_path()) std::filesystem::create_directories(op.parent_path());
-        std::ofstream of(op, std::ios::trunc);
-        if (!of) { std::cerr << "error: cannot open --out-file: " << args.out_file_path << "\n"; return 1; }
-        of << result.dump(2) << "\n";
-        if (!of) { std::cerr << "error: write failed: " << args.out_file_path << "\n"; return 1; }
+        try { write_text(op, result.dump(2) + "\n"); }
+        catch (const std::exception& e) { std::cerr << "error: " << e.what() << "\n"; return 1; }
         if (args.emit_json) {
             json ref;
             ref["status"]           = "ok";
@@ -3389,17 +3402,10 @@ int run_crypto_resolve_rules(const CryptoResolveRulesArgs& args) {
 
     std::filesystem::path op(args.output_path);
     if (op.has_parent_path()) std::filesystem::create_directories(op.parent_path());
-    std::ofstream of(op, std::ios::trunc);
-    if (!of) {
-        std::cerr << "error: cannot open --output: " << args.output_path << "\n";
-        return 1;
-    }
-    for (const auto& m : matched) of << m << "\n";
-    if (!of) {
-        std::cerr << "error: write failed: " << args.output_path << "\n";
-        return 1;
-    }
-    of.close();
+    std::string lines;
+    for (const auto& m : matched) { lines += m; lines += "\n"; }
+    try { write_text(op, lines); }
+    catch (const std::exception& e) { std::cerr << "error: " << e.what() << "\n"; return 1; }
 
     if (args.emit_json) {
         json out;
@@ -3612,13 +3618,12 @@ int encrypt_bundle(const std::string& input_path,
     const fs::path out_path(output_path);
     if (out_path.has_parent_path()) std::filesystem::create_directories(out_path.parent_path());
     {
-        std::ofstream out(out_path, std::ios::binary | std::ios::trunc);
-        if (!out) { std::cerr << "error: cannot open output: " << output_path << "\n"; return 1; }
-        for (const auto& line : header_lines) { out << line << "\n"; }
-        out << "PAYLOAD\n";
-        out.write(reinterpret_cast<const char*>(payload.data()),
-                  static_cast<std::streamsize>(payload.size()));
-        if (!out) { std::cerr << "error: write failed: " << output_path << "\n"; return 1; }
+        std::string bundle;
+        for (const auto& line : header_lines) { bundle += line; bundle += "\n"; }
+        bundle += "PAYLOAD\n";
+        bundle.append(reinterpret_cast<const char*>(payload.data()), payload.size());
+        try { write_file_safely(out_path, bundle.data(), bundle.size(), true); }
+        catch (const std::exception& e) { std::cerr << "error: " << e.what() << "\n"; return 1; }
     }
 
     if (emit_json) {

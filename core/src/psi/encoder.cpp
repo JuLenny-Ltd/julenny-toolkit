@@ -183,6 +183,32 @@ std::vector<Digest> read_digests(const fs::path& input, char separator, const st
     return digests;
 }
 
+// Writes through "<name>.partial" and renames it into place only once complete, so an encode that
+// fails part-way (out of memory, a full disk) never leaves a file that looks finished and could be
+// uploaded. `fill` streams the content into the open file.
+template <typename Fill>
+void write_safely(const fs::path& path, std::ios::openmode mode, Fill fill) {
+    auto partial = path;
+    partial += ".partial";
+    std::error_code ignored;
+    {
+        std::ofstream out(partial, mode | std::ios::trunc);
+        if (!out) throw EncodeError("cannot open for writing: " + path.string(), false);
+        fill(out);
+        out.close();
+        if (!out) {
+            fs::remove(partial, ignored);
+            throw EncodeError("write failed (is the disk full?): " + path.string(), false);
+        }
+    }
+    std::error_code ec;
+    fs::rename(partial, path, ec);
+    if (ec) {
+        fs::remove(partial, ignored);
+        throw EncodeError("write failed: " + path.string() + ": " + ec.message(), false);
+    }
+}
+
 }  // namespace
 
 RecordCount count_records(const fs::path& input, char separator, const std::vector<int>& columns,
@@ -417,13 +443,10 @@ EncodeResult encode_signature_table(const EncodeRequest& given) {
         const auto payload = ctx.serialize_ciphertext_vector(cts);
         const std::string header = bundle_header(shard_layout, role);
         const fs::path path = shard_path(p);
-        {
-            std::ofstream out(path, std::ios::binary | std::ios::trunc);
-            if (!out) throw EncodeError("cannot open for writing: " + path.string(), false);
+        write_safely(path, std::ios::binary, [&](std::ofstream& out) {
             out.write(header.data(), static_cast<std::streamsize>(header.size()));
             out.write(reinterpret_cast<const char*>(payload.data()), static_cast<std::streamsize>(payload.size()));
-            if (!out) throw EncodeError("write failed: " + path.string(), false);
-        }
+        });
         r.files.push_back(path);
         const std::uint64_t shard_bytes = header.size() + payload.size();
         r.bytes += shard_bytes;
@@ -472,10 +495,7 @@ EncodeResult encode_signature_table(const EncodeRequest& given) {
     };
 
     const auto write_json = [](const fs::path& path, const json& doc) {
-        std::ofstream f(path, std::ios::trunc);
-        if (!f) throw EncodeError("cannot write " + path.string(), false);
-        f << doc.dump(2) << "\n";
-        if (!f) throw EncodeError("write failed: " + path.string(), false);
+        write_safely(path, std::ios::out, [&](std::ofstream& f) { f << doc.dump(2) << "\n"; });
     };
     r.platform_report_path = out_path.parent_path() / (out_path.filename().string() + ".platform-report.json");
     write_json(r.platform_report_path, r.platform_report);

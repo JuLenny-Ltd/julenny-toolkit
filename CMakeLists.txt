@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.24)
 
 project(fhe_toolkit
-    VERSION     0.8.0
+    VERSION     0.8.1
     DESCRIPTION "JuLenny Toolkit - customer-side client for the JuLenny platform"
     LANGUAGES   CXX
 )

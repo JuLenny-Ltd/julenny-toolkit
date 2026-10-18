@@ -143,7 +143,7 @@ $forceRegen = ($env:JULENNY_FORCE_ROTATION_REGEN -eq '1')
 
 if (Test-JlAmKeysetupLead) {
     $myRotShare = Join-Path $script:JL_KEYS_DIR 'rotation-round1.bin'
-    if ((Test-Path -LiteralPath $myRotShare) -and (-not $forceRegen)) {
+    if ((Test-JlFileReady $myRotShare) -and (-not $forceRegen)) {
         Write-JlInfo "Reusing existing rotation-round1 share at $myRotShare ($((Get-Item -LiteralPath $myRotShare).Length) bytes)."
     } else {
         Write-JlInfo "Computing $($script:JL_OUR_LABEL)'s rotation-round1 contribution (lead)..."
@@ -175,7 +175,7 @@ if (Test-JlAmKeysetupLead) {
     Save-JlPeerShare -MessageType 'rotation-round1' -OutPath $peerShare
 
     $myRotShare = Join-Path $script:JL_KEYS_DIR 'rotation-round1-continue.bin'
-    if ((Test-Path -LiteralPath $myRotShare) -and (-not $forceRegen)) {
+    if ((Test-JlFileReady $myRotShare) -and (-not $forceRegen)) {
         Write-JlInfo "Reusing existing continue share at $myRotShare ($((Get-Item -LiteralPath $myRotShare).Length) bytes)."
     } else {
         Write-JlInfo "Computing $($script:JL_OUR_LABEL)'s rotation-round1-continue contribution (main)..."
